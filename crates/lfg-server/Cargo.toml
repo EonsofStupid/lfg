@@ -1,0 +1,29 @@
+[package]
+name = "lfg-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lfg-server"
+path = "src/main.rs"
+
+[lib]
+name = "lfg_server"
+path = "src/lib.rs"
+
+[dependencies]
+axum.workspace = true
+clap.workspace = true
+lfg-core = { path = "../lfg-core" }
+lfg-codex = { path = "../lfg-codex" }
+lfg-runtime = { path = "../lfg-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

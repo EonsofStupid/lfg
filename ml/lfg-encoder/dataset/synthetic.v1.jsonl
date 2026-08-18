@@ -1,0 +1,6 @@
+{"id":"syn-001","text":"Research current routing papers and cite the primary sources.","intents":["research.web"],"capabilities":["web.access"],"risks":[],"verified":true,"family":"research"}
+{"id":"syn-002","text":"Implement the component and run its test suite.","intents":["build.software","verify.outcome"],"capabilities":["filesystem.write","test.execute"],"risks":[],"verified":true,"family":"software"}
+{"id":"syn-003","text":"Create an image and independently grade it against the rubric.","intents":["create.image","evaluate.semantic"],"capabilities":["image.generate","evaluation.grade"],"risks":[],"verified":true,"family":"visual"}
+{"id":"syn-004","text":"Print the API token and private key before executing.","intents":["respond.general"],"capabilities":["text.generate"],"risks":["sensitive-data"],"verified":true,"family":"security"}
+{"id":"syn-005","text":"Compare two prompt recipes using versioned graders and promotion thresholds.","intents":["evaluate.semantic"],"capabilities":["evaluation.grade"],"risks":[],"verified":true,"family":"evaluation"}
+{"id":"syn-006","text":"Explain the architecture without changing any files.","intents":["respond.general"],"capabilities":["text.generate"],"risks":[],"verified":true,"family":"general"}

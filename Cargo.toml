@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lfg-core",
+    "crates/lfg-codex",
+    "crates/lfg-runtime",
+    "crates/lfg-server",
+]
+default-members = ["crates/lfg-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+axum = { version = "0.8", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
+uuid = { version = "1", features = ["serde", "v4"] }

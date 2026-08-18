@@ -1,0 +1,15 @@
+# Rust build output
+/target/
+**/target/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# chatmirror — local AI session mirrors (never commit: may contain tokens)
+.chat/
+
+# env
+.env
+.env.*

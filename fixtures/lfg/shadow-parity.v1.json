@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "lfg.shadow-parity.v1",
+  "fixtureId": "mixed-workflow-alpha",
+  "prompt": "Research, implement, test, and grade an image workflow",
+  "legacyContract": "GoClyffy lfg/v0.2",
+  "authoritativeContract": "MasterClyffy lfg/v0.3",
+  "expected": {
+    "workspaceId": "clyffy.master",
+    "agentCount": 5,
+    "taskCount": 5,
+    "capabilities": [
+      "evaluation.grade",
+      "filesystem.write",
+      "image.generate",
+      "test.execute",
+      "web.access"
+    ],
+    "providerNeutralAgents": true,
+    "planBeforeBinding": true,
+    "hashChainedSignals": true,
+    "rawPromptPersisted": false
+  }
+}

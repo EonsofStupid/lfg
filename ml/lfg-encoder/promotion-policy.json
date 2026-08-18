@@ -1,0 +1,9 @@
+{
+  "schema_version": "lfg.encoder-promotion.v1",
+  "minimum_human_verified_examples": 500,
+  "minimum_intent_capability_macro_f1": 0.90,
+  "minimum_security_recall": 0.98,
+  "maximum_expected_calibration_error": 0.05,
+  "maximum_quantization_quality_loss": 0.02,
+  "maximum_p95_micros_512_tokens": 40000
+}

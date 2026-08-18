@@ -1,0 +1,204 @@
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
+
+import { classify, commitPlan, getGraph, getStatus, preflight } from './api'
+import { layoutGraph } from './graph'
+import { ParticleLayer } from './ParticleLayer'
+import { PromptBranchView } from './PromptBranchView'
+import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
+
+const DEFAULT_PROMPT = 'Research cutting-edge agent routing, implement the visual system, test it, and independently grade the result.'
+const SESSION_ID = `browser-${crypto.randomUUID()}`
+const GraphCanvas = lazy(() => import('./GraphCanvas'))
+
+type Mode = 'guided' | 'inspector'
+
+// Automaton's own canonical provider ids (docs/14-frontier-roster.md) — LFG
+// doesn't invent parallel naming. Real seat activation (OAuth/subscription
+// detection) lives in Automaton; until that's wired up, these are a manual
+// stand-in the operator toggles themselves.
+const SUBSCRIPTIONS: { id: string; label: string }[] = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'codex', label: 'OpenAI' },
+  { id: 'grok', label: 'Grok' },
+  { id: 'cursor', label: 'Cursor' }
+]
+
+export default function App() {
+  const [status, setStatus] = useState<RuntimeStatus | null>(null)
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [revision, setRevision] = useState(1)
+  const [preview, setPreview] = useState<PreflightSnapshot | null>(null)
+  const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
+  const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
+  const [routingNeed, setRoutingNeed] = useState<RoutingNeed>('balanced')
+  const [overrideTarget, setOverrideTarget] = useState<EscalationTarget | null>(null)
+  const [commit, setCommit] = useState<PlanCommit | null>(null)
+  const [graph, setGraph] = useState<GraphSnapshot | null>(null)
+  const [flow, setFlow] = useState<Awaited<ReturnType<typeof layoutGraph>>>({ nodes: [], edges: [] })
+  const [selected, setSelected] = useState<GraphNode | null>(null)
+  const [mode, setMode] = useState<Mode>('guided')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [cursor, setCursor] = useState(0)
+  const requestRevision = useRef(0)
+  const classifyRevision = useRef(0)
+  const publicEmbed = new URLSearchParams(window.location.search).get('embed') === 'public'
+
+  useEffect(() => { void getStatus().then(setStatus).catch((value: Error) => setError(value.message)) }, [])
+
+  useEffect(() => {
+    const text = prompt.trim()
+    if (!text) { setPreview(null); return }
+    const current = ++requestRevision.current
+    const timer = window.setTimeout(() => {
+      void preflight(SESSION_ID, revision, text).then((value) => {
+        if (requestRevision.current === current) setPreview(value)
+      }).catch((value: Error) => setError(value.message))
+    }, 140)
+    return () => window.clearTimeout(timer)
+  }, [prompt, revision])
+
+  useEffect(() => {
+    const text = prompt.trim()
+    if (!text) { setClassification(null); return }
+    const current = ++classifyRevision.current
+    const timer = window.setTimeout(() => {
+      void classify(SESSION_ID, revision, text, activeSubscriptions, routingNeed).then((value) => {
+        if (classifyRevision.current === current) setClassification(value)
+      }).catch((value: Error) => setError(value.message))
+    }, 140)
+    return () => window.clearTimeout(timer)
+  }, [prompt, revision, activeSubscriptions, routingNeed])
+
+  const toggleSubscription = useCallback((id: string) => {
+    setActiveSubscriptions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
+  }, [])
+
+  useEffect(() => {
+    if (!graph) { setFlow({ nodes: [], edges: [] }); return }
+    void layoutGraph(graph).then(setFlow)
+  }, [graph])
+
+  useEffect(() => {
+    if (!commit) return
+    const source = new EventSource(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(commit.workflowId)}/stream`)
+    source.addEventListener('lfg.signal', () => { void getGraph(commit.workflowId).then((next) => { setGraph(next); setCursor(next.throughSequence) }) })
+    return () => source.close()
+  }, [commit])
+
+  const handleCommit = useCallback(async () => {
+    if (!prompt.trim() || busy) return
+    setBusy(true); setError(null); setSelected(null)
+    try {
+      const result = await commitPlan(SESSION_ID, revision, prompt.trim())
+      setCommit(result); setGraph(result.graph); setCursor(result.graph.throughSequence)
+    } catch (value) {
+      setError(value instanceof Error ? value.message : 'Plan compilation failed')
+    } finally { setBusy(false) }
+  }, [prompt, revision, busy])
+
+  const handleReplay = useCallback(async (value: number) => {
+    if (!commit) return
+    setCursor(value)
+    setGraph(await getGraph(commit.workflowId, value))
+  }, [commit])
+
+  const displayedTotals = graph?.totals ?? { predicted: preview?.predictedAgents ?? 0, committed: 0, queued: 0, active: 0, blocked: 0, completed: 0, failed: 0 }
+  const narrative = useMemo(() => guidedNarrative(preview, graph), [preview, graph])
+
+  return (
+    <div className={`lfg-shell ${publicEmbed ? 'is-embed' : ''}`}>
+      <header className="masthead">
+        <div className="brand-lockup"><span className="brand-mark">MC</span><div><strong>MasterClyffy</strong><span>Rust-authoritative LFG lab</span></div></div>
+        {!publicEmbed && <div className="mode-switch" role="group" aria-label="View mode">
+          <button className={mode === 'guided' ? 'is-active' : ''} onClick={() => setMode('guided')}>Guided</button>
+          <button className={mode === 'inspector' ? 'is-active' : ''} onClick={() => setMode('inspector')}>Inspector</button>
+        </div>}
+        <span className="runtime-state"><i />{status?.phase ?? 'connecting'}</span>
+      </header>
+
+      <main>
+        <section className="composer" aria-labelledby="prompt-label">
+          <motion.div className="type-callout" animate={{ x: [0, 8, 0] }} transition={{ duration: 2.4, repeat: Infinity }}>
+            <span>TYPE HERE</span><b>↘</b>
+          </motion.div>
+          <div className="composer-heading"><div><p className="eyebrow">PROMPT SIGNAL INTAKE</p><h1 id="prompt-label">Watch a team compile itself.</h1></div><span className="privacy-pill">MEMORY ONLY · CPU PREFLIGHT</span></div>
+          <textarea value={prompt} maxLength={12000} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" />
+          <div className="composer-footer">
+            <button className="commit-button" onClick={handleCommit} disabled={busy || !prompt.trim()}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
+            <span>{prompt.length.toLocaleString()} / 12,000</span>
+            <span>{preview ? `${(preview.durationMicros / 1000).toFixed(3)} ms CPU` : 'waiting for signal'}</span>
+            <span>{preview?.mode ?? status?.encoder.id ?? 'encoder unavailable'}</span>
+            <span>{status ? `${status.liveProviders} live · ${status.configuredProviders} ready to probe · ${status.fixtureProviders} fixtures` : 'provider inventory loading'}</span>
+          </div>
+          <div className="subscription-row" role="group" aria-label="Active subscriptions">
+            <span className="subscription-row-label">Active subscriptions</span>
+            {SUBSCRIPTIONS.map((subscription) => (
+              <button
+                key={subscription.id}
+                className={activeSubscriptions.includes(subscription.id) ? 'is-active' : ''}
+                onClick={() => toggleSubscription(subscription.id)}
+                title={activeSubscriptions.includes(subscription.id) ? `${subscription.label} is active — its models are selectable` : `${subscription.label} is not active — activate to select its models`}
+              >
+                {subscription.label}
+              </button>
+            ))}
+            <span className="subscription-row-note">stand-in for Automaton seat detection — not yet wired to real OAuth</span>
+          </div>
+          {error && <p className="error-message" role="alert">{error}</p>}
+        </section>
+
+        <section className="signal-strip" aria-label="Live routing tallies">
+          <Metric label="Predicted" value={preview?.predictedAgents ?? 0} detail="advisory while typing" />
+          <Metric label="Committed" value={displayedTotals.committed} detail="from canonical events" />
+          <Metric label="Branches" value={preview?.predictedBranches ?? 0} detail="natural task fan-out" />
+          <Metric label="CPU" value={preview ? `${(preview.durationMicros / 1000).toFixed(2)}ms` : '—'} detail="measured, not estimated" />
+        </section>
+
+        <section className="graph-stage" aria-label={graph ? 'LFG committed routing graph' : 'LFG live category branches'}>
+          {graph ? (
+            <>
+              <ParticleLayer pulse={graph.throughSequence + flow.nodes.length} />
+              <Suspense fallback={<div className="empty-graph">Materializing committed signal graph…</div>}><GraphCanvas nodes={flow.nodes} edges={flow.edges} onSelect={setSelected} /></Suspense>
+              {mode === 'guided' && <motion.aside key={narrative} className="guided-overlay" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}><span>WHAT JUST HAPPENED</span><p>{narrative}</p></motion.aside>}
+            </>
+          ) : (
+            <PromptBranchView
+              snapshot={classification}
+              routingNeed={routingNeed}
+              onRoutingNeedChange={setRoutingNeed}
+              overrideTarget={overrideTarget}
+              onOverride={setOverrideTarget}
+            />
+          )}
+        </section>
+
+        {commit && <section className="replay-bar">
+          <div><span>SIGNAL REPLAY</span><strong>{cursor + 1} / {commit.committedSignals}</strong></div>
+          <input aria-label="Replay sequence" type="range" min="0" max={Math.max(commit.committedSignals - 1, 0)} value={cursor} onChange={(event) => void handleReplay(Number(event.target.value))} />
+          <code>{commit.workflowId}</code>
+        </section>}
+
+        {!publicEmbed && <AnimatePresence>{selected && <Inspector node={selected} onClose={() => setSelected(null)} />}</AnimatePresence>}
+      </main>
+    </div>
+  )
+}
+
+function Metric({ label, value, detail }: { label: string; value: string | number; detail: string }) {
+  return <article><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>
+}
+
+function Inspector({ node, onClose }: { node: GraphNode; onClose: () => void }) {
+  return <motion.aside className="inspector" initial={{ opacity: 0, x: 40 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 40 }}>
+    <button onClick={onClose} aria-label="Close inspector">×</button><p className="eyebrow">GRAPH EVIDENCE</p><h2>{node.label}</h2><dl><div><dt>ID</dt><dd><code>{node.id}</code></dd></div><div><dt>State</dt><dd>{node.state}</dd></div><div><dt>Provenance</dt><dd>{node.provenance}</dd></div>{Object.entries(node.metadata).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{value}</code></dd></div>)}</dl>
+  </motion.aside>
+}
+
+function guidedNarrative(preview: PreflightSnapshot | null, graph: GraphSnapshot | null): string {
+  if (graph) return `The route is committed. ${graph.totals.committed} agent${graph.totals.committed === 1 ? '' : 's'} and every provider connection shown here were reconstructed from ${graph.throughSequence + 1} validated events.`
+  if (preview?.risks.length) return 'A deterministic policy signal detected sensitive-data language. It remains advisory here, but the security gate is authoritative when the plan is committed.'
+  if (preview) return `The CPU preflight detected ${preview.rros.length} dynamic context categories and predicts ${preview.predictedAgents} specialist agents. Nothing has been committed or sent to a provider yet.`
+  return 'Your prompt becomes CPU signals first. The graph will grow only when the Rust runtime can explain each branch.'
+}
