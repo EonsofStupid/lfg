@@ -192,10 +192,7 @@ pub fn validate_signal_stream(signals: &[SignalEnvelope]) -> Result<(), Protocol
     let mut tails: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
     for signal in signals {
         signal.validate()?;
-        check_continuation(
-            tails.get(signal.data.workflow_id.as_str()).copied(),
-            signal,
-        )?;
+        check_continuation(tails.get(signal.data.workflow_id.as_str()).copied(), signal)?;
         tails.insert(
             signal.data.workflow_id.as_str(),
             (signal.data.sequence, signal.data.event_hash.as_str()),
@@ -928,9 +925,11 @@ pub fn select_escalation(
     active_subscriptions: &[String],
     routing_need: &str,
 ) -> Option<EscalationTarget> {
-    let available = catalog
-        .iter()
-        .filter(|target| active_subscriptions.iter().any(|id| id == &target.subscription_id));
+    let available = catalog.iter().filter(|target| {
+        active_subscriptions
+            .iter()
+            .any(|id| id == &target.subscription_id)
+    });
     match routing_need {
         "capability" => available.max_by(|a, b| a.raw_capability.total_cmp(&b.raw_capability)),
         "efficiency" => {
@@ -1216,8 +1215,11 @@ pub struct ClassificationSnapshot {
 
 pub trait CategoryClassifier: Send + Sync {
     fn manifest(&self) -> ManifestRef;
-    fn classify(&self, request: &ClassifyRequest, config: &ClassifierConfig)
-    -> ClassificationSnapshot;
+    fn classify(
+        &self,
+        request: &ClassifyRequest,
+        config: &ClassifierConfig,
+    ) -> ClassificationSnapshot;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1659,10 +1661,8 @@ fn reject_forbidden_content(value: &Value, path: &str) -> Result<(), ProtocolErr
                 reject_forbidden_content(nested, &format!("{path}[{index}]"))?;
             }
         }
-        Value::String(text) => {
-            if looks_like_credential(text) {
-                return Err(ProtocolError::ForbiddenContent(path.to_owned()));
-            }
+        Value::String(text) if looks_like_credential(text) => {
+            return Err(ProtocolError::ForbiddenContent(path.to_owned()));
         }
         _ => {}
     }
@@ -1671,7 +1671,16 @@ fn reject_forbidden_content(value: &Value, path: &str) -> Result<(), ProtocolErr
 
 fn looks_like_credential(text: &str) -> bool {
     const PREFIXES: &[&str] = &[
-        "sk-", "AKIA", "AIza", "ya29.", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "-----BEGIN",
+        "sk-",
+        "AKIA",
+        "AIza",
+        "ya29.",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "-----BEGIN",
     ];
     PREFIXES.iter().any(|prefix| text.starts_with(prefix))
 }
@@ -1856,7 +1865,11 @@ mod tests {
         assert!(snapshot.needs_bigger_model);
         assert!(!snapshot.escalation_catalog.is_empty());
         assert!(snapshot.predicted_subagents >= 2);
-        let sum: f64 = snapshot.categories.iter().map(|category| category.percent).sum();
+        let sum: f64 = snapshot
+            .categories
+            .iter()
+            .map(|category| category.percent)
+            .sum();
         assert!((sum - 100.0).abs() < 0.5);
 
         // Only claude is active: sonnet-5 is the happy-medium pick among the
@@ -1901,13 +1914,21 @@ mod tests {
             "cursor".to_owned(),
         ];
 
-        let capability = select_escalation(&config.escalation_catalog, &all_subscriptions, "capability").unwrap();
+        let capability =
+            select_escalation(&config.escalation_catalog, &all_subscriptions, "capability")
+                .unwrap();
         assert_eq!(capability.model, "opus-5");
 
-        let efficiency = select_escalation(&config.escalation_catalog, &all_subscriptions, "efficiency").unwrap();
-        assert_eq!((efficiency.provider.as_str(), efficiency.model.as_str()), ("xai", "grok-4.6"));
+        let efficiency =
+            select_escalation(&config.escalation_catalog, &all_subscriptions, "efficiency")
+                .unwrap();
+        assert_eq!(
+            (efficiency.provider.as_str(), efficiency.model.as_str()),
+            ("xai", "grok-4.6")
+        );
 
-        let cost = select_escalation(&config.escalation_catalog, &all_subscriptions, "cost").unwrap();
+        let cost =
+            select_escalation(&config.escalation_catalog, &all_subscriptions, "cost").unwrap();
         assert_eq!(cost.cost_tier, "low");
 
         // Nothing active at all: every dimension comes back empty, never a

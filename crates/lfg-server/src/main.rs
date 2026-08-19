@@ -6,7 +6,10 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
-#[command(name = "lfg-server", about = "LFG prompt-recipe encoder + routing service")]
+#[command(
+    name = "lfg-server",
+    about = "LFG prompt-recipe encoder + routing service"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
