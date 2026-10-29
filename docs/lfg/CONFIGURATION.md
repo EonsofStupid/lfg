@@ -14,6 +14,7 @@ automatically.
 | Runtime provider inventory and explicit replay fixtures | [`providers.v1.json`](../../crates/lfg-runtime/config/providers.v1.json) | `LFG_PROVIDER_CONFIG` |
 | Semantic evaluation rubric | [`evaluation-rubric.v1.json`](../../crates/lfg-core/config/evaluation-rubric.v1.json) | `LFG_EVALUATION_RUBRIC` |
 | Runtime promotion thresholds | [`promotion-policy.v1.json`](../../crates/lfg-core/config/promotion-policy.v1.json) | `LFG_PROMOTION_POLICY` |
+| Request and signal limits, server defaults, event streaming, benchmark limits, and UI polling | [`operations.v1.json`](../../crates/lfg-runtime/config/operations.v1.json) | `LFG_OPERATIONS_CONFIG` |
 
 Copy a file to a project-controlled location, modify it, and set the relevant
 environment variable to its path before starting the server. The benchmark uses
@@ -56,12 +57,20 @@ provider-specific verified capabilities and effort settings, update signing and
 distribution, measured CPU-cycle telemetry, MCP exposure, and RRFlow/SWAG
 integration remain to be built and tested.
 
-This configuration pass does not yet cover every operational setting. The
-current server and runtime still contain fixed input-size and signal-page
-limits, and the UI still contains fixed polling and display settings. Those
-need an explicit configuration and compatibility pass before the project can
-claim that all operator-tunable behavior is configurable. Protocol constants
-and mathematical operations are separate from operator-tunable policy.
+The [operational configuration plan](OPERATIONAL-CONFIGURATION-PLAN.md) sets
+out the limits and UI settings covered by the current pass. Status exposes the
+effective operations revision, values, and digest; clients must understand the
+`lfg.operations.v1` object. The server and UI apply the same UTF-8 byte limit,
+and the HTTP-body limit separately includes JSON framing and escaping. The
+signal page size bounds returned results, not the work of loading the store.
+CLI `--bind` and `--iterations` override their configured defaults; the benchmark
+also accepts `--prompt-file` instead of its bundled fixture. The benchmark is
+not a CPU-cycle qualification.
+
+These files cover the documented controls, not an assurance that every behavior
+in the repository has already been made configurable. Protocol constants,
+mathematical identities, and visual styling are distinct from operator-tunable
+policy; future controls require an explicit ownership and validation decision.
 
 An experiment cannot mix semantic grades produced by different rubric hashes;
 changing the rubric requires a new experiment (or restoring the original

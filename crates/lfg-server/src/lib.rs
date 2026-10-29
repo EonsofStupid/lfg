@@ -4,7 +4,7 @@ use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -17,8 +17,8 @@ use lfg_core::{
     PromotionDecisionRequest, PromotionPolicy, SemanticGrade, SemanticGradeRequest, SignalEnvelope,
 };
 use lfg_runtime::{
-    CommitPlanRequest, ExecutionMetrics, LfgRuntime, PlanCommit, ProviderInventoryConfig,
-    RuntimeError, RuntimeSignalStore, RuntimeStatus,
+    CommitPlanRequest, ExecutionMetrics, LfgRuntime, OperationsConfig, PlanCommit,
+    ProviderInventoryConfig, RuntimeError, RuntimeSignalStore, RuntimeStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,11 +31,17 @@ pub struct AppState {
     lfg_events: broadcast::Sender<SignalEnvelope>,
     codex: CodexRunner,
     classifier_config: Arc<ClassifierConfig>,
+    operations: OperationsConfig,
 }
 
 impl AppState {
+    pub fn operations(&self) -> &OperationsConfig {
+        &self.operations
+    }
+
     pub fn new() -> Self {
-        let (lfg_events, _) = broadcast::channel(512);
+        let operations = OperationsConfig::default();
+        let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Self {
             lfg: Arc::new(Mutex::new(LfgRuntime::new(RuntimeSignalStore::memory()))),
             lfg_events,
@@ -43,6 +49,7 @@ impl AppState {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             classifier_config: Arc::new(ClassifierConfig::default_alpha()),
+            operations,
         }
     }
 
@@ -60,7 +67,10 @@ impl AppState {
             .map_err(|error| RuntimeError::InvalidRequest(format!("evaluation rubric: {error}")))?;
         let policy = load_promotion_policy()
             .map_err(|error| RuntimeError::InvalidRequest(format!("promotion policy: {error}")))?;
-        let (lfg_events, _) = broadcast::channel(512);
+        let operations = configured_operations().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("operational configuration: {error}"))
+        })?;
+        let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Ok(Self {
             lfg: Arc::new(Mutex::new(LfgRuntime::with_configuration(
                 RuntimeSignalStore::jsonl(signal_path)?,
@@ -68,14 +78,25 @@ impl AppState {
                 inventory,
                 rubric,
                 policy,
+                operations.clone(),
             ))),
             lfg_events,
             codex: CodexRunner::from_environment(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             classifier_config: Arc::new(classifier_config),
+            operations,
         })
     }
+}
+
+pub fn configured_operations() -> Result<OperationsConfig, String> {
+    let Some(path) = std::env::var_os("LFG_OPERATIONS_CONFIG") else {
+        return Ok(OperationsConfig::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    OperationsConfig::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
 }
 
 fn load_evaluation_rubric() -> Result<EvaluationRubric, String> {
@@ -144,6 +165,7 @@ struct HealthResponse {
 }
 
 pub fn router(state: AppState) -> Router {
+    let max_http_body_bytes = state.operations.max_http_body_bytes();
     Router::new()
         .route("/health", get(health))
         .route("/api/shippin/intelligence/lfg/status", get(lfg_status))
@@ -187,6 +209,7 @@ pub fn router(state: AppState) -> Router {
             get(lfg_promotions).post(lfg_decide_promotion),
         )
         .route("/api/lfg/classify", post(lfg_classify))
+        .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
 }
 
@@ -194,13 +217,10 @@ async fn lfg_classify(
     State(state): State<AppState>,
     Json(request): Json<ClassifyRequest>,
 ) -> Result<Json<ClassificationSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    if request.session_id.trim().is_empty() || request.text.len() > 12_000 {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "sessionId and up to 12,000 characters of text are required",
-        ));
-    }
+    state
+        .operations
+        .validate_prompt(&request.session_id, &request.text)
+        .map_err(lfg_error)?;
     Ok(Json(
         CpuCategoryClassifier.classify(&request, &state.classifier_config),
     ))
@@ -274,6 +294,10 @@ async fn lfg_run_codex(
     State(state): State<AppState>,
     Json(request): Json<CodexRunRequest>,
 ) -> Result<(StatusCode, Json<CodexRunResponse>), (StatusCode, Json<ErrorResponse>)> {
+    state
+        .operations
+        .validate_prompt(&request.session_id, &request.text)
+        .map_err(lfg_error)?;
     let runner = state.codex.clone();
     let probe_runner = runner.clone();
     let provider = tokio::task::spawn_blocking(move || probe_runner.probe())
@@ -440,7 +464,12 @@ async fn lfg_signals(
     if let Some(through) = query.through_sequence {
         signals.retain(|signal| signal.data.sequence <= through);
     }
-    signals.truncate(query.limit.unwrap_or(100).clamp(1, 500));
+    signals.truncate(
+        query
+            .limit
+            .unwrap_or(state.operations.default_signal_page_size())
+            .clamp(1, state.operations.max_signal_page_size()),
+    );
     let next_sequence = signals
         .last()
         .map(|signal| signal.data.sequence)
@@ -473,7 +502,9 @@ async fn lfg_replay(
         .replay(
             workflow_id,
             query.after_sequence.unwrap_or(0),
-            query.limit.unwrap_or(100),
+            query
+                .limit
+                .unwrap_or(state.operations.default_signal_page_size()),
         )
         .map_err(lfg_error)?;
     let next_sequence = signals
@@ -526,7 +557,9 @@ async fn lfg_stream(
         });
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(Duration::from_secs(
+                state.operations.stream_keepalive_seconds(),
+            ))
             .text("keepalive"),
     )
 }

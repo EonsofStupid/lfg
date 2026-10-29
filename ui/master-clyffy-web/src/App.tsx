@@ -33,32 +33,34 @@ export default function App() {
   const requestRevision = useRef(0)
   const classifyRevision = useRef(0)
   const publicEmbed = new URLSearchParams(window.location.search).get('embed') === 'public'
+  const promptBytes = useMemo(() => new TextEncoder().encode(prompt).length, [prompt])
+  const promptTooLarge = status !== null && promptBytes > status.operations.maxPromptBytes
 
   useEffect(() => { void getStatus().then(setStatus).catch((value: Error) => setError(value.message)) }, [])
 
   useEffect(() => {
-    const text = prompt.trim()
-    if (!text) { setPreview(null); return }
     const current = ++requestRevision.current
+    const text = prompt
+    if (!status || !text.trim() || promptTooLarge) { setPreview(null); return }
     const timer = window.setTimeout(() => {
       void preflight(SESSION_ID, revision, text).then((value) => {
         if (requestRevision.current === current) setPreview(value)
       }).catch((value: Error) => setError(value.message))
-    }, 140)
+    }, status.operations.uiDebounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision])
+  }, [prompt, revision, status, promptTooLarge])
 
   useEffect(() => {
-    const text = prompt.trim()
-    if (!text) { setClassification(null); return }
     const current = ++classifyRevision.current
+    const text = prompt
+    if (!status || !text.trim() || promptTooLarge) { setClassification(null); return }
     const timer = window.setTimeout(() => {
       void classify(SESSION_ID, revision, text, activeSubscriptions, routingNeed).then((value) => {
         if (classifyRevision.current === current) setClassification(value)
       }).catch((value: Error) => setError(value.message))
-    }, 140)
+    }, status.operations.uiDebounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, activeSubscriptions, routingNeed])
+  }, [prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge])
 
   const toggleSubscription = useCallback((id: string) => {
     setActiveSubscriptions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
@@ -77,15 +79,15 @@ export default function App() {
   }, [commit])
 
   const handleCommit = useCallback(async () => {
-    if (!prompt.trim() || busy) return
+    if (!status || !prompt.trim() || promptTooLarge || busy) return
     setBusy(true); setError(null); setSelected(null)
     try {
-      const result = await commitPlan(SESSION_ID, revision, prompt.trim())
+      const result = await commitPlan(SESSION_ID, revision, prompt)
       setCommit(result); setGraph(result.graph); setCursor(result.graph.throughSequence)
     } catch (value) {
       setError(value instanceof Error ? value.message : 'Plan compilation failed')
     } finally { setBusy(false) }
-  }, [prompt, revision, busy])
+  }, [prompt, revision, busy, status, promptTooLarge])
 
   const handleReplay = useCallback(async (value: number) => {
     if (!commit) return
@@ -114,14 +116,15 @@ export default function App() {
             <span>TYPE HERE</span><b>↘</b>
           </motion.div>
           <div className="composer-heading"><div><p className="eyebrow">PROMPT SIGNAL INTAKE</p><h1 id="prompt-label">Watch a team compile itself.</h1></div><span className="privacy-pill">MEMORY ONLY · CPU PREFLIGHT</span></div>
-          <textarea value={prompt} maxLength={12000} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" />
+          <textarea value={prompt} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" aria-invalid={promptTooLarge} />
           <div className="composer-footer">
-            <button className="commit-button" onClick={handleCommit} disabled={busy || !prompt.trim()}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
-            <span>{prompt.length.toLocaleString()} / 12,000</span>
+            <button className="commit-button" onClick={handleCommit} disabled={busy || !status || !prompt.trim() || promptTooLarge}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
+            <span>{promptBytes.toLocaleString()} / {status?.operations.maxPromptBytes.toLocaleString() ?? '…'} UTF-8 bytes</span>
             <span>{preview ? `${(preview.durationMicros / 1000).toFixed(3)} ms elapsed` : 'waiting for signal'}</span>
             <span>{preview?.mode ?? status?.encoder.id ?? 'encoder unavailable'}</span>
             <span>{status ? `${status.liveProviders} live · ${status.configuredProviders} ready to probe · ${status.fixtureProviders} fixtures` : 'provider inventory loading'}</span>
           </div>
+          {promptTooLarge && <p className="error-message" role="alert">Prompt exceeds the configured UTF-8 byte limit.</p>}
           <div className="subscription-row" role="group" aria-label="Active subscriptions">
             <span className="subscription-row-label">Available subscriptions</span>
             {subscriptions.map((id) => (
@@ -156,6 +159,7 @@ export default function App() {
           ) : (
             <PromptBranchView
               snapshot={classification}
+              historyLimit={status?.operations.uiTimingHistorySamples}
               routingNeed={routingNeed}
               onRoutingNeedChange={setRoutingNeed}
               overrideTarget={overrideTarget}

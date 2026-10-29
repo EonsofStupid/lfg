@@ -252,6 +252,124 @@ pub struct RuntimeStatus {
     pub live_providers: usize,
     pub configured_providers: usize,
     pub fixture_providers: usize,
+    pub operations: OperationsConfig,
+    pub operations_digest: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationsConfig {
+    schema_version: String,
+    revision: String,
+    default_listen_address: String,
+    benchmark_default_iterations: usize,
+    benchmark_max_iterations: usize,
+    max_prompt_bytes: usize,
+    max_http_body_bytes: usize,
+    default_signal_page_size: usize,
+    max_signal_page_size: usize,
+    event_buffer_capacity: usize,
+    stream_keepalive_seconds: u64,
+    ui_debounce_ms: u32,
+    ui_timing_history_samples: u32,
+}
+
+impl OperationsConfig {
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let value: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if value.schema_version != "lfg.operations.v1"
+            || value.revision.trim().is_empty()
+            || value
+                .default_listen_address
+                .parse::<std::net::SocketAddr>()
+                .is_err()
+            || value.benchmark_default_iterations == 0
+            || value.benchmark_max_iterations < value.benchmark_default_iterations
+            || value.max_prompt_bytes == 0
+            || value.max_http_body_bytes < value.max_prompt_bytes
+            || value.default_signal_page_size == 0
+            || value.max_signal_page_size < value.default_signal_page_size
+            || value.event_buffer_capacity == 0
+            || value
+                .event_buffer_capacity
+                .checked_next_power_of_two()
+                .is_none_or(|n| n > isize::MAX as usize)
+            || value.stream_keepalive_seconds == 0
+            || value.stream_keepalive_seconds > 9_007_199_254_740_991u64
+            || value.ui_debounce_ms == 0
+            || value.ui_debounce_ms > i32::MAX as u32
+            || value.ui_timing_history_samples == 0
+            || std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(
+                    value.stream_keepalive_seconds,
+                ))
+                .is_none()
+            || [
+                value.benchmark_default_iterations,
+                value.benchmark_max_iterations,
+                value.max_prompt_bytes,
+                value.max_http_body_bytes,
+                value.default_signal_page_size,
+                value.max_signal_page_size,
+                value.event_buffer_capacity,
+            ]
+            .iter()
+            .any(|n| (*n as u128) > 9_007_199_254_740_991u128)
+        {
+            return Err("invalid operational configuration".into());
+        }
+        Ok(value)
+    }
+
+    pub fn max_prompt_bytes(&self) -> usize {
+        self.max_prompt_bytes
+    }
+    pub fn default_listen_address(&self) -> std::net::SocketAddr {
+        self.default_listen_address
+            .parse()
+            .expect("validated listen address")
+    }
+    pub fn benchmark_default_iterations(&self) -> usize {
+        self.benchmark_default_iterations
+    }
+    pub fn benchmark_max_iterations(&self) -> usize {
+        self.benchmark_max_iterations
+    }
+    pub fn max_http_body_bytes(&self) -> usize {
+        self.max_http_body_bytes
+    }
+    pub fn default_signal_page_size(&self) -> usize {
+        self.default_signal_page_size
+    }
+    pub fn max_signal_page_size(&self) -> usize {
+        self.max_signal_page_size
+    }
+    pub fn event_buffer_capacity(&self) -> usize {
+        self.event_buffer_capacity
+    }
+    pub fn stream_keepalive_seconds(&self) -> u64 {
+        self.stream_keepalive_seconds
+    }
+
+    pub fn validate_prompt(&self, session_id: &str, text: &str) -> Result<(), RuntimeError> {
+        if session_id.trim().is_empty()
+            || text.trim().is_empty()
+            || text.len() > self.max_prompt_bytes
+        {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "sessionId and nonempty text of at most {} UTF-8 bytes are required",
+                self.max_prompt_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for OperationsConfig {
+    fn default() -> Self {
+        Self::from_json_str(include_str!("../config/operations.v1.json"))
+            .expect("bundled operational configuration is valid")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -306,6 +424,8 @@ pub struct LfgRuntime<S, E = CpuRuleEncoder> {
     providers: Vec<ProviderTarget>,
     rubric: EvaluationRubric,
     promotion_policy: PromotionPolicy,
+    operations: OperationsConfig,
+    operations_digest: String,
 }
 
 impl<S: SignalStore> LfgRuntime<S, CpuRuleEncoder> {
@@ -330,6 +450,7 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             inventory,
             EvaluationRubric::default_alpha(),
             PromotionPolicy::default_alpha(),
+            OperationsConfig::default(),
         )
     }
 
@@ -339,13 +460,19 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
         inventory: ProviderInventoryConfig,
         rubric: EvaluationRubric,
         promotion_policy: PromotionPolicy,
+        operations: OperationsConfig,
     ) -> Self {
+        let operations_digest = lfg_core::digest_value(
+            &serde_json::to_value(&operations).expect("operations serialize"),
+        );
         Self {
             store,
             encoder,
             providers: inventory.providers,
             rubric,
             promotion_policy,
+            operations,
+            operations_digest,
         }
     }
 
@@ -358,6 +485,8 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             encoder: self.encoder.manifest(),
             signal_mode: "validated append-only hash-chain",
             content_policy: "raw prompts are process-memory-only",
+            operations: self.operations.clone(),
+            operations_digest: self.operations_digest.clone(),
             live_providers: self
                 .providers
                 .iter()
@@ -388,14 +517,8 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn preflight(&self, request: &PreflightRequest) -> Result<PreflightSnapshot, RuntimeError> {
-        if request.session_id.trim().is_empty()
-            || request.text.trim().is_empty()
-            || request.text.len() > 12_000
-        {
-            return Err(RuntimeError::InvalidRequest(
-                "sessionId and 1-12000 characters of text are required".into(),
-            ));
-        }
+        self.operations
+            .validate_prompt(&request.session_id, &request.text)?;
         Ok(self.encoder.encode(request))
     }
 
@@ -600,7 +723,7 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             .workflow(workflow_id)?
             .into_iter()
             .filter(|signal| signal.data.sequence > after_sequence)
-            .take(limit.clamp(1, 500))
+            .take(limit.clamp(1, self.operations.max_signal_page_size))
             .collect())
     }
 
@@ -928,6 +1051,45 @@ fn execution_draft(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn operations_config_validates_limits_and_enforces_utf8_bytes_and_page_size() {
+        let mut settings = serde_json::to_value(OperationsConfig::default()).unwrap();
+        settings["maxPromptBytes"] = serde_json::json!(3);
+        settings["defaultSignalPageSize"] = serde_json::json!(1);
+        settings["maxSignalPageSize"] = serde_json::json!(1);
+        let operations = OperationsConfig::from_json_str(&settings.to_string()).unwrap();
+        let mut runtime = LfgRuntime::with_configuration(
+            MemorySignalStore::default(),
+            CpuRuleEncoder::default(),
+            ProviderInventoryConfig::default(),
+            EvaluationRubric::default_alpha(),
+            PromotionPolicy::default_alpha(),
+            operations,
+        );
+        let request = |text: &str| PreflightRequest {
+            session_id: "test".into(),
+            revision: 1,
+            text: text.into(),
+        };
+        assert!(runtime.preflight(&request("é")).is_ok());
+        assert!(runtime.preflight(&request("éé")).is_err());
+        let plan = runtime
+            .commit_plan(CommitPlanRequest {
+                session_id: "test".into(),
+                revision: 1,
+                text: "é".into(),
+                include_fixture_bindings: false,
+            })
+            .unwrap();
+        assert!(plan.committed_signals >= 2);
+        assert_eq!(runtime.replay(&plan.workflow_id, 0, 100).unwrap().len(), 1);
+        settings["maxSignalPageSize"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&settings.to_string()).is_err());
+        settings["maxSignalPageSize"] = serde_json::json!(1);
+        settings["eventBufferCapacity"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&settings.to_string()).is_err());
+    }
 
     #[test]
     fn provider_inventory_is_configurable_and_does_not_forge_bindings() {

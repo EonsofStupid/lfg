@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
 
@@ -30,14 +30,14 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input)
-    if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4 }))
+    if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2 } }))
     if (path.endsWith('/preflight')) return new Response(JSON.stringify(preflight))
     if (path.endsWith('/classify')) return new Response(JSON.stringify(classification))
     return new Response('{}', { status: 404 })
   }))
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 test('shows measured elapsed time separately from committed tallies', async () => {
   render(<App />)
@@ -56,4 +56,33 @@ test('uses configured subscription IDs instead of a built-in provider roster', a
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
     String(url).endsWith('/classify') && JSON.parse(String(init?.body)).activeSubscriptions.includes('project-seat')
   )).toBe(true))
+})
+
+test('uses the configured UTF-8 byte limit for multibyte input', async () => {
+  render(<App />)
+  await screen.findByRole('button', { name: 'project-seat' })
+  const prompt = screen.getByRole('textbox', { name: 'Prompt to route' })
+  fireEvent.change(prompt, { target: { value: 'é'.repeat(61) } })
+  expect(screen.getByText('122 / 120 UTF-8 bytes')).toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('exceeds the configured UTF-8 byte limit')
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).toBeDisabled()
+  expect(prompt).toHaveAttribute('aria-invalid', 'true')
+  fireEvent.change(prompt, { target: { value: 'é'.repeat(60) } })
+  expect(screen.getByText('120 / 120 UTF-8 bytes')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).not.toBeDisabled()
+})
+
+test('schedules analysis using the server-configured debounce', async () => {
+  const timer = vi.spyOn(window, 'setTimeout')
+  render(<App />)
+  await screen.findByRole('button', { name: 'project-seat' })
+  expect(timer.mock.calls.some(([, delay]) => delay === 10)).toBe(true)
+})
+
+test('does not send prompts when server configuration is incompatible', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ phase: 'old-server' }))))
+  render(<App />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Server operational configuration is missing or incompatible')
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).toBeDisabled()
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).endsWith('/status'))).toBe(true)
 })

@@ -128,4 +128,17 @@ export type RuntimeStatus = {
   liveProviders: number
   configuredProviders: number
   fixtureProviders: number
+  operationsDigest: string
+  operations: {
+    schemaVersion: string
+    revision: string
+    maxPromptBytes: number
+    maxHttpBodyBytes: number
+    defaultSignalPageSize: number
+    maxSignalPageSize: number
+    eventBufferCapacity: number
+    streamKeepaliveSeconds: number
+    uiDebounceMs: number
+    uiTimingHistorySamples: number
+  }
 }

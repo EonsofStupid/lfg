@@ -8,12 +8,14 @@ const sameTarget = (a: EscalationTarget | null, b: EscalationTarget) => a !== nu
 
 export function PromptBranchView({
   snapshot,
+  historyLimit,
   routingNeed,
   onRoutingNeedChange,
   overrideTarget,
   onOverride
 }: {
   snapshot: ClassificationSnapshot | null
+  historyLimit: number | undefined
   routingNeed: RoutingNeed | null
   onRoutingNeedChange: (need: RoutingNeed) => void
   overrideTarget: EscalationTarget | null
@@ -23,9 +25,9 @@ export function PromptBranchView({
   const [burst, setBurst] = useState<number[]>([])
 
   useEffect(() => {
-    if (!snapshot) return
-    setBurst((current) => [...current, snapshot.durationMicros].slice(-14))
-  }, [snapshot?.revision, snapshot?.durationMicros])
+    if (!snapshot || !historyLimit) return
+    setBurst((current) => [...current, snapshot.durationMicros].slice(-historyLimit))
+  }, [snapshot?.revision, snapshot?.durationMicros, historyLimit])
 
   if (!snapshot) return <div className="empty-graph">Begin typing to activate the CPU signal field.</div>
 
