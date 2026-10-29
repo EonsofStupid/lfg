@@ -80,9 +80,10 @@ an empty list does not mean a task is safe or authorized.
 25 draft, constructed examples from seven source records, not 25 independent
 original user prompts. Every label and negative is provisional. The `family`
 field groups related examples for future splitting; no train, validation, or
-test assignment has been made. The available trainer currently performs a random
-row split and does not enforce family or project separation: do not use that
-split for a credible held-out result.
+test assignment has been made. The trainer now keeps supplied families together
+in its development split, but does not detect relationships across differently
+named families or enforce project separation. Do not use its development split
+as a final held-out result.
 
 Source project: `rrflow-development`, local checkout HEAD
 `dd225072bcc639c89b0eef968625cc73303ea998`. The read-only status check reported
@@ -126,7 +127,8 @@ inference-budget series and `rrflow-c07g-desktop` appears in both. Similar sourc
 text, dependencies, and outcome evidence must remain in the same split even if
 the current family names differ. Prefer a different project as the final test.
 The current training script ignores source/outcome metadata and only tokenizes
-`text`; it does not validate these provenance or split requirements.
+`text`; it does not validate provenance, cross-family relationships, or project
+separation.
 
 ## Makers Impulse source and evaluation boundary
 

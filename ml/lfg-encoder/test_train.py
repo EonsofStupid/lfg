@@ -36,6 +36,24 @@ class DatasetGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "verified must be a boolean"):
                 train.load_records(dataset)
 
+    def test_only_verified_rows_are_selected_without_development_override(self):
+        rows = [record(1, True), record(2, False)]
+        self.assertEqual(train.select_training_records(rows, 1, False), [rows[0]])
+        self.assertEqual(train.select_training_records(rows, 1, True), rows)
+
+    def test_split_keeps_families_together_and_is_repeatable(self):
+        rows = [dict(record(i, True), family=f"family-{i // 3}") for i in range(15)]
+        training, validation = train.grouped_split(rows, 731)
+        self.assertEqual(train.grouped_split(rows, 731), (training, validation))
+        self.assertTrue(training)
+        self.assertTrue(validation)
+        self.assertTrue({r["family"] for r in training}.isdisjoint({r["family"] for r in validation}))
+        self.assertEqual({r["id"] for r in training + validation}, {r["id"] for r in rows})
+
+    def test_split_rejects_one_family(self):
+        with self.assertRaisesRegex(ValueError, "at least two distinct families"):
+            train.grouped_split([record(1, True), record(2, True)], 731)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ def load_records(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"duplicate id {record['id']}")
         if not isinstance(record["verified"], bool):
             raise ValueError(f"record {record['id']} verified must be a boolean")
+        if not isinstance(record["family"], str) or not record["family"].strip():
+            raise ValueError(f"record {record['id']} family must be a non-empty string")
         if not record["text"].strip() or not record["intents"]:
             raise ValueError(f"record {record['id']} has empty text or intents")
         seen.add(record["id"])
@@ -47,14 +50,32 @@ def validate(args: argparse.Namespace) -> None:
     }, indent=2))
 
 
+def grouped_split(records: list[dict[str, Any]], seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep each explicitly assigned family entirely in one development split."""
+    families = sorted({record["family"] for record in records})
+    if len(families) < 2:
+        raise ValueError("training requires at least two distinct families for a grouped split")
+    random.Random(seed).shuffle(families)
+    validation_families = set(families[:max(1, len(families) // 5)])
+    return ([record for record in records if record["family"] not in validation_families],
+            [record for record in records if record["family"] in validation_families])
+
+
+def select_training_records(records: list[dict[str, Any]], minimum: int, development: bool) -> list[dict[str, Any]]:
+    verified = [record for record in records if record["verified"]]
+    if not development and len(verified) < minimum:
+        raise SystemExit(f"training gate blocked: {len(verified)} verified examples; {minimum} required")
+    return records if development else verified
+
+
 def train(args: argparse.Namespace) -> None:
     records = load_records(args.dataset)
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
-    verified_count = sum(record["verified"] for record in records)
-    if verified_count < policy["minimum_human_verified_examples"] and not args.allow_below_gate:
-        raise SystemExit(f"training gate blocked: {verified_count} verified examples; {policy['minimum_human_verified_examples']} required")
-    if len(records) < 2:
-        raise SystemExit("training requires at least two examples for the train/evaluation split")
+    records = select_training_records(records, policy["minimum_human_verified_examples"], args.allow_below_gate)
+    try:
+        train_rows, validation_rows = grouped_split(records, args.seed)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     try:
         import numpy as np
         from datasets import Dataset
@@ -66,15 +87,30 @@ def train(args: argparse.Namespace) -> None:
     combined = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in records]
     binarizer = MultiLabelBinarizer().fit(combined)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
-    dataset = Dataset.from_dict({"text": [row["text"] for row in records], "labels": binarizer.transform(combined).astype(np.float32)})
-    dataset = dataset.train_test_split(test_size=max(1, len(records) // 5), seed=args.seed)
+    def make_dataset(rows: list[dict[str, Any]]) -> Any:
+        labels = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in rows]
+        return Dataset.from_dict({"text": [row["text"] for row in rows], "labels": binarizer.transform(labels).astype(np.float32)})
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": "lfg.encoder-development-split.v1",
+        "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
+        "seed": args.seed,
+        "development_override": args.allow_below_gate,
+        "train_ids": [row["id"] for row in train_rows],
+        "validation_ids": [row["id"] for row in validation_rows],
+        "train_families": sorted({row["family"] for row in train_rows}),
+        "validation_families": sorted({row["family"] for row in validation_rows}),
+    }
+    (args.output / "split-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
         return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=args.max_length)
 
-    tokenized = dataset.map(tokenize, batched=True)
+    train_data = make_dataset(train_rows).map(tokenize, batched=True)
+    validation_data = make_dataset(validation_rows).map(tokenize, batched=True)
     model = AutoModelForSequenceClassification.from_pretrained(args.base_model, num_labels=len(binarizer.classes_), problem_type="multi_label_classification")
-    trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs, per_device_train_batch_size=8, per_device_eval_batch_size=8, eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True), train_dataset=tokenized["train"], eval_dataset=tokenized["test"])
+    trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs, per_device_train_batch_size=8, per_device_eval_batch_size=8, eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True), train_dataset=train_data, eval_dataset=validation_data)
     trainer.train()
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
