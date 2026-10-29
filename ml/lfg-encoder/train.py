@@ -24,6 +24,8 @@ def load_records(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"record {index} missing {sorted(missing)}")
         if record["id"] in seen:
             raise ValueError(f"duplicate id {record['id']}")
+        if not isinstance(record["verified"], bool):
+            raise ValueError(f"record {record['id']} verified must be a boolean")
         if not record["text"].strip() or not record["intents"]:
             raise ValueError(f"record {record['id']} has empty text or intents")
         seen.add(record["id"])
@@ -41,15 +43,18 @@ def validate(args: argparse.Namespace) -> None:
         "families": sorted({record["family"] for record in records}),
         "labels": labels,
         "sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
-        "promotion_ready": len(records) >= policy["minimum_human_verified_examples"],
+        "sample_gate_passed": sum(record["verified"] for record in records) >= policy["minimum_human_verified_examples"],
     }, indent=2))
 
 
 def train(args: argparse.Namespace) -> None:
     records = load_records(args.dataset)
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
-    if len(records) < policy["minimum_human_verified_examples"] and not args.allow_below_gate:
-        raise SystemExit(f"training gate blocked: {len(records)} verified examples; {policy['minimum_human_verified_examples']} required")
+    verified_count = sum(record["verified"] for record in records)
+    if verified_count < policy["minimum_human_verified_examples"] and not args.allow_below_gate:
+        raise SystemExit(f"training gate blocked: {verified_count} verified examples; {policy['minimum_human_verified_examples']} required")
+    if len(records) < 2:
+        raise SystemExit("training requires at least two examples for the train/evaluation split")
     try:
         import numpy as np
         from datasets import Dataset
