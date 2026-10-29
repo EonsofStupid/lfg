@@ -31,7 +31,7 @@ controller; the RRFlow engine retains authorization and execution authority.
   checks, and evaluation gates to establish reliable behavior. Rule-based
   encoding is not itself supervised machine learning.
 - **Then, evaluate learned behavior:** the offline classifier training lane and
-  future model experiments can explore improvements. Learned or adaptive
+  the local CPU LLM experiment explore possible improvements. Learned or adaptive
   behavior, including any unsupervised approach, should gain authority only
   after the signal path, evaluation criteria, and safety checks are proven.
 
@@ -69,6 +69,106 @@ Check activation without consuming a model run:
 ```bash
 curl -sS http://127.0.0.1:4317/api/shippin/intelligence/lfg/status
 ```
+
+## Build and deployment
+
+Build the release binary:
+
+```powershell
+cargo build --release -p lfg-server
+```
+
+Binary path:
+
+- `target/release/lfg-server`
+
+Use the automation targets (Linux/macOS or WSL with `make`):
+
+```bash
+make build-binary
+make build-ui
+make image-build
+make image-sbom
+make image-run
+```
+
+The deployment image installs `python3` and `pip`, builds `lfg-server`, copies
+`ml/lfg-encoder`, installs its requirements so the distillation/training
+utilities can run inside the container, and bundles the production UI build.
+
+Windows-first deployment flow:
+
+```powershell
+.\scripts\deploy.ps1 -Action All
+```
+
+That script builds the Rust binary, builds the UI, builds the container image,
+runs the container, performs a health smoke test, and generates an SBOM at
+`output\sbom\lfg.spdx`.
+
+To generate only an SBOM:
+
+```powershell
+.\scripts\deploy.ps1 -Action GenerateSbom -ImageName lfg:latest
+```
+
+The script uses `syft` when available and falls back to Docker Scout.
+
+To review a policy baseline update (dry-run):
+
+```powershell
+python scripts/refresh-sbom-policy-baseline.py --sbom output/sbom/lfg-policy.json --policy security/sbom-policy.json
+```
+
+You can also run a GitHub-hosted dry-run review from
+[sbom-baseline-review.yml](d:/projects/lfg/.github/workflows/sbom-baseline-review.yml)
+(`workflow_dispatch`). It builds a review image, generates an SPDX JSON SBOM,
+applies the current policy gate, and uploads both the SBOM and dry-run baseline
+report as workflow artifacts.
+On pull requests that touch SBOM policy surfaces, the same workflow runs and
+updates a sticky PR comment with the dry-run baseline summary.
+
+To apply a baseline update (explicitly acknowledged):
+
+```powershell
+python scripts/refresh-sbom-policy-baseline.py `
+  --sbom output/sbom/lfg-policy.json `
+  --policy security/sbom-policy.json `
+  --write `
+  --confirm I_ACKNOWLEDGE_BASELINE_UPDATE `
+  --reason "Accepted dependency set after runtime image update"
+```
+
+## Release provenance
+
+The container is stamped with OCI provenance labels:
+
+- `org.opencontainers.image.version`
+- `org.opencontainers.image.revision`
+- `org.opencontainers.image.created`
+
+Release automation is in [release.yml](d:/projects/lfg/.github/workflows/release.yml).
+Pushing a `v*` tag builds a versioned image archive, emits an SPDX SBOM, and
+attaches both artifacts to the GitHub release.
+
+SBOM drift is enforced using [sbom-policy.json](d:/projects/lfg/security/sbom-policy.json)
+and [validate-sbom-policy.py](d:/projects/lfg/scripts/validate-sbom-policy.py)
+in both CI and release workflows.
+The policy enforces package-count drift limits and approved package ecosystems
+(`deb`, `pypi`, `generic`, `rpm`) plus namespace allowlists, so unexpected
+package types or sources fail the pipeline.
+
+For signed release tags, use:
+
+```powershell
+.\scripts\release-tag.ps1 -VersionTag v0.1.0 -Message "LFG v0.1.0" -AcknowledgeChecklist
+git push origin v0.1.0
+```
+
+By default, `release-tag.ps1` enforces pre-release checks via
+`scripts/pre-release-check.ps1` and requires acknowledgement of
+[RELEASE_CHECKLIST.md](d:/projects/lfg/.github/RELEASE_CHECKLIST.md).
+Use `-SkipChecks` only for emergency procedures.
 
 ## Encoder
 
