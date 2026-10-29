@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "lfg.operations.v1",
+  "revision": "baseline-1",
+  "defaultListenAddress": "127.0.0.1:4317",
+  "benchmarkDefaultIterations": 1000,
+  "benchmarkMaxIterations": 1000000,
+  "maxPromptBytes": 12000,
+  "maxHttpBodyBytes": 2097152,
+  "defaultSignalPageSize": 100,
+  "maxSignalPageSize": 500,
+  "eventBufferCapacity": 512,
+  "streamKeepaliveSeconds": 15,
+  "uiDebounceMs": 140,
+  "uiTimingHistorySamples": 14
+}

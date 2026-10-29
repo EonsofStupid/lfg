@@ -1,0 +1,9 @@
+{
+  "id": "lfg-alpha-promotion",
+  "version": "1.0.0",
+  "minimumSamplesPerArm": 20,
+  "minIndependentGraders": 2,
+  "minimumScoreLift": 0.05,
+  "minimumPassRate": 0.80,
+  "maximumFailureRate": 0.10
+}

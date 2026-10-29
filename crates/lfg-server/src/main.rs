@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{env, io::Read, net::SocketAddr, path::PathBuf};
 
 use axum::Router;
 use clap::{Parser, Subcommand};
@@ -6,7 +6,10 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
-#[command(name = "lfg-server", about = "LFG prompt-recipe encoder + routing service")]
+#[command(
+    name = "lfg-server",
+    about = "LFG prompt-recipe encoder + routing service"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -15,31 +18,70 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     LfgBench {
-        #[arg(long, default_value_t = 1000)]
-        iterations: usize,
+        #[arg(long)]
+        iterations: Option<usize>,
+        #[arg(long)]
+        prompt_file: Option<PathBuf>,
     },
     Serve {
-        #[arg(long, default_value = "127.0.0.1:4317")]
-        bind: SocketAddr,
+        #[arg(long)]
+        bind: Option<SocketAddr>,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Command::LfgBench { iterations } => lfg_bench(iterations)?,
+        Command::LfgBench {
+            iterations,
+            prompt_file,
+        } => lfg_bench(iterations, prompt_file)?,
         Command::Serve { bind } => serve(bind).await?,
     }
     Ok(())
 }
 
-fn lfg_bench(iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
-    use lfg_core::{CpuRuleEncoder, PreflightEncoder, PreflightRequest};
-    if iterations == 0 || iterations > 1_000_000 {
-        return Err("iterations must be between 1 and 1000000".into());
+fn lfg_bench(
+    iterations: Option<usize>,
+    prompt_file: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use lfg_core::{PreflightEncoder, PreflightRequest};
+    let operations = lfg_server::configured_operations()?;
+    let iterations = iterations.unwrap_or(operations.benchmark_default_iterations());
+    if iterations == 0 || iterations > operations.benchmark_max_iterations() {
+        return Err(format!(
+            "iterations must be between 1 and {}",
+            operations.benchmark_max_iterations()
+        )
+        .into());
     }
-    let encoder = CpuRuleEncoder;
-    let prompt = "Research current routing patterns, implement an image workflow, test it, and independently grade the result without exposing secrets.";
+    let encoder = lfg_server::configured_preflight_encoder()?;
+    let prompt = match prompt_file {
+        Some(path) => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?
+                .take(operations.max_prompt_bytes() as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > operations.max_prompt_bytes() {
+                return Err(format!(
+                    "benchmark prompt exceeds {} UTF-8 bytes",
+                    operations.max_prompt_bytes()
+                )
+                .into());
+            }
+            String::from_utf8(bytes)?
+        }
+        None => include_str!("../config/benchmark-prompt.txt")
+            .trim_end()
+            .to_owned(),
+    };
+    if prompt.trim().is_empty() || prompt.len() > operations.max_prompt_bytes() {
+        return Err(format!(
+            "benchmark prompt must be nonempty and at most {} UTF-8 bytes",
+            operations.max_prompt_bytes()
+        )
+        .into());
+    }
     let mut samples = Vec::with_capacity(iterations);
     for revision in 0..iterations {
         samples.push(
@@ -47,7 +89,7 @@ fn lfg_bench(iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
                 .encode(&PreflightRequest {
                     session_id: "benchmark".into(),
                     revision: revision as u64,
-                    text: prompt.into(),
+                    text: prompt.clone(),
                 })
                 .duration_micros,
         );
@@ -71,7 +113,7 @@ fn lfg_bench(iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn serve(bind: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(bind: Option<SocketAddr>) -> Result<(), Box<dyn std::error::Error>> {
     let state_root = env::var_os("LFG_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir().join("lfg"));
@@ -80,10 +122,9 @@ async fn serve(bind: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/master-clyffy-web/dist")
         });
-    let app: Router = router_with_ui(
-        AppState::persistent(state_root.join("signals.jsonl"))?,
-        ui_directory,
-    );
+    let state = AppState::persistent(state_root.join("signals.jsonl"))?;
+    let bind = bind.unwrap_or_else(|| state.operations().default_listen_address());
+    let app: Router = router_with_ui(state, ui_directory);
     let listener = TcpListener::bind(bind).await?;
     println!("lfg-server listening on http://{bind}");
     axum::serve(listener, app).await?;

@@ -1,0 +1,15 @@
+{
+  "schemaVersion":"lfg.preflight-rules.v1",
+  "revision":"baseline-1",
+  "maxBranches":4,
+  "minAgents":1,
+  "rules":[
+    {"keywords":["image","illustration","visual"],"intent":"create.image","capability":"image.generate","label":"IMAGE","plainLabel":"Create a visual","tone":"cyan"},
+    {"keywords":["research","latest","source"],"intent":"research.web","capability":"web.access","label":"EVIDENCE","plainLabel":"Research current evidence","tone":"cyan"},
+    {"keywords":["code","implement","build","fix"],"intent":"build.software","capability":"filesystem.write","label":"BUILD","plainLabel":"Build or change software","tone":"lime"},
+    {"keywords":["test","verify","prove"],"intent":"verify.outcome","capability":"test.execute","label":"VERIFY","plainLabel":"Prove the result","tone":"magenta"},
+    {"keywords":["grade","evaluate","rubric","a/b"],"intent":"evaluate.semantic","capability":"evaluation.grade","label":"EVALUATE","plainLabel":"Compare quality","tone":"magenta"}
+  ],
+  "fallback":{"intent":"respond.general","capability":"text.generate","label":"GOAL","plainLabel":"Understand the request","tone":"lime"},
+  "riskRules":[{"keywords":["password","secret","token","private key"],"risk":"sensitive-data","categoryId":"policy.sensitive","capability":"policy.enforce","label":"POLICY","plainLabel":"Protect sensitive information","tone":"amber"}]
+}

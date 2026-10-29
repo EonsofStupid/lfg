@@ -12,7 +12,17 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export const getStatus = () => requestJSON<RuntimeStatus>('/api/shippin/intelligence/lfg/status')
+export const getStatus = async () => {
+  const status = await requestJSON<RuntimeStatus>('/api/shippin/intelligence/lfg/status')
+  const operations = status.operations
+  if (!operations || operations.schemaVersion !== 'lfg.operations.v1' ||
+      !Number.isSafeInteger(operations.maxPromptBytes) || operations.maxPromptBytes <= 0 ||
+      !Number.isSafeInteger(operations.uiDebounceMs) || operations.uiDebounceMs <= 0 ||
+      !Number.isSafeInteger(operations.uiTimingHistorySamples) || operations.uiTimingHistorySamples <= 0) {
+    throw new Error('Server operational configuration is missing or incompatible')
+  }
+  return status
+}
 
 export const preflight = (sessionId: string, revision: number, text: string) =>
   requestJSON<PreflightSnapshot>('/api/shippin/intelligence/lfg/preflight', {
@@ -27,7 +37,7 @@ export const commitPlan = (sessionId: string, revision: number, text: string) =>
 export const getGraph = (workflowId: string, throughSequence?: number) =>
   requestJSON<GraphSnapshot>(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(workflowId)}/graph${throughSequence === undefined ? '' : `?throughSequence=${throughSequence}`}`)
 
-export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string) =>
+export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string | null) =>
   requestJSON<ClassificationSnapshot>('/api/lfg/classify', {
-    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, routingNeed })
+    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, ...(routingNeed ? { routingNeed } : {}) })
   })

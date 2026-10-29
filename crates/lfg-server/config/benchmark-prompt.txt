@@ -1,0 +1,1 @@
+Research current routing patterns, implement an image workflow, test it, and independently grade the result without exposing secrets.

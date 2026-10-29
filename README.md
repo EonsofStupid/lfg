@@ -40,6 +40,12 @@ it, and use it to choose an appropriate reasoning plan; the recommendations must
 be evaluated against real tasks before they are trusted. Concrete quality,
 latency, and resource thresholds still need to be defined.
 
+Rules, scoring parameters, and model catalog entries are configured rather than
+fixed in code. See [LFG configuration](docs/lfg/CONFIGURATION.md) for the
+versioned files, project overrides, and current limitations.
+The [assessment and update design](docs/lfg/ASSESSMENT-AND-UPDATES.md) records
+the intended MCP, project profile, CPU measurement, and artifact-update paths.
+
 Rust-authoritative; `GoClyffy` (in a sibling project) still hosts an older
 shadow-parity Go implementation kept in sync via
 `docs/lfg/SHADOW-PARITY.md` and `fixtures/lfg/shadow-parity.v1.json` until it

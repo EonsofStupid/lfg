@@ -192,10 +192,7 @@ pub fn validate_signal_stream(signals: &[SignalEnvelope]) -> Result<(), Protocol
     let mut tails: BTreeMap<&str, (u64, &str)> = BTreeMap::new();
     for signal in signals {
         signal.validate()?;
-        check_continuation(
-            tails.get(signal.data.workflow_id.as_str()).copied(),
-            signal,
-        )?;
+        check_continuation(tails.get(signal.data.workflow_id.as_str()).copied(), signal)?;
         tails.insert(
             signal.data.workflow_id.as_str(),
             (signal.data.sequence, signal.data.event_hash.as_str()),
@@ -258,7 +255,7 @@ impl RroCategoryManifest {
 pub struct ReasonReadyObject {
     pub id: String,
     pub category: RroCategoryManifest,
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     pub advisory: bool,
     pub lineage: Vec<String>,
 }
@@ -387,25 +384,34 @@ pub struct EvaluationRubric {
     pub version: String,
     pub criteria: BTreeMap<String, f64>,
     pub pass_threshold: f64,
+    #[serde(default)]
     pub hash: String,
 }
 
 impl EvaluationRubric {
-    pub fn default_alpha() -> Self {
-        let mut value = Self {
-            id: "lfg-semantic-quality".into(),
-            version: "1.0.0".into(),
-            criteria: BTreeMap::from([
-                ("correctness".into(), 0.40),
-                ("evidence".into(), 0.25),
-                ("completeness".into(), 0.20),
-                ("safety".into(), 0.15),
-            ]),
-            pass_threshold: 0.80,
-            hash: String::new(),
-        };
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let mut value: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        let total: f64 = value.criteria.values().sum();
+        if value.id.trim().is_empty()
+            || value.version.trim().is_empty()
+            || value.criteria.is_empty()
+            || value.criteria.iter().any(|(name, weight)| {
+                name.trim().is_empty() || !weight.is_finite() || *weight < 0.0
+            })
+            || (total - 1.0).abs() > 1e-9
+            || !value.pass_threshold.is_finite()
+            || !(0.0..=1.0).contains(&value.pass_threshold)
+        {
+            return Err("invalid evaluation rubric".into());
+        }
+        value.hash.clear();
         value.hash = digest_value(&serde_json::to_value(&value).expect("rubric serializes"));
-        value
+        Ok(value)
+    }
+
+    pub fn default_alpha() -> Self {
+        Self::from_json_str(include_str!("../config/evaluation-rubric.v1.json"))
+            .expect("bundled evaluation rubric is valid")
     }
 }
 
@@ -422,16 +428,28 @@ pub struct PromotionPolicy {
 }
 
 impl PromotionPolicy {
-    pub fn default_alpha() -> Self {
-        Self {
-            id: "lfg-alpha-promotion".into(),
-            version: "1.0.0".into(),
-            minimum_samples_per_arm: 20,
-            min_independent_graders: 2,
-            minimum_score_lift: 0.05,
-            minimum_pass_rate: 0.80,
-            maximum_failure_rate: 0.10,
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let value: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if value.id.trim().is_empty()
+            || value.version.trim().is_empty()
+            || value.minimum_samples_per_arm == 0
+            || value.min_independent_graders == 0
+            || [
+                value.minimum_score_lift,
+                value.minimum_pass_rate,
+                value.maximum_failure_rate,
+            ]
+            .iter()
+            .any(|n| !n.is_finite() || !(0.0..=1.0).contains(n))
+        {
+            return Err("invalid promotion policy".into());
         }
+        Ok(value)
+    }
+
+    pub fn default_alpha() -> Self {
+        Self::from_json_str(include_str!("../config/promotion-policy.v1.json"))
+            .expect("bundled promotion policy is valid")
     }
 }
 
@@ -692,7 +710,7 @@ pub struct PreflightSnapshot {
     pub rros: Vec<ReasonReadyObject>,
     pub predicted_agents: usize,
     pub predicted_branches: usize,
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     pub abstained: bool,
 }
 
@@ -700,7 +718,7 @@ pub struct PreflightSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct Prediction {
     pub label: String,
-    pub confidence: f64,
+    pub confidence: Option<f64>,
     pub source: String,
 }
 
@@ -709,115 +727,187 @@ pub trait PreflightEncoder: Send + Sync {
     fn encode(&self, request: &PreflightRequest) -> PreflightSnapshot;
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct CpuRuleEncoder;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightRule {
+    pub keywords: Vec<String>,
+    pub intent: String,
+    pub capability: String,
+    pub label: String,
+    pub plain_label: String,
+    pub tone: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightFallback {
+    pub intent: String,
+    pub capability: String,
+    pub label: String,
+    pub plain_label: String,
+    pub tone: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightRiskRule {
+    pub keywords: Vec<String>,
+    pub risk: String,
+    pub category_id: String,
+    pub capability: String,
+    pub label: String,
+    pub plain_label: String,
+    pub tone: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightRuleConfig {
+    pub schema_version: String,
+    pub revision: String,
+    pub max_branches: usize,
+    pub min_agents: usize,
+    pub rules: Vec<PreflightRule>,
+    pub fallback: PreflightFallback,
+    pub risk_rules: Vec<PreflightRiskRule>,
+}
+
+impl PreflightRuleConfig {
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if config.schema_version != "lfg.preflight-rules.v1"
+            || config.revision.trim().is_empty()
+            || config.max_branches == 0
+            || config.min_agents == 0
+            || config.rules.is_empty()
+        {
+            return Err("invalid preflight schema, revision, limits, or rules".into());
+        }
+        let valid_words = |words: &[String]| {
+            !words.is_empty()
+                && words
+                    .iter()
+                    .all(|w| !w.trim().is_empty() && *w == w.to_lowercase())
+        };
+        let valid_fields = |fields: &[&str]| fields.iter().all(|value| !value.trim().is_empty());
+        let mut ids = BTreeSet::new();
+        for r in &config.rules {
+            if !valid_words(&r.keywords)
+                || !valid_fields(&[&r.intent, &r.capability, &r.label, &r.plain_label, &r.tone])
+                || !ids.insert(&r.intent)
+            {
+                return Err("invalid or duplicate preflight rule".into());
+            }
+        }
+        let f = &config.fallback;
+        if !valid_fields(&[&f.intent, &f.capability, &f.label, &f.plain_label, &f.tone])
+            || !ids.insert(&f.intent)
+        {
+            return Err("invalid or duplicate preflight fallback".into());
+        }
+        for r in &config.risk_rules {
+            if !valid_words(&r.keywords)
+                || !valid_fields(&[
+                    &r.risk,
+                    &r.category_id,
+                    &r.capability,
+                    &r.label,
+                    &r.plain_label,
+                    &r.tone,
+                ])
+                || !ids.insert(&r.category_id)
+            {
+                return Err("invalid or duplicate preflight risk rule".into());
+            }
+        }
+        Ok(config)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CpuRuleEncoder {
+    config: PreflightRuleConfig,
+    manifest: ManifestRef,
+}
+
+impl CpuRuleEncoder {
+    pub fn new(config: PreflightRuleConfig) -> Result<Self, String> {
+        let encoded = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+        let config = PreflightRuleConfig::from_json_str(&encoded)?;
+        let manifest = ManifestRef::new("lfg-cpu-rule-baseline", &config.revision, &encoded);
+        Ok(Self { config, manifest })
+    }
+}
+
+impl Default for CpuRuleEncoder {
+    fn default() -> Self {
+        let config =
+            PreflightRuleConfig::from_json_str(include_str!("../config/preflight.v1.json"))
+                .expect("bundled preflight configuration is valid");
+        Self::new(config).expect("bundled preflight configuration is valid")
+    }
+}
 
 impl PreflightEncoder for CpuRuleEncoder {
     fn manifest(&self) -> ManifestRef {
-        ManifestRef::new(
-            "lfg-cpu-rule-baseline",
-            "1.0.0",
-            "deterministic lexical baseline; advisory only",
-        )
+        self.manifest.clone()
     }
 
     fn encode(&self, request: &PreflightRequest) -> PreflightSnapshot {
         let started = Instant::now();
         let normalized = request.text.to_lowercase();
         let mut intents = Vec::new();
-        let mut capabilities = BTreeMap::<String, f64>::new();
+        let mut capabilities = BTreeSet::<String>::new();
         let mut risks = Vec::new();
         let mut categories = Vec::<RroCategoryManifest>::new();
-
-        let mut detect = |needle: &[&str],
-                          intent: &str,
-                          capability: &str,
-                          label: &str,
-                          plain: &str,
-                          tone: &str| {
-            if needle.iter().any(|word| normalized.contains(word)) {
+        for rule in &self.config.rules {
+            if rule.keywords.iter().any(|word| normalized.contains(word)) {
                 intents.push(Prediction {
-                    label: intent.into(),
-                    confidence: 0.92,
+                    label: rule.intent.clone(),
+                    confidence: None,
                     source: "cpu-rule".into(),
                 });
-                capabilities.insert(capability.into(), 0.92);
+                capabilities.insert(rule.capability.clone());
                 categories.push(RroCategoryManifest::new(
-                    intent, label, plain, capability, tone,
+                    &rule.intent,
+                    &rule.label,
+                    &rule.plain_label,
+                    &rule.capability,
+                    &rule.tone,
                 ));
             }
-        };
-        detect(
-            &["image", "illustration", "visual"],
-            "create.image",
-            "image.generate",
-            "IMAGE",
-            "Create a visual",
-            "cyan",
-        );
-        detect(
-            &["research", "latest", "source"],
-            "research.web",
-            "web.access",
-            "EVIDENCE",
-            "Research current evidence",
-            "cyan",
-        );
-        detect(
-            &["code", "implement", "build", "fix"],
-            "build.software",
-            "filesystem.write",
-            "BUILD",
-            "Build or change software",
-            "lime",
-        );
-        detect(
-            &["test", "verify", "prove"],
-            "verify.outcome",
-            "test.execute",
-            "VERIFY",
-            "Prove the result",
-            "magenta",
-        );
-        detect(
-            &["grade", "evaluate", "rubric", "a/b"],
-            "evaluate.semantic",
-            "evaluation.grade",
-            "EVALUATE",
-            "Compare quality",
-            "magenta",
-        );
+        }
         if intents.is_empty() && !normalized.trim().is_empty() {
+            let f = &self.config.fallback;
             intents.push(Prediction {
-                label: "respond.general".into(),
-                confidence: 0.62,
+                label: f.intent.clone(),
+                confidence: None,
                 source: "cpu-rule".into(),
             });
+            capabilities.insert(f.capability.clone());
             categories.push(RroCategoryManifest::new(
-                "respond.general",
-                "GOAL",
-                "Understand the request",
-                "text.generate",
-                "lime",
+                &f.intent,
+                &f.label,
+                &f.plain_label,
+                &f.capability,
+                &f.tone,
             ));
-            capabilities.insert("text.generate".into(), 0.62);
         }
-        if ["password", "secret", "token", "private key"]
-            .iter()
-            .any(|word| normalized.contains(word))
-        {
-            risks.push(Prediction {
-                label: "sensitive-data".into(),
-                confidence: 0.99,
-                source: "deterministic-policy".into(),
-            });
-            categories.push(RroCategoryManifest::new(
-                "policy.sensitive",
-                "POLICY",
-                "Protect sensitive information",
-                "policy.enforce",
-                "amber",
-            ));
+        for rule in &self.config.risk_rules {
+            if rule.keywords.iter().any(|word| normalized.contains(word)) {
+                risks.push(Prediction {
+                    label: rule.risk.clone(),
+                    confidence: None,
+                    source: "cpu-rule".into(),
+                });
+                categories.push(RroCategoryManifest::new(
+                    &rule.category_id,
+                    &rule.label,
+                    &rule.plain_label,
+                    &rule.capability,
+                    &rule.tone,
+                ));
+            }
         }
         categories.sort_by(|a, b| a.id.cmp(&b.id));
         categories.dedup_by(|a, b| a.id == b.id);
@@ -827,10 +917,7 @@ impl PreflightEncoder for CpuRuleEncoder {
             .map(|(index, category)| ReasonReadyObject {
                 id: format!("rro-preview-{}-{index}", request.revision),
                 category,
-                confidence: intents
-                    .iter()
-                    .map(|value| value.confidence)
-                    .fold(0.0, f64::max),
+                confidence: None,
                 advisory: true,
                 lineage: vec![format!(
                     "session/{}/revision/{}",
@@ -838,18 +925,10 @@ impl PreflightEncoder for CpuRuleEncoder {
                 )],
             })
             .collect::<Vec<_>>();
-        let confidence = intents
-            .iter()
-            .map(|value| value.confidence)
-            .fold(0.0, f64::max);
-        let predicted_agents = rros
-            .iter()
-            .filter(|rro| !rro.category.id.starts_with("policy."))
-            .count()
-            .max(1);
-        let predicted_branches = predicted_agents.min(4);
+        let predicted_agents = intents.len().max(self.config.min_agents);
+        let predicted_branches = predicted_agents.min(self.config.max_branches);
         PreflightSnapshot {
-            schema_version: "lfg.preflight.v1".into(),
+            schema_version: "lfg.preflight.v2".into(),
             session_id: request.session_id.clone(),
             revision: request.revision,
             mode: "cpu-rule-baseline".into(),
@@ -858,9 +937,9 @@ impl PreflightEncoder for CpuRuleEncoder {
             intents,
             capabilities: capabilities
                 .into_iter()
-                .map(|(label, confidence)| Prediction {
+                .map(|label| Prediction {
                     label,
-                    confidence,
+                    confidence: None,
                     source: "cpu-rule".into(),
                 })
                 .collect(),
@@ -868,20 +947,14 @@ impl PreflightEncoder for CpuRuleEncoder {
             rros,
             predicted_agents,
             predicted_branches,
-            confidence,
-            abstained: confidence < 0.60,
+            confidence: None,
+            abstained: true,
         }
     }
 }
 
-/// A model reachable through a bring-your-own-subscription seat. `subscription_id`
-/// matches Automaton's own canonical provider ids (`claude`, `codex`, `grok`,
-/// `cursor` — see `docs/14-frontier-roster.md`), not an id invented here, so
-/// activation state can eventually come from Automaton's seat detection
-/// instead of being re-implemented in LFG. Scores are relative (0..1),
-/// synthesized from published benchmark comparisons (Artificial Analysis
-/// Intelligence Index rank, Terminal-Bench/GDPval-AA results, turn-efficiency
-/// claims) — not a single published unified metric.
+/// A configured model profile. Its scores are operator-supplied relative
+/// estimates, not calibrated probabilities or independently verified results.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EscalationTarget {
@@ -892,6 +965,17 @@ pub struct EscalationTarget {
     pub tool_loop_efficiency: f64,
     pub cost_tier: String,
     pub subscription_id: String,
+    pub strengths: Vec<String>,
+    pub effort_levels: Vec<String>,
+    pub evidence: ModelProfileEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProfileEvidence {
+    pub source: String,
+    pub basis: String,
+    pub observed_at: String,
 }
 
 /// One catalog entry as returned to a caller: the target plus whether the
@@ -905,39 +989,34 @@ pub struct EscalationCandidate {
     pub active: bool,
 }
 
-fn cost_rank(tier: &str) -> u8 {
-    match tier {
-        "low" => 0,
-        "high" => 2,
-        _ => 1,
-    }
-}
-
-fn balanced_score(target: &EscalationTarget) -> f64 {
-    target.raw_capability * 0.4 + target.tool_loop_efficiency * 0.4
-        - f64::from(cost_rank(&target.cost_tier)) * 0.1
-}
-
-/// Picks the best catalog entry whose subscription is currently active, for
-/// the given need. `routing_need` is one of `capability` | `efficiency` |
-/// `cost` | anything else (including `balanced`, the default) falls back to
-/// a weighted happy-medium of capability and tool-loop efficiency, lightly
-/// penalized by cost.
+/// Select among active subscriptions using the explicitly configured scoring policy.
 pub fn select_escalation(
     catalog: &[EscalationTarget],
     active_subscriptions: &[String],
     routing_need: &str,
+    scoring: &ClassifierScoring,
 ) -> Option<EscalationTarget> {
-    let available = catalog
-        .iter()
-        .filter(|target| active_subscriptions.iter().any(|id| id == &target.subscription_id));
+    let available = catalog.iter().filter(|target| {
+        active_subscriptions
+            .iter()
+            .any(|id| id == &target.subscription_id)
+            && scoring.cost_ranks.contains_key(&target.cost_tier)
+    });
     match routing_need {
         "capability" => available.max_by(|a, b| a.raw_capability.total_cmp(&b.raw_capability)),
         "efficiency" => {
             available.max_by(|a, b| a.tool_loop_efficiency.total_cmp(&b.tool_loop_efficiency))
         }
-        "cost" => available.min_by(|a, b| cost_rank(&a.cost_tier).cmp(&cost_rank(&b.cost_tier))),
-        _ => available.max_by(|a, b| balanced_score(a).total_cmp(&balanced_score(b))),
+        "cost" => available.min_by_key(|target| scoring.cost_ranks[&target.cost_tier]),
+        "balanced" => available.max_by(|a, b| {
+            let score = |target: &EscalationTarget| {
+                target.raw_capability * scoring.capability_weight
+                    + target.tool_loop_efficiency * scoring.efficiency_weight
+                    - f64::from(scoring.cost_ranks[&target.cost_tier]) * scoring.cost_weight
+            };
+            score(a).total_cmp(&score(b))
+        }),
+        _ => None,
     }
     .cloned()
 }
@@ -957,204 +1036,119 @@ pub struct CategoryDefinition {
 #[serde(rename_all = "camelCase")]
 pub struct ClassifierConfig {
     pub schema_version: String,
+    pub revision: String,
     pub project: String,
+    pub default_routing_need: String,
     pub categories: Vec<CategoryDefinition>,
     pub escalation_category_id: String,
     pub escalation_percent_threshold: f64,
     pub escalation_token_threshold: usize,
     pub escalation_catalog: Vec<EscalationTarget>,
+    pub scoring: ClassifierScoring,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierScoring {
+    pub keyword_weight: f64,
+    pub length_divisor: f64,
+    pub length_cap: f64,
+    pub minimum_raw_score: f64,
+    pub agents_per_words: usize,
+    pub min_escalation_agents: usize,
+    pub max_escalation_agents: usize,
+    pub normal_agents: usize,
+    pub capability_weight: f64,
+    pub efficiency_weight: f64,
+    pub cost_weight: f64,
+    pub cost_ranks: BTreeMap<String, u8>,
 }
 
 impl ClassifierConfig {
-    pub fn from_json_str(text: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(text)
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != "lfg.classifier-config.v2"
+            || self.project.trim().is_empty()
+            || self.revision.trim().is_empty()
+            || !["balanced", "capability", "efficiency", "cost"]
+                .contains(&self.default_routing_need.as_str())
+        {
+            return Err("unsupported classifier schema or empty project".into());
+        }
+        let mut ids = BTreeSet::new();
+        for category in &self.categories {
+            if category.id.trim().is_empty()
+                || category.label.trim().is_empty()
+                || !ids.insert(&category.id)
+                || !category.weight.is_finite()
+                || category.weight < 0.0
+                || category
+                    .keywords
+                    .iter()
+                    .any(|word| word.trim().is_empty() || *word != word.to_lowercase())
+            {
+                return Err("invalid category, duplicate ID, weight, or keyword".into());
+            }
+        }
+        if !ids.contains(&self.escalation_category_id)
+            || !self.escalation_percent_threshold.is_finite()
+            || !(0.0..=100.0).contains(&self.escalation_percent_threshold)
+            || self.escalation_token_threshold == 0
+        {
+            return Err("invalid escalation category or threshold".into());
+        }
+        let p = &self.scoring;
+        let numbers = [
+            p.keyword_weight,
+            p.length_divisor,
+            p.length_cap,
+            p.minimum_raw_score,
+            p.capability_weight,
+            p.efficiency_weight,
+            p.cost_weight,
+        ];
+        if numbers.iter().any(|x| !x.is_finite() || *x < 0.0)
+            || p.length_divisor == 0.0
+            || p.agents_per_words == 0
+            || p.normal_agents == 0
+            || p.min_escalation_agents == 0
+            || p.max_escalation_agents < p.min_escalation_agents
+            || p.cost_ranks.is_empty()
+        {
+            return Err("invalid scoring policy".into());
+        }
+        for target in &self.escalation_catalog {
+            if target.provider.trim().is_empty()
+                || target.model.trim().is_empty()
+                || target.subscription_id.trim().is_empty()
+                || !p.cost_ranks.contains_key(&target.cost_tier)
+                || target.evidence.source.trim().is_empty()
+                || target.evidence.basis.trim().is_empty()
+                || target.evidence.observed_at.trim().is_empty()
+                || target
+                    .strengths
+                    .iter()
+                    .chain(&target.effort_levels)
+                    .any(|value| value.trim().is_empty())
+                || !target.raw_capability.is_finite()
+                || !(0.0..=1.0).contains(&target.raw_capability)
+                || !target.tool_loop_efficiency.is_finite()
+                || !(0.0..=1.0).contains(&target.tool_loop_efficiency)
+            {
+                return Err("invalid escalation target".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn default_alpha() -> Self {
-        let categories = vec![
-            CategoryDefinition {
-                id: "simple_function_call".into(),
-                label: "Simple function call".into(),
-                keywords: vec![
-                    "call the function".into(),
-                    "invoke".into(),
-                    "run this function".into(),
-                    "execute function".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "simple_tool_use".into(),
-                label: "Simple tool use".into(),
-                keywords: vec![
-                    "use the tool".into(),
-                    "run the tool".into(),
-                    "look up".into(),
-                    "fetch".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "complex_multi_step_agentic_task".into(),
-                label: "Complex multi-step agentic task".into(),
-                keywords: vec![
-                    "and then".into(),
-                    "step by step".into(),
-                    "first,".into(),
-                    "refactor".into(),
-                    "across the codebase".into(),
-                    "multiple files".into(),
-                    "implement a".into(),
-                    "build a system".into(),
-                    "migrate".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "quick_factual_question".into(),
-                label: "Quick factual question".into(),
-                keywords: vec![
-                    "what is".into(),
-                    "when did".into(),
-                    "who is".into(),
-                    "how many".into(),
-                    "define".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "casual_conversation".into(),
-                label: "Casual conversation".into(),
-                keywords: vec![
-                    "hey".into(),
-                    "how are you".into(),
-                    "thanks".into(),
-                    "lol".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "creative_writing".into(),
-                label: "Creative writing".into(),
-                keywords: vec![
-                    "write a story".into(),
-                    "poem".into(),
-                    "fiction".into(),
-                    "creative".into(),
-                ],
-                weight: 1.0,
-            },
-            CategoryDefinition {
-                id: "translation".into(),
-                label: "Translation".into(),
-                keywords: vec![
-                    "translate".into(),
-                    "in spanish".into(),
-                    "in french".into(),
-                    "into japanese".into(),
-                ],
-                weight: 1.0,
-            },
-        ];
-        // subscription_id values match Automaton's canonical provider ids
-        // (docs/14-frontier-roster.md): claude, codex, grok, cursor. Scores
-        // synthesized 2026-08 from: Artificial Analysis Intelligence Index
-        // (Opus 5 #1, Grok 4.6 #4 at 61), Sonnet 5 beating Opus 5 on
-        // Terminal-Bench 2.1 / GDPval-AA, GPT-5.6 Terra matching Fable 5's
-        // 84.3% code accuracy and Luna beating Opus 4.8's 78.9%, and Grok
-        // 4.6's "roughly half the turns" agentic turn-efficiency claim.
-        let escalation_catalog = vec![
-            EscalationTarget {
-                provider: "anthropic".into(),
-                model: "haiku-4.5".into(),
-                role: "quick".into(),
-                raw_capability: 0.70,
-                tool_loop_efficiency: 0.65,
-                cost_tier: "low".into(),
-                subscription_id: "claude".into(),
-            },
-            EscalationTarget {
-                provider: "anthropic".into(),
-                model: "fable-5".into(),
-                role: "grounding".into(),
-                raw_capability: 0.80,
-                tool_loop_efficiency: 0.70,
-                cost_tier: "medium".into(),
-                subscription_id: "claude".into(),
-            },
-            EscalationTarget {
-                provider: "anthropic".into(),
-                model: "sonnet-5".into(),
-                role: "balanced".into(),
-                raw_capability: 0.90,
-                tool_loop_efficiency: 0.85,
-                cost_tier: "medium".into(),
-                subscription_id: "claude".into(),
-            },
-            EscalationTarget {
-                provider: "anthropic".into(),
-                model: "opus-5".into(),
-                role: "deep-work".into(),
-                raw_capability: 0.98,
-                tool_loop_efficiency: 0.75,
-                cost_tier: "high".into(),
-                subscription_id: "claude".into(),
-            },
-            EscalationTarget {
-                provider: "openai".into(),
-                model: "luna".into(),
-                role: "quick".into(),
-                raw_capability: 0.68,
-                tool_loop_efficiency: 0.62,
-                cost_tier: "low".into(),
-                subscription_id: "codex".into(),
-            },
-            EscalationTarget {
-                provider: "openai".into(),
-                model: "terra".into(),
-                role: "grounding".into(),
-                raw_capability: 0.82,
-                tool_loop_efficiency: 0.72,
-                cost_tier: "medium".into(),
-                subscription_id: "codex".into(),
-            },
-            EscalationTarget {
-                provider: "openai".into(),
-                model: "sol".into(),
-                role: "deep-work".into(),
-                raw_capability: 0.95,
-                tool_loop_efficiency: 0.75,
-                cost_tier: "high".into(),
-                subscription_id: "codex".into(),
-            },
-            EscalationTarget {
-                provider: "xai".into(),
-                model: "grok-4.6".into(),
-                role: "deep-work".into(),
-                raw_capability: 0.85,
-                tool_loop_efficiency: 0.95,
-                cost_tier: "medium".into(),
-                subscription_id: "grok".into(),
-            },
-            EscalationTarget {
-                provider: "cursor".into(),
-                model: "grok-4.6".into(),
-                role: "deep-work".into(),
-                raw_capability: 0.85,
-                tool_loop_efficiency: 0.93,
-                cost_tier: "medium".into(),
-                subscription_id: "cursor".into(),
-            },
-        ];
-        Self {
-            schema_version: "lfg.classifier-config.v1".into(),
-            project: "default".into(),
-            categories,
-            escalation_category_id: "complex_multi_step_agentic_task".into(),
-            escalation_percent_threshold: 55.0,
-            escalation_token_threshold: 220,
-            escalation_catalog,
-        }
+        Self::from_json_str(include_str!("../config/classifier.v2.json"))
+            .expect("bundled classifier configuration is valid")
     }
 }
 
@@ -1174,12 +1168,8 @@ pub struct ClassifyRequest {
     #[serde(default)]
     pub active_subscriptions: Vec<String>,
     /// `capability` | `efficiency` | `cost` | `balanced` (default).
-    #[serde(default = "default_routing_need")]
+    #[serde(default)]
     pub routing_need: String,
-}
-
-fn default_routing_need() -> String {
-    "balanced".into()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1195,6 +1185,8 @@ pub struct CategoryScore {
 #[serde(rename_all = "camelCase")]
 pub struct ClassificationSnapshot {
     pub schema_version: String,
+    pub config_revision: String,
+    pub config_digest: String,
     pub session_id: String,
     pub revision: u64,
     pub duration_micros: u64,
@@ -1216,8 +1208,11 @@ pub struct ClassificationSnapshot {
 
 pub trait CategoryClassifier: Send + Sync {
     fn manifest(&self) -> ManifestRef;
-    fn classify(&self, request: &ClassifyRequest, config: &ClassifierConfig)
-    -> ClassificationSnapshot;
+    fn classify(
+        &self,
+        request: &ClassifyRequest,
+        config: &ClassifierConfig,
+    ) -> ClassificationSnapshot;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1240,6 +1235,11 @@ impl CategoryClassifier for CpuCategoryClassifier {
         let started = Instant::now();
         let normalized = request.text.to_lowercase();
         let token_estimate = request.text.split_whitespace().count();
+        let routing_need = if request.routing_need.is_empty() {
+            &config.default_routing_need
+        } else {
+            &request.routing_need
+        };
 
         let scored = config
             .categories
@@ -1252,11 +1252,15 @@ impl CategoryClassifier for CpuCategoryClassifier {
                     .cloned()
                     .collect::<Vec<_>>();
                 let length_bonus = if category.id == config.escalation_category_id {
-                    (token_estimate as f64 / 60.0).min(3.0)
+                    (token_estimate as f64 / config.scoring.length_divisor)
+                        .min(config.scoring.length_cap)
                 } else {
                     0.0
                 };
-                let raw = (category.weight + matched.len() as f64 * 2.0 + length_bonus).max(0.05);
+                let raw = (category.weight
+                    + matched.len() as f64 * config.scoring.keyword_weight
+                    + length_bonus)
+                    .max(config.scoring.minimum_raw_score);
                 (category.id.clone(), category.label.clone(), raw, matched)
             })
             .collect::<Vec<_>>();
@@ -1283,30 +1287,30 @@ impl CategoryClassifier for CpuCategoryClassifier {
         let needs_bigger_model = top_percent >= config.escalation_percent_threshold
             || token_estimate >= config.escalation_token_threshold;
         let predicted_subagents = if needs_bigger_model {
-            (token_estimate / 40).clamp(2, 8)
+            (token_estimate / config.scoring.agents_per_words).clamp(
+                config.scoring.min_escalation_agents,
+                config.scoring.max_escalation_agents,
+            )
         } else {
-            1
+            config.scoring.normal_agents
         };
-        let escalation_catalog = if needs_bigger_model {
-            config
-                .escalation_catalog
-                .iter()
-                .map(|target| EscalationCandidate {
-                    active: request
-                        .active_subscriptions
-                        .iter()
-                        .any(|id| id == &target.subscription_id),
-                    target: target.clone(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let escalation_catalog = config
+            .escalation_catalog
+            .iter()
+            .map(|target| EscalationCandidate {
+                active: request
+                    .active_subscriptions
+                    .iter()
+                    .any(|id| id == &target.subscription_id),
+                target: target.clone(),
+            })
+            .collect();
         let recommended_escalation = if needs_bigger_model {
             select_escalation(
                 &config.escalation_catalog,
                 &request.active_subscriptions,
-                &request.routing_need,
+                routing_need,
+                &config.scoring,
             )
         } else {
             None
@@ -1314,6 +1318,10 @@ impl CategoryClassifier for CpuCategoryClassifier {
 
         ClassificationSnapshot {
             schema_version: "lfg.classification.v1".into(),
+            config_revision: config.revision.clone(),
+            config_digest: digest_value(
+                &serde_json::to_value(config).expect("classifier configuration serializes"),
+            ),
             session_id: request.session_id.clone(),
             revision: request.revision,
             duration_micros: started.elapsed().as_micros() as u64,
@@ -1323,7 +1331,7 @@ impl CategoryClassifier for CpuCategoryClassifier {
             predicted_subagents,
             escalation_catalog,
             recommended_escalation,
-            routing_need: request.routing_need.clone(),
+            routing_need: routing_need.clone(),
             project: config.project.clone(),
         }
     }
@@ -1659,10 +1667,8 @@ fn reject_forbidden_content(value: &Value, path: &str) -> Result<(), ProtocolErr
                 reject_forbidden_content(nested, &format!("{path}[{index}]"))?;
             }
         }
-        Value::String(text) => {
-            if looks_like_credential(text) {
-                return Err(ProtocolError::ForbiddenContent(path.to_owned()));
-            }
+        Value::String(text) if looks_like_credential(text) => {
+            return Err(ProtocolError::ForbiddenContent(path.to_owned()));
         }
         _ => {}
     }
@@ -1671,7 +1677,16 @@ fn reject_forbidden_content(value: &Value, path: &str) -> Result<(), ProtocolErr
 
 fn looks_like_credential(text: &str) -> bool {
     const PREFIXES: &[&str] = &[
-        "sk-", "AKIA", "AIza", "ya29.", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "-----BEGIN",
+        "sk-",
+        "AKIA",
+        "AIza",
+        "ya29.",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "-----BEGIN",
     ];
     PREFIXES.iter().any(|prefix| text.starts_with(prefix))
 }
@@ -1854,22 +1869,16 @@ mod tests {
             .unwrap();
         assert_eq!(top.id, "complex_multi_step_agentic_task");
         assert!(snapshot.needs_bigger_model);
-        assert!(!snapshot.escalation_catalog.is_empty());
+        assert!(snapshot.escalation_catalog.is_empty());
         assert!(snapshot.predicted_subagents >= 2);
-        let sum: f64 = snapshot.categories.iter().map(|category| category.percent).sum();
+        let sum: f64 = snapshot
+            .categories
+            .iter()
+            .map(|category| category.percent)
+            .sum();
         assert!((sum - 100.0).abs() < 0.5);
 
-        // Only claude is active: sonnet-5 is the happy-medium pick among the
-        // claude family (beats opus-5's higher-but-costlier raw capability).
-        let recommended = snapshot.recommended_escalation.expect("balanced pick");
-        assert_eq!(recommended.model, "sonnet-5");
-        assert!(
-            snapshot
-                .escalation_catalog
-                .iter()
-                .any(|candidate| candidate.target.subscription_id == "grok" && !candidate.active),
-            "inactive subscriptions must still appear in the catalog, just flagged inactive"
-        );
+        assert!(snapshot.recommended_escalation.is_none());
     }
 
     #[test]
@@ -1892,32 +1901,116 @@ mod tests {
     }
 
     #[test]
-    fn routing_need_changes_the_recommendation_across_the_full_roster() {
-        let config = ClassifierConfig::default_alpha();
-        let all_subscriptions = vec![
-            "claude".to_owned(),
-            "codex".to_owned(),
-            "grok".to_owned(),
-            "cursor".to_owned(),
+    fn configured_catalog_and_weights_control_selection() {
+        let mut config = ClassifierConfig::default_alpha();
+        config.escalation_catalog = vec![
+            EscalationTarget {
+                provider: "example-a".into(),
+                model: "a".into(),
+                role: "test".into(),
+                raw_capability: 0.8,
+                tool_loop_efficiency: 0.2,
+                cost_tier: "low".into(),
+                subscription_id: "a".into(),
+                strengths: vec![],
+                effort_levels: vec![],
+                evidence: ModelProfileEvidence {
+                    source: "test fixture".into(),
+                    basis: "synthetic".into(),
+                    observed_at: "test".into(),
+                },
+            },
+            EscalationTarget {
+                provider: "example-b".into(),
+                model: "b".into(),
+                role: "test".into(),
+                raw_capability: 0.2,
+                tool_loop_efficiency: 0.8,
+                cost_tier: "high".into(),
+                subscription_id: "b".into(),
+                strengths: vec![],
+                effort_levels: vec![],
+                evidence: ModelProfileEvidence {
+                    source: "test fixture".into(),
+                    basis: "synthetic".into(),
+                    observed_at: "test".into(),
+                },
+            },
         ];
+        config.validate().unwrap();
+        let active = vec!["a".into(), "b".into()];
+        config.scoring.capability_weight = 1.0;
+        config.scoring.efficiency_weight = 0.0;
+        config.scoring.cost_weight = 0.0;
+        assert_eq!(
+            select_escalation(
+                &config.escalation_catalog,
+                &active,
+                "balanced",
+                &config.scoring
+            )
+            .unwrap()
+            .model,
+            "a"
+        );
+        config.scoring.capability_weight = 0.0;
+        config.scoring.efficiency_weight = 1.0;
+        assert_eq!(
+            select_escalation(
+                &config.escalation_catalog,
+                &active,
+                "balanced",
+                &config.scoring
+            )
+            .unwrap()
+            .model,
+            "b"
+        );
+        assert!(
+            select_escalation(&config.escalation_catalog, &[], "balanced", &config.scoring)
+                .is_none()
+        );
+        assert!(
+            select_escalation(
+                &config.escalation_catalog,
+                &active,
+                "unknown",
+                &config.scoring
+            )
+            .is_none()
+        );
+    }
 
-        let capability = select_escalation(&config.escalation_catalog, &all_subscriptions, "capability").unwrap();
-        assert_eq!(capability.model, "opus-5");
+    #[test]
+    fn invalid_classifier_policy_is_rejected() {
+        let mut config = ClassifierConfig::default_alpha();
+        config.scoring.agents_per_words = 0;
+        assert!(config.validate().is_err());
+        config.scoring.agents_per_words = 1;
+        config.escalation_category_id = "missing".into();
+        assert!(config.validate().is_err());
+    }
 
-        let efficiency = select_escalation(&config.escalation_catalog, &all_subscriptions, "efficiency").unwrap();
-        assert_eq!((efficiency.provider.as_str(), efficiency.model.as_str()), ("xai", "grok-4.6"));
-
-        let cost = select_escalation(&config.escalation_catalog, &all_subscriptions, "cost").unwrap();
-        assert_eq!(cost.cost_tier, "low");
-
-        // Nothing active at all: every dimension comes back empty, never a
-        // silent fallback to some default model.
-        assert!(select_escalation(&config.escalation_catalog, &[], "capability").is_none());
+    #[test]
+    fn classifier_uses_configured_routing_default() {
+        let mut config = ClassifierConfig::default_alpha();
+        config.default_routing_need = "cost".into();
+        let snapshot = CpuCategoryClassifier.classify(
+            &ClassifyRequest {
+                session_id: "test".into(),
+                revision: 1,
+                text: "hello".into(),
+                active_subscriptions: vec![],
+                routing_need: String::new(),
+            },
+            &config,
+        );
+        assert_eq!(snapshot.routing_need, "cost");
     }
 
     #[test]
     fn preflight_reports_measured_dynamic_branches() {
-        let snapshot = CpuRuleEncoder.encode(&PreflightRequest {
+        let snapshot = CpuRuleEncoder::default().encode(&PreflightRequest {
             session_id: "s1".into(),
             revision: 7,
             text: "Research, implement, and test an image workflow".into(),
@@ -1930,5 +2023,42 @@ mod tests {
                 .iter()
                 .any(|rro| rro.category.capability == "image.generate")
         );
+        assert_eq!(snapshot.schema_version, "lfg.preflight.v2");
+        assert!(snapshot.confidence.is_none());
+        assert!(
+            snapshot
+                .intents
+                .iter()
+                .all(|item| item.confidence.is_none())
+        );
+        assert!(snapshot.rros.iter().all(|item| item.confidence.is_none()));
+        assert!(snapshot.abstained);
+    }
+
+    #[test]
+    fn preflight_configuration_changes_output_and_manifest() {
+        let baseline = CpuRuleEncoder::default();
+        let mut config = baseline.config.clone();
+        config.rules[0].keywords = vec!["custom-visual-signal".into()];
+        config.max_branches = 1;
+        let customized = CpuRuleEncoder::new(config).unwrap();
+        let request = PreflightRequest {
+            session_id: "configured".into(),
+            revision: 1,
+            text: "custom-visual-signal and test".into(),
+        };
+        let output = customized.encode(&request);
+        assert!(
+            output
+                .intents
+                .iter()
+                .any(|item| item.label == "create.image")
+        );
+        assert_eq!(output.predicted_branches, 1);
+        assert_ne!(baseline.manifest().sha256, customized.manifest().sha256);
+
+        let mut invalid = customized.config.clone();
+        invalid.max_branches = 0;
+        assert!(CpuRuleEncoder::new(invalid).is_err());
     }
 }

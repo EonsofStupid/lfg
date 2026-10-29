@@ -1,0 +1,19 @@
+{
+  "templateOnly": true,
+  "instructions": "Fill from the project owner's declared access and current evidence. Null means unknown; do not copy into the live catalog until all required values are known and reviewed.",
+  "project": null,
+  "provider": null,
+  "model": null,
+  "subscriptionId": null,
+  "role": null,
+  "strengths": [],
+  "effortLevels": [],
+  "costTier": null,
+  "rawCapability": null,
+  "toolLoopEfficiency": null,
+  "evidence": {
+    "source": null,
+    "basis": null,
+    "observedAt": null
+  }
+}
