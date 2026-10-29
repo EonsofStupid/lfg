@@ -13,3 +13,10 @@ dist/
 # env
 .env
 .env.*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+ml/lfg-encoder/artifacts/
+ml/lfg-encoder/dataset/private/
