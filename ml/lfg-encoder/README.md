@@ -44,8 +44,9 @@ the review happened. The sample gate alone does not make a model promotion-ready
 2. Assemble a representative corpus with hard negatives, paraphrases, multi-step
    requests, and security cases. Keep related examples together when splitting
    data to reduce leakage. Reserve an independently reviewed test set before
-   training; do not use it to tune the model. The current random split in
-   `train.py` is only a development split and does not enforce these protections.
+   training; do not use it to tune the model. `train.py` groups its development
+   split by the supplied `family` values; it cannot detect related records given
+   different family names or enforce a separate project-level test set.
 3. Measure the Rust rule encoder on the same held-out examples. Compare per-label
    precision and recall, intent/capability macro F1, security recall, calibration,
    CPU latency, and memory. Define acceptable thresholds and the target hardware
@@ -72,5 +73,11 @@ CPU. The six-example run tests plumbing only; its output is ineligible for
 promotion and is ignored by Git. The training script currently uses an unpinned
 model revision and dependency ranges, so save the exact model revision, package
 versions, dataset hash, seed, and evaluation split for any serious experiment.
-The `--allow-below-gate` flag is for development only. Without it, training
-requires the policy's minimum number of records explicitly marked `verified`.
+The `--allow-below-gate` flag is for development only and allows unverified rows
+into the experiment. Without it, training requires the policy's minimum number
+of records explicitly marked `verified` and excludes unverified rows. A run
+requires at least two families and writes the seed, dataset hash, row IDs and
+family assignments to `split-manifest.json` in the ignored output directory.
+This family split is for development validation, not a final test: it is not
+stratified and can leave rare labels absent from one side. Reserve a separately
+reviewed, project-separated test set for final evaluation.
