@@ -6,7 +6,10 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
-#[command(name = "lfg-server", about = "LFG prompt-recipe encoder + routing service")]
+#[command(
+    name = "lfg-server",
+    about = "LFG prompt-recipe encoder + routing service"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -34,11 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn lfg_bench(iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
-    use lfg_core::{CpuRuleEncoder, PreflightEncoder, PreflightRequest};
+    use lfg_core::{PreflightEncoder, PreflightRequest};
     if iterations == 0 || iterations > 1_000_000 {
         return Err("iterations must be between 1 and 1000000".into());
     }
-    let encoder = CpuRuleEncoder;
+    let encoder = lfg_server::configured_preflight_encoder()?;
     let prompt = "Research current routing patterns, implement an image workflow, test it, and independently grade the result without exposing secrets.";
     let mut samples = Vec::with_capacity(iterations);
     for revision in 0..iterations {

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -254,24 +254,98 @@ pub struct RuntimeStatus {
     pub fixture_providers: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInventoryConfig {
+    schema_version: String,
+    revision: String,
+    providers: Vec<ProviderTarget>,
+}
+
+impl ProviderInventoryConfig {
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if config.schema_version != "lfg.provider-inventory.v1" || config.revision.trim().is_empty()
+        {
+            return Err("invalid provider inventory schema or revision".into());
+        }
+        let mut ids = BTreeSet::new();
+        for p in &config.providers {
+            let fields = [
+                &p.target_id,
+                &p.display_name,
+                &p.provider,
+                &p.adapter_id,
+                &p.model,
+            ];
+            if fields.iter().any(|value| value.trim().is_empty())
+                || !ids.insert(&p.target_id)
+                || p.capabilities.iter().any(|value| value.trim().is_empty())
+                || !matches!(
+                    (p.provenance.as_str(), p.availability.as_str()),
+                    ("configured", "configured") | ("fixture", "replay-only")
+                )
+            {
+                return Err("invalid provider inventory entry".into());
+            }
+        }
+        Ok(config)
+    }
+}
+
+impl Default for ProviderInventoryConfig {
+    fn default() -> Self {
+        Self::from_json_str(include_str!("../config/providers.v1.json"))
+            .expect("bundled provider inventory is valid")
+    }
+}
+
 pub struct LfgRuntime<S, E = CpuRuleEncoder> {
     store: S,
     encoder: E,
     providers: Vec<ProviderTarget>,
+    rubric: EvaluationRubric,
+    promotion_policy: PromotionPolicy,
 }
 
 impl<S: SignalStore> LfgRuntime<S, CpuRuleEncoder> {
     pub fn new(store: S) -> Self {
-        Self::with_encoder(store, CpuRuleEncoder)
+        Self::with_encoder(store, CpuRuleEncoder::default())
     }
 }
 
 impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     pub fn with_encoder(store: S, encoder: E) -> Self {
+        Self::with_encoder_and_inventory(store, encoder, ProviderInventoryConfig::default())
+    }
+
+    pub fn with_encoder_and_inventory(
+        store: S,
+        encoder: E,
+        inventory: ProviderInventoryConfig,
+    ) -> Self {
+        Self::with_configuration(
+            store,
+            encoder,
+            inventory,
+            EvaluationRubric::default_alpha(),
+            PromotionPolicy::default_alpha(),
+        )
+    }
+
+    pub fn with_configuration(
+        store: S,
+        encoder: E,
+        inventory: ProviderInventoryConfig,
+        rubric: EvaluationRubric,
+        promotion_policy: PromotionPolicy,
+    ) -> Self {
         Self {
             store,
             encoder,
-            providers: default_provider_targets(),
+            providers: inventory.providers,
+            rubric,
+            promotion_policy,
         }
     }
 
@@ -365,7 +439,11 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
                 let Some(task) = plan.tasks.iter().find(|task| task.agent_id == agent.id) else {
                     continue;
                 };
-                let target = select_target(&self.providers, &task.required_capabilities, index);
+                let Some(target) =
+                    select_target(&self.providers, &task.required_capabilities, index)
+                else {
+                    continue;
+                };
                 let attempt_id = format!("attempt-{}", Uuid::new_v4());
                 let mut binding = ProviderBinding {
                     id: format!("binding-{}", Uuid::new_v4()),
@@ -539,11 +617,11 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn rubric(&self) -> EvaluationRubric {
-        EvaluationRubric::default_alpha()
+        self.rubric.clone()
     }
 
     pub fn promotion_policy(&self) -> PromotionPolicy {
-        PromotionPolicy::default_alpha()
+        self.promotion_policy.clone()
     }
 
     pub fn record_grade(
@@ -551,6 +629,14 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
         request: SemanticGradeRequest,
     ) -> Result<SemanticGrade, RuntimeError> {
         let existing = self.grades(Some(&request.experiment_id))?;
+        if existing
+            .iter()
+            .any(|grade| grade.rubric.sha256 != self.rubric.hash)
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "experiment contains grades from another rubric revision".into(),
+            ));
+        }
         if existing.iter().any(|grade| {
             grade.outcome_id == request.outcome_id && grade.grader_run_id == request.grader_run_id
         }) {
@@ -590,10 +676,16 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn statistics(&self, experiment_id: &str) -> Result<ExperimentStatistics, RuntimeError> {
-        Ok(experiment_statistics(
-            experiment_id,
-            &self.grades(Some(experiment_id))?,
-        ))
+        let grades = self.grades(Some(experiment_id))?;
+        if grades
+            .iter()
+            .any(|grade| grade.rubric.sha256 != self.rubric.hash)
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "experiment contains grades from another rubric revision".into(),
+            ));
+        }
+        Ok(experiment_statistics(experiment_id, &grades))
     }
 
     pub fn decide_promotion(
@@ -795,87 +887,21 @@ fn select_target(
     providers: &[ProviderTarget],
     required: &[String],
     offset: usize,
-) -> ProviderTarget {
+) -> Option<ProviderTarget> {
     let eligible = providers
         .iter()
         .filter(|provider| {
-            required
-                .iter()
-                .all(|required| provider.capabilities.contains(required))
+            provider.provenance == "fixture"
+                && required
+                    .iter()
+                    .all(|required| provider.capabilities.contains(required))
         })
         .collect::<Vec<_>>();
     if eligible.is_empty() {
-        providers
-            .first()
-            .expect("default providers are non-empty")
-            .clone()
+        None
     } else {
-        (*eligible[offset % eligible.len()]).clone()
+        Some((*eligible[offset % eligible.len()]).clone())
     }
-}
-
-fn default_provider_targets() -> Vec<ProviderTarget> {
-    vec![
-        ProviderTarget {
-            target_id: "openai-codex-seat".into(),
-            display_name: "Codex subscription".into(),
-            provider: "openai".into(),
-            adapter_id: "openai.codex-cli".into(),
-            model: "provider-default".into(),
-            provenance: "configured".into(),
-            availability: "configured".into(),
-            capabilities: vec![
-                "text.generate".into(),
-                "filesystem.write".into(),
-                "test.execute".into(),
-                "web.access".into(),
-            ],
-        },
-        ProviderTarget {
-            target_id: "fixture-anthropic".into(),
-            display_name: "Claude fixture".into(),
-            provider: "anthropic".into(),
-            adapter_id: "anthropic.messages.fixture".into(),
-            model: "sonnet-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec![
-                "text.generate".into(),
-                "web.access".into(),
-                "evaluation.grade".into(),
-            ],
-        },
-        ProviderTarget {
-            target_id: "fixture-google".into(),
-            display_name: "Gemini fixture".into(),
-            provider: "google".into(),
-            adapter_id: "google.gemini.fixture".into(),
-            model: "gemini-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["text.generate".into(), "image.generate".into()],
-        },
-        ProviderTarget {
-            target_id: "fixture-xai".into(),
-            display_name: "Grok fixture".into(),
-            provider: "xai".into(),
-            adapter_id: "xai.responses.fixture".into(),
-            model: "grok-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["text.generate".into(), "web.access".into()],
-        },
-        ProviderTarget {
-            target_id: "fixture-cursor".into(),
-            display_name: "Cursor fixture".into(),
-            provider: "cursor".into(),
-            adapter_id: "cursor.agent.fixture".into(),
-            model: "cursor-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["filesystem.write".into(), "test.execute".into()],
-        },
-    ]
 }
 
 fn execution_draft(
@@ -902,6 +928,70 @@ fn execution_draft(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn provider_inventory_is_configurable_and_does_not_forge_bindings() {
+        let empty = ProviderInventoryConfig::from_json_str(
+            r#"{"schemaVersion":"lfg.provider-inventory.v1","revision":"project-a","providers":[]}"#,
+        ).unwrap();
+        let runtime = LfgRuntime::with_encoder_and_inventory(
+            MemorySignalStore::default(),
+            CpuRuleEncoder::default(),
+            empty,
+        );
+        assert_eq!(runtime.status().fixture_providers, 0);
+        assert!(select_target(&runtime.providers, &["image.generate".into()], 0).is_none());
+        let fixture = ProviderInventoryConfig::default();
+        assert!(select_target(&fixture.providers, &["unknown.capability".into()], 0).is_none());
+        let mut spoofed = fixture;
+        spoofed.providers[0].availability = "active".into();
+        assert!(
+            ProviderInventoryConfig::from_json_str(&serde_json::to_string(&spoofed).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn changed_rubric_cannot_mix_with_existing_experiment_grades() {
+        let mut runtime = LfgRuntime::new(MemorySignalStore::default());
+        let scores = runtime
+            .rubric()
+            .criteria
+            .keys()
+            .map(|key| (key.clone(), 0.9))
+            .collect();
+        runtime
+            .record_grade(SemanticGradeRequest {
+                experiment_id: "experiment".into(),
+                variant_id: "a".into(),
+                outcome_id: "outcome".into(),
+                grader_run_id: "grader".into(),
+                scores,
+            })
+            .unwrap();
+        let mut changed = runtime.rubric();
+        changed.pass_threshold = 0.95;
+        runtime.rubric =
+            EvaluationRubric::from_json_str(&serde_json::to_string(&changed).unwrap()).unwrap();
+        assert!(runtime.statistics("experiment").is_err());
+        let scores = runtime
+            .rubric()
+            .criteria
+            .keys()
+            .map(|key| (key.clone(), 0.9))
+            .collect();
+        assert!(
+            runtime
+                .record_grade(SemanticGradeRequest {
+                    experiment_id: "experiment".into(),
+                    variant_id: "b".into(),
+                    outcome_id: "other".into(),
+                    grader_run_id: "grader".into(),
+                    scores
+                })
+                .is_err()
+        );
+    }
 
     #[test]
     fn incremental_append_rejects_bad_continuation_and_tracks_tails_per_workflow() {

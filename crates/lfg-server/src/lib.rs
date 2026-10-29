@@ -12,13 +12,13 @@ use axum::{
 use lfg_codex::{CodexRunner, CodexStatus, ExecutionResult};
 use lfg_core::{
     CategoryClassifier, ClassificationSnapshot, ClassifierConfig, ClassifyRequest,
-    CpuCategoryClassifier, ExperimentStatistics, GraphSnapshot, PreflightRequest,
-    PreflightSnapshot, PromotionDecision, PromotionDecisionRequest, SemanticGrade,
-    SemanticGradeRequest, SignalEnvelope,
+    CpuCategoryClassifier, CpuRuleEncoder, EvaluationRubric, ExperimentStatistics, GraphSnapshot,
+    PreflightRequest, PreflightRuleConfig, PreflightSnapshot, PromotionDecision,
+    PromotionDecisionRequest, PromotionPolicy, SemanticGrade, SemanticGradeRequest, SignalEnvelope,
 };
 use lfg_runtime::{
-    CommitPlanRequest, ExecutionMetrics, LfgRuntime, PlanCommit, RuntimeError, RuntimeSignalStore,
-    RuntimeStatus,
+    CommitPlanRequest, ExecutionMetrics, LfgRuntime, PlanCommit, ProviderInventoryConfig,
+    RuntimeError, RuntimeSignalStore, RuntimeStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,47 +42,93 @@ impl AppState {
             codex: CodexRunner::from_environment(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
-            classifier_config: Arc::new(load_classifier_config()),
+            classifier_config: Arc::new(ClassifierConfig::default_alpha()),
         }
     }
 
     pub fn persistent(signal_path: impl AsRef<std::path::Path>) -> Result<Self, RuntimeError> {
+        let encoder = configured_preflight_encoder().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("preflight configuration: {error}"))
+        })?;
+        let classifier_config = load_classifier_config().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("classifier configuration: {error}"))
+        })?;
+        let inventory = load_provider_inventory().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("provider configuration: {error}"))
+        })?;
+        let rubric = load_evaluation_rubric()
+            .map_err(|error| RuntimeError::InvalidRequest(format!("evaluation rubric: {error}")))?;
+        let policy = load_promotion_policy()
+            .map_err(|error| RuntimeError::InvalidRequest(format!("promotion policy: {error}")))?;
         let (lfg_events, _) = broadcast::channel(512);
         Ok(Self {
-            lfg: Arc::new(Mutex::new(LfgRuntime::new(RuntimeSignalStore::jsonl(
-                signal_path,
-            )?))),
+            lfg: Arc::new(Mutex::new(LfgRuntime::with_configuration(
+                RuntimeSignalStore::jsonl(signal_path)?,
+                encoder,
+                inventory,
+                rubric,
+                policy,
+            ))),
             lfg_events,
             codex: CodexRunner::from_environment(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
-            classifier_config: Arc::new(load_classifier_config()),
+            classifier_config: Arc::new(classifier_config),
         })
     }
 }
 
-fn load_classifier_config() -> ClassifierConfig {
+fn load_evaluation_rubric() -> Result<EvaluationRubric, String> {
+    let Some(path) = std::env::var_os("LFG_EVALUATION_RUBRIC") else {
+        return Ok(EvaluationRubric::default_alpha());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    EvaluationRubric::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_promotion_policy() -> Result<PromotionPolicy, String> {
+    let Some(path) = std::env::var_os("LFG_PROMOTION_POLICY") else {
+        return Ok(PromotionPolicy::default_alpha());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    PromotionPolicy::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_provider_inventory() -> Result<ProviderInventoryConfig, String> {
+    let Some(path) = std::env::var_os("LFG_PROVIDER_CONFIG") else {
+        return Ok(ProviderInventoryConfig::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    ProviderInventoryConfig::from_json_str(&text)
+        .map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_classifier_config() -> Result<ClassifierConfig, String> {
     let path = match std::env::var_os("LFG_CLASSIFIER_CONFIG") {
         Some(path) => path,
-        None => return ClassifierConfig::default_alpha(),
+        None => return Ok(ClassifierConfig::default_alpha()),
     };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match ClassifierConfig::from_json_str(&text) {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!(
-                    "LFG_CLASSIFIER_CONFIG at {path:?} failed to parse ({error}); using the default taxonomy"
-                );
-                ClassifierConfig::default_alpha()
-            }
-        },
-        Err(error) => {
-            eprintln!(
-                "LFG_CLASSIFIER_CONFIG at {path:?} could not be read ({error}); using the default taxonomy"
-            );
-            ClassifierConfig::default_alpha()
-        }
-    }
+    read_classifier_config(std::path::Path::new(&path))
+}
+
+fn read_classifier_config(path: &std::path::Path) -> Result<ClassifierConfig, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    ClassifierConfig::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+pub fn configured_preflight_encoder() -> Result<CpuRuleEncoder, String> {
+    let Some(path) = std::env::var_os("LFG_PREFLIGHT_CONFIG") else {
+        return Ok(CpuRuleEncoder::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    let config = PreflightRuleConfig::from_json_str(&text)
+        .map_err(|error| format!("invalid {path:?}: {error}"))?;
+    CpuRuleEncoder::new(config)
 }
 
 impl Default for AppState {
@@ -639,6 +685,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn explicit_classifier_path_reports_errors_instead_of_using_defaults() {
+        let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("missing-classifier-config-for-test.json");
+        assert!(read_classifier_config(&missing).is_err());
+    }
+
     async fn json_response(app: Router, request: Request<Body>) -> (StatusCode, Value) {
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
@@ -662,8 +715,8 @@ mod tests {
         let categories = snapshot["categories"].as_array().unwrap();
         assert!(categories.len() >= 7);
         assert_eq!(snapshot["needsBiggerModel"], true);
-        assert!(!snapshot["escalationCatalog"].as_array().unwrap().is_empty());
-        assert_eq!(snapshot["recommendedEscalation"]["model"], "sonnet-5");
+        assert!(snapshot["escalationCatalog"].as_array().unwrap().is_empty());
+        assert!(snapshot["recommendedEscalation"].is_null());
     }
 
     #[tokio::test]
@@ -679,8 +732,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(snapshot["recommendedEscalation"].is_null());
         let catalog = snapshot["escalationCatalog"].as_array().unwrap();
-        assert!(!catalog.is_empty());
-        assert!(catalog.iter().all(|candidate| candidate["active"] == false));
+        assert!(catalog.is_empty());
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ export const commitPlan = (sessionId: string, revision: number, text: string) =>
 export const getGraph = (workflowId: string, throughSequence?: number) =>
   requestJSON<GraphSnapshot>(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(workflowId)}/graph${throughSequence === undefined ? '' : `?throughSequence=${throughSequence}`}`)
 
-export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string) =>
+export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string | null) =>
   requestJSON<ClassificationSnapshot>('/api/lfg/classify', {
-    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, routingNeed })
+    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, ...(routingNeed ? { routingNeed } : {}) })
   })

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "lfg.classifier-config.v2",
+  "revision": "baseline-1",
+  "project": "default",
+  "defaultRoutingNeed": "balanced",
+  "categories": [
+    {"id":"simple_function_call","label":"Simple function call","keywords":["call the function","invoke","run this function","execute function"],"weight":1.0},
+    {"id":"simple_tool_use","label":"Simple tool use","keywords":["use the tool","run the tool","look up","fetch"],"weight":1.0},
+    {"id":"complex_multi_step_agentic_task","label":"Complex multi-step agentic task","keywords":["and then","step by step","first,","refactor","across the codebase","multiple files","implement a","build a system","migrate"],"weight":1.0},
+    {"id":"quick_factual_question","label":"Quick factual question","keywords":["what is","when did","who is","how many","define"],"weight":1.0},
+    {"id":"casual_conversation","label":"Casual conversation","keywords":["hey","how are you","thanks","lol"],"weight":1.0},
+    {"id":"creative_writing","label":"Creative writing","keywords":["write a story","poem","fiction","creative"],"weight":1.0},
+    {"id":"translation","label":"Translation","keywords":["translate","in spanish","in french","into japanese"],"weight":1.0}
+  ],
+  "escalationCategoryId": "complex_multi_step_agentic_task",
+  "escalationPercentThreshold": 55.0,
+  "escalationTokenThreshold": 220,
+  "scoring": {
+    "keywordWeight": 2.0,
+    "lengthDivisor": 60.0,
+    "lengthCap": 3.0,
+    "minimumRawScore": 0.05,
+    "agentsPerWords": 40,
+    "minEscalationAgents": 2,
+    "maxEscalationAgents": 8,
+    "normalAgents": 1,
+    "capabilityWeight": 0.4,
+    "efficiencyWeight": 0.4,
+    "costWeight": 0.1,
+    "costRanks": {"low": 0, "medium": 1, "high": 2}
+  },
+  "escalationCatalog": []
+}
