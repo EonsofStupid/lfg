@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import type { ClassificationSnapshot, EscalationTarget, RoutingNeed } from './types'
 
@@ -23,11 +23,17 @@ export function PromptBranchView({
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [burst, setBurst] = useState<number[]>([])
+  const historyLimitRef = useRef(historyLimit)
 
   useEffect(() => {
-    if (!snapshot || !historyLimit) return
-    setBurst((current) => [...current, snapshot.durationMicros].slice(-historyLimit))
-  }, [snapshot?.revision, snapshot?.durationMicros, historyLimit])
+    historyLimitRef.current = historyLimit
+    if (historyLimit) setBurst((current) => current.slice(-historyLimit))
+  }, [historyLimit])
+
+  useEffect(() => {
+    if (!snapshot || !historyLimitRef.current) return
+    setBurst((current) => [...current, snapshot.durationMicros].slice(-historyLimitRef.current!))
+  }, [snapshot?.revision, snapshot?.durationMicros])
 
   if (!snapshot) return <div className="empty-graph">Begin typing to activate the CPU signal field.</div>
 

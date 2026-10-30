@@ -76,6 +76,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
     operations["defaultSignalPageSize"] = json!(1);
     operations["maxSignalPageSize"] = json!(2);
     operations["uiDebounceMs"] = json!(25);
+    operations["devTools"]["traceCapacity"] = json!(2);
     operations["benchmarkDefaultIterations"] = json!(3);
     operations["benchmarkMaxIterations"] = json!(5);
     let port = TcpListener::bind(("127.0.0.1", 0))
@@ -181,6 +182,16 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         .0,
         413
     );
+    let stats = http_json(port, "GET", "/api/lfg/dev-stats", None);
+    assert_eq!(stats["enabled"], true);
+    assert_eq!(stats["capacity"], 2);
+    assert_eq!(stats["totalRecorded"], 4);
+    assert_eq!(stats["evicted"], 2);
+    assert!(stats["cpuTimeMicros"].is_null());
+    assert_eq!(stats["operationsDigest"], status["operationsDigest"]);
+    assert_eq!(stats["encoderDigest"], status["encoder"]["sha256"]);
+    assert!(!stats.to_string().contains("special-visual"));
+    assert_eq!(stats["traces"].as_array().unwrap().len(), 2);
     let (code, plan_body) = http_response(
         port,
         "POST",

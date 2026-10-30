@@ -140,5 +140,28 @@ export type RuntimeStatus = {
     streamKeepaliveSeconds: number
     uiDebounceMs: number
     uiTimingHistorySamples: number
+    devTools?: {
+      statsEnabled: boolean
+      traceCapacity: number
+      statsPollIntervalMs: number
+      debounceMinMs: number
+      debounceMaxMs: number
+      historyMinSamples: number
+      historyMaxSamples: number
+    }
   }
+}
+
+export type DevStats = {
+  schemaVersion: string
+  enabled: boolean
+  capacity: number
+  totalRecorded: number
+  evicted: number
+  cpuTimeMicros: number | null
+  operationsDigest: string
+  encoderDigest: string
+  classifierDigest: string
+  summaries: Array<{ operation: 'preflight' | 'classification'; samples: number; errors: number; p50TotalMicros: number | null; p95TotalMicros: number | null }>
+  traces: Array<{ sequence: number; recordedAt: string; operation: string; outcome: string; totalMicros: number; queueMicros: number | null; workMicros: number | null }>
 }

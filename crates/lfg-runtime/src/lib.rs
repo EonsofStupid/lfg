@@ -272,6 +272,20 @@ pub struct OperationsConfig {
     stream_keepalive_seconds: u64,
     ui_debounce_ms: u32,
     ui_timing_history_samples: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dev_tools: Option<DevToolsConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevToolsConfig {
+    pub stats_enabled: bool,
+    pub trace_capacity: u32,
+    pub stats_poll_interval_ms: u32,
+    pub debounce_min_ms: u32,
+    pub debounce_max_ms: u32,
+    pub history_min_samples: u32,
+    pub history_max_samples: u32,
 }
 
 impl OperationsConfig {
@@ -318,6 +332,19 @@ impl OperationsConfig {
         {
             return Err("invalid operational configuration".into());
         }
+        if let Some(dev) = &value.dev_tools
+            && (dev.trace_capacity == 0
+                || dev.stats_poll_interval_ms == 0
+                || dev.stats_poll_interval_ms > i32::MAX as u32
+                || dev.debounce_min_ms == 0
+                || dev.debounce_max_ms > i32::MAX as u32
+                || !(dev.debounce_min_ms..=dev.debounce_max_ms).contains(&value.ui_debounce_ms)
+                || dev.history_min_samples == 0
+                || !(dev.history_min_samples..=dev.history_max_samples)
+                    .contains(&value.ui_timing_history_samples))
+        {
+            return Err("invalid development tools configuration".into());
+        }
         Ok(value)
     }
 
@@ -349,6 +376,10 @@ impl OperationsConfig {
     }
     pub fn stream_keepalive_seconds(&self) -> u64 {
         self.stream_keepalive_seconds
+    }
+
+    pub fn dev_tools(&self) -> Option<&DevToolsConfig> {
+        self.dev_tools.as_ref()
     }
 
     pub fn validate_prompt(&self, session_id: &str, text: &str) -> Result<(), RuntimeError> {
@@ -1055,6 +1086,17 @@ mod tests {
     #[test]
     fn operations_config_validates_limits_and_enforces_utf8_bytes_and_page_size() {
         let mut settings = serde_json::to_value(OperationsConfig::default()).unwrap();
+        let mut legacy = settings.clone();
+        legacy.as_object_mut().unwrap().remove("devTools");
+        assert!(
+            OperationsConfig::from_json_str(&legacy.to_string())
+                .unwrap()
+                .dev_tools()
+                .is_none()
+        );
+        let mut invalid_dev = settings.clone();
+        invalid_dev["devTools"]["debounceMinMs"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&invalid_dev.to_string()).is_err());
         settings["maxPromptBytes"] = serde_json::json!(3);
         settings["defaultSignalPageSize"] = serde_json::json!(1);
         settings["maxSignalPageSize"] = serde_json::json!(1);

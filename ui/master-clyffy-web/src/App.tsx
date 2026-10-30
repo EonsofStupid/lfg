@@ -5,6 +5,7 @@ import { classify, commitPlan, getGraph, getStatus, preflight } from './api'
 import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { PromptBranchView } from './PromptBranchView'
+import { DevPanel } from './DevPanel'
 import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
 
 const DEFAULT_PROMPT = 'Research cutting-edge agent routing, implement the visual system, test it, and independently grade the result.'
@@ -30,37 +31,41 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState(0)
+  const [debounceOverride, setDebounceOverride] = useState<number | null>(null)
+  const [historyOverride, setHistoryOverride] = useState<number | null>(null)
   const requestRevision = useRef(0)
   const classifyRevision = useRef(0)
   const publicEmbed = new URLSearchParams(window.location.search).get('embed') === 'public'
   const promptBytes = useMemo(() => new TextEncoder().encode(prompt).length, [prompt])
   const promptTooLarge = status !== null && promptBytes > status.operations.maxPromptBytes
+  const debounceMs = debounceOverride ?? status?.operations.uiDebounceMs
+  const historyLimit = historyOverride ?? status?.operations.uiTimingHistorySamples
 
   useEffect(() => { void getStatus().then(setStatus).catch((value: Error) => setError(value.message)) }, [])
 
   useEffect(() => {
     const current = ++requestRevision.current
     const text = prompt
-    if (!status || !text.trim() || promptTooLarge) { setPreview(null); return }
+    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setPreview(null); return }
     const timer = window.setTimeout(() => {
       void preflight(SESSION_ID, revision, text).then((value) => {
         if (requestRevision.current === current) setPreview(value)
       }).catch((value: Error) => setError(value.message))
-    }, status.operations.uiDebounceMs)
+    }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, status, promptTooLarge])
+  }, [prompt, revision, status, promptTooLarge, debounceMs])
 
   useEffect(() => {
     const current = ++classifyRevision.current
     const text = prompt
-    if (!status || !text.trim() || promptTooLarge) { setClassification(null); return }
+    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setClassification(null); return }
     const timer = window.setTimeout(() => {
       void classify(SESSION_ID, revision, text, activeSubscriptions, routingNeed).then((value) => {
         if (classifyRevision.current === current) setClassification(value)
       }).catch((value: Error) => setError(value.message))
-    }, status.operations.uiDebounceMs)
+    }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge])
+  }, [prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge, debounceMs])
 
   const toggleSubscription = useCallback((id: string) => {
     setActiveSubscriptions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
@@ -159,7 +164,7 @@ export default function App() {
           ) : (
             <PromptBranchView
               snapshot={classification}
-              historyLimit={status?.operations.uiTimingHistorySamples}
+              historyLimit={historyLimit}
               routingNeed={routingNeed}
               onRoutingNeedChange={setRoutingNeed}
               overrideTarget={overrideTarget}
@@ -167,6 +172,12 @@ export default function App() {
             />
           )}
         </section>
+
+        {!publicEmbed && mode === 'inspector' && status && debounceMs && historyLimit && <DevPanel
+          status={status} debounceMs={debounceMs} historyLimit={historyLimit}
+          onDebounce={setDebounceOverride} onHistory={setHistoryOverride}
+          onReset={() => { setDebounceOverride(null); setHistoryOverride(null) }}
+        />}
 
         {commit && <section className="replay-bar">
           <div><span>SIGNAL REPLAY</span><strong>{cursor + 1} / {commit.committedSignals}</strong></div>

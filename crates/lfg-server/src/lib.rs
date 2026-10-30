@@ -25,6 +25,9 @@ use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
+mod dev_stats;
+use dev_stats::{DevStats, Operation};
+
 #[derive(Clone)]
 pub struct AppState {
     lfg: Arc<Mutex<LfgRuntime<RuntimeSignalStore>>>,
@@ -32,6 +35,7 @@ pub struct AppState {
     codex: CodexRunner,
     classifier_config: Arc<ClassifierConfig>,
     operations: OperationsConfig,
+    dev_stats: Arc<DevStats>,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
 
     pub fn new() -> Self {
         let operations = OperationsConfig::default();
+        let dev_stats = make_dev_stats(&operations);
         let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Self {
             lfg: Arc::new(Mutex::new(LfgRuntime::new(RuntimeSignalStore::memory()))),
@@ -50,6 +55,7 @@ impl AppState {
             ),
             classifier_config: Arc::new(ClassifierConfig::default_alpha()),
             operations,
+            dev_stats,
         }
     }
 
@@ -70,6 +76,7 @@ impl AppState {
         let operations = configured_operations().map_err(|error| {
             RuntimeError::InvalidRequest(format!("operational configuration: {error}"))
         })?;
+        let dev_stats = make_dev_stats(&operations);
         let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Ok(Self {
             lfg: Arc::new(Mutex::new(LfgRuntime::with_configuration(
@@ -86,8 +93,17 @@ impl AppState {
             ),
             classifier_config: Arc::new(classifier_config),
             operations,
+            dev_stats,
         })
     }
+}
+
+fn make_dev_stats(operations: &OperationsConfig) -> Arc<DevStats> {
+    let config = operations.dev_tools();
+    Arc::new(DevStats::new(
+        config.is_some_and(|value| value.stats_enabled),
+        config.map_or(0, |value| value.trace_capacity as usize),
+    ))
 }
 
 pub fn configured_operations() -> Result<OperationsConfig, String> {
@@ -209,6 +225,7 @@ pub fn router(state: AppState) -> Router {
             get(lfg_promotions).post(lfg_decide_promotion),
         )
         .route("/api/lfg/classify", post(lfg_classify))
+        .route("/api/lfg/dev-stats", get(lfg_dev_stats))
         .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
 }
@@ -217,13 +234,42 @@ async fn lfg_classify(
     State(state): State<AppState>,
     Json(request): Json<ClassifyRequest>,
 ) -> Result<Json<ClassificationSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let start = state.dev_stats.start();
+    let work = state.dev_stats.start();
+    let result = state
         .operations
         .validate_prompt(&request.session_id, &request.text)
-        .map_err(lfg_error)?;
-    Ok(Json(
-        CpuCategoryClassifier.classify(&request, &state.classifier_config),
-    ))
+        .map(|()| Json(CpuCategoryClassifier.classify(&request, &state.classifier_config)))
+        .map_err(lfg_error);
+    state.dev_stats.record(
+        Operation::Classification,
+        start,
+        None,
+        DevStats::elapsed(work),
+        result.is_ok(),
+    );
+    result
+}
+
+async fn lfg_dev_stats(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<dev_stats::Snapshot>,
+) {
+    let status = state.lfg.lock().await.status();
+    let classifier_digest = lfg_core::digest_value(
+        &serde_json::to_value(&*state.classifier_config).expect("classifier config serializes"),
+    );
+    let snapshot = state.dev_stats.snapshot().with_context(
+        status.operations_digest,
+        status.encoder.sha256,
+        classifier_digest,
+    );
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(snapshot),
+    )
 }
 
 pub fn router_with_ui(state: AppState, ui_directory: impl AsRef<std::path::Path>) -> Router {
@@ -409,13 +455,22 @@ async fn lfg_preflight(
     State(state): State<AppState>,
     Json(request): Json<PreflightRequest>,
 ) -> Result<Json<PreflightSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .lfg
-        .lock()
-        .await
-        .preflight(&request)
-        .map(Json)
-        .map_err(lfg_error)
+    let start = state.dev_stats.start();
+    let queue = state.dev_stats.start();
+    let runtime = state.lfg.lock().await;
+    let queue_micros = DevStats::elapsed(queue);
+    let work = state.dev_stats.start();
+    let result = runtime.preflight(&request).map(Json).map_err(lfg_error);
+    let work_micros = DevStats::elapsed(work);
+    drop(runtime);
+    state.dev_stats.record(
+        Operation::Preflight,
+        start,
+        queue_micros,
+        work_micros,
+        result.is_ok(),
+    );
+    result
 }
 
 async fn lfg_commit_plan(
