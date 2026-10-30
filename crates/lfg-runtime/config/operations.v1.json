@@ -11,5 +11,14 @@
   "eventBufferCapacity": 512,
   "streamKeepaliveSeconds": 15,
   "uiDebounceMs": 140,
-  "uiTimingHistorySamples": 14
+  "uiTimingHistorySamples": 14,
+  "devTools": {
+    "statsEnabled": true,
+    "traceCapacity": 256,
+    "statsPollIntervalMs": 2000,
+    "debounceMinMs": 25,
+    "debounceMaxMs": 1000,
+    "historyMinSamples": 1,
+    "historyMaxSamples": 128
+  }
 }

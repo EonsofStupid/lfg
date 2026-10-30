@@ -72,6 +72,10 @@ in the repository has already been made configurable. Protocol constants,
 mathematical identities, and visual styling are distinct from operator-tunable
 policy; future controls require an explicit ownership and validation decision.
 
+The optional `devTools` object configures local trace collection and the
+inspector's tuning ranges; see [developer observability](DEVELOPER-OBSERVABILITY.md)
+for the recorded fields, overhead, and limits.
+
 An experiment cannot mix semantic grades produced by different rubric hashes;
 changing the rubric requires a new experiment (or restoring the original
 rubric to inspect the prior experiment's statistics). The separate offline

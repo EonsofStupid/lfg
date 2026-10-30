@@ -1,4 +1,4 @@
-import type { ClassificationSnapshot, GraphSnapshot, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
+import type { ClassificationSnapshot, DevStats, GraphSnapshot, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -21,6 +21,15 @@ export const getStatus = async () => {
       !Number.isSafeInteger(operations.uiTimingHistorySamples) || operations.uiTimingHistorySamples <= 0) {
     throw new Error('Server operational configuration is missing or incompatible')
   }
+  const dev = operations.devTools
+  if (dev && (!Number.isSafeInteger(dev.statsPollIntervalMs) || dev.statsPollIntervalMs <= 0 ||
+      !Number.isSafeInteger(dev.debounceMinMs) || !Number.isSafeInteger(dev.debounceMaxMs) ||
+      operations.uiDebounceMs < dev.debounceMinMs || operations.uiDebounceMs > dev.debounceMaxMs ||
+      !Number.isSafeInteger(dev.historyMinSamples) || !Number.isSafeInteger(dev.historyMaxSamples) ||
+      dev.historyMinSamples <= 0 || operations.uiTimingHistorySamples < dev.historyMinSamples ||
+      operations.uiTimingHistorySamples > dev.historyMaxSamples)) {
+    throw new Error('Server development configuration is incompatible')
+  }
   return status
 }
 
@@ -36,6 +45,8 @@ export const commitPlan = (sessionId: string, revision: number, text: string) =>
 
 export const getGraph = (workflowId: string, throughSequence?: number) =>
   requestJSON<GraphSnapshot>(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(workflowId)}/graph${throughSequence === undefined ? '' : `?throughSequence=${throughSequence}`}`)
+
+export const getDevStats = () => requestJSON<DevStats>('/api/lfg/dev-stats')
 
 export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string | null) =>
   requestJSON<ClassificationSnapshot>('/api/lfg/classify', {
