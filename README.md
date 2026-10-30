@@ -45,6 +45,8 @@ fixed in code. See [LFG configuration](docs/lfg/CONFIGURATION.md) for the
 versioned files, project overrides, and current limitations.
 The [assessment and update design](docs/lfg/ASSESSMENT-AND-UPDATES.md) records
 the intended MCP, project profile, CPU measurement, and artifact-update paths.
+The [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md) defines the
+self-contained binary, local/hosted use, cloud integration, and developer UI.
 
 Rust-authoritative; `GoClyffy` (in a sibling project) still hosts an older
 shadow-parity Go implementation kept in sync via

@@ -54,6 +54,52 @@ class DatasetGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two distinct families"):
             train.grouped_split([record(1, True), record(2, True)], 731)
 
+    def test_run_manifest_prevents_overwrite_and_mismatched_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            manifest = {"dataset_sha256": "original", "seed": 7}
+            train.prepare_run(output, manifest, False)
+            train.prepare_run(output, manifest, True)
+            with self.assertRaisesRegex(ValueError, "not empty"):
+                train.prepare_run(output, manifest, False)
+            with self.assertRaisesRegex(ValueError, "resume refused"):
+                train.prepare_run(output, {**manifest, "dataset_sha256": "changed"}, True)
+            with self.assertRaisesRegex(ValueError, "existing run manifest"):
+                train.prepare_run(Path(directory) / "missing", manifest, True)
+
+    def test_resume_requires_training_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            with self.assertRaisesRegex(ValueError, "incomplete checkpoint"):
+                train.validate_checkpoint(checkpoint)
+            for name in ("optimizer.pt", "scheduler.pt", "rng_state.pth", "model.safetensors"):
+                (checkpoint / name).write_bytes(b"test")
+            (checkpoint / "trainer_state.json").write_text('{"global_step": 1}', encoding="utf-8")
+            train.validate_checkpoint(checkpoint)
+            (checkpoint / "trainer_state.json").write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid trainer state"):
+                train.validate_checkpoint(checkpoint)
+
+    def test_run_lock_rejects_concurrent_writers_and_releases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with train.run_lock(output):
+                with self.assertRaisesRegex(ValueError, "run lock exists"):
+                    with train.run_lock(output):
+                        self.fail("second writer acquired the lock")
+            with train.run_lock(output):
+                pass
+
+    def test_training_settings_and_overrides_are_validated(self):
+        config = train.load_training_config(train.TRAINING_CONFIG)
+        train.validate_training_config(config)
+        for field, invalid in (("batch_size", 0), ("checkpoint_steps", -1),
+                               ("epochs", float("nan")), ("base_model", ""),
+                               ("allow_mismatched_sizes", "true")):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    train.validate_training_config({**config, field: invalid})
+
 
 if __name__ == "__main__":
     unittest.main()
