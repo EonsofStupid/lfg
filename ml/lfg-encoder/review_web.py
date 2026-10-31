@@ -53,7 +53,7 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'checkpoint_verification'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'checkpoint_verification', 'redaction_suggestions'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
@@ -74,7 +74,40 @@ def load_config(path: Path) -> dict[str, Any]:
                 or not isinstance(limits['repo'], str) or not Path(limits['repo']).is_absolute()
                 or type(limits['max_history_bytes']) is not int or limits['max_history_bytes'] < 1):
             raise ValueError('invalid checkpoint verification configuration')
+    if 'redaction_suggestions' in value:
+        rules = value['redaction_suggestions']
+        if not isinstance(rules, list):
+            raise ValueError('invalid redaction suggestions')
+        ids = set()
+        for rule in rules:
+            if (not isinstance(rule, dict)
+                    or set(rule) != {'id', 'label', 'start_marker', 'end_marker', 'trailing_text', 'replacement'}
+                    or any(not isinstance(rule[key], str) for key in rule)
+                    or any(not rule[key].strip() for key in ('id', 'label', 'start_marker', 'end_marker', 'trailing_text'))
+                    or rule['id'] in ids):
+                raise ValueError('invalid redaction suggestion rule')
+            ids.add(rule['id'])
     return value
+
+
+def redaction_suggestions(text: str, rules: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Return optional prefix-removal previews in Unicode code-point offsets."""
+    result = []
+    for rule in rules:
+        start_marker, end_marker, trailing = rule['start_marker'], rule['end_marker'], rule['trailing_text']
+        if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+            continue
+        start, close = text.find(start_marker), text.find(end_marker)
+        after = close + len(end_marker)
+        if start < 0 or close <= start or text[:start].strip() or not text.startswith(trailing, after):
+            continue
+        end = after + len(trailing)
+        candidate = rule['replacement'] + text[end:]
+        if not candidate.strip() or candidate == text:
+            continue
+        result.append({'id': rule['id'], 'label': rule['label'], 'start': 0,
+                       'end': end, 'replacement': rule['replacement']})
+    return result
 
 
 def verify_source(workspace: Path, identifier: str, expected_digest: str, limits: dict[str, int] | None,
@@ -246,11 +279,14 @@ class ReviewHandler(BaseHTTPRequestHandler):
                                           'pending': len(pending), 'offset': offset})
                     return
                 annotation = corpus_audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)
+                stale = (not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation) or row['verified']
+                suggestions = [] if stale else redaction_suggestions(row['text'], self.server.config.get('redaction_suggestions', []))
                 self.json_reply(200, {'item': {'id': identifier, 'text': row['text'], 'source': row['source'],
                                                'review_note': row.get('review_note'), 'labels': {k: row[k] for k in evaluate.FIELDS},
                                                'labels_pending': row.get('labels_pending', False),
                                                'project': source['project'], 'split': source['split'],
                                                'annotation_sha256': annotation,
+                                               'redaction_suggestions': suggestions,
                                                'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,
                                                'interrupted_write': bool(row['verified'])},
                                       'taxonomy': {k: sorted(v) for k, v in taxonomy.items()},

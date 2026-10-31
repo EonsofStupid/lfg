@@ -87,6 +87,51 @@ class ReviewWebTests(unittest.TestCase):
         self.assertTrue(json.loads(raw)['missing_id'])
         self.assertEqual(self.request('GET', '/api/item?id=one&offset=0')[0], 400)
 
+    def test_wrapper_preview_is_optional_and_approval_records_the_exact_transform(self):
+        plan, report, ledger = review_corpus.load_workspace(self.workspace)
+        source, rows, index, _ = review_corpus.find_row(self.workspace, plan, 'one')
+        rows[index]['text'] = '\n<in-app-browser-context source="fixture">\n😀\n</in-app-browser-context>\n\n## My request:\n  preserve indentation'
+        source.write_bytes(review_corpus.encoded_rows(rows))
+        ledger['one']['annotation_sha256'] = corpus_audit.annotation_digest(rows[index], 'fixture', 'train', report['taxonomy_sha256'])
+        (self.workspace / 'reviews.jsonl').write_bytes(review_corpus.encoded_rows(list(ledger.values())))
+        before = (self.workspace / 'reviews.jsonl').read_bytes()
+        status, _, raw = self.request('GET', '/api/item?id=one')
+        value = json.loads(raw)['item']
+        suggestion = value['redaction_suggestions'][0]
+        operation = {key: suggestion[key] for key in ('start', 'end', 'replacement')}
+        self.assertEqual(status, 200)
+        self.assertEqual(review_corpus.apply_redactions(value['text'], [operation]), '  preserve indentation')
+        self.assertEqual(before, (self.workspace / 'reviews.jsonl').read_bytes())
+        body = {'id': 'one', 'annotation_sha256': value['annotation_sha256'], 'decision': 'approved',
+                'confirmation': 'APPROVE', 'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                'redactions': [operation]}
+        status, _, _ = self.request('POST', '/api/decision', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        updated_plan, _, updated_ledger = review_corpus.load_workspace(self.workspace)
+        _, updated, index, _ = review_corpus.find_row(self.workspace, updated_plan, 'one')
+        self.assertEqual(updated[index]['text'], '  preserve indentation')
+        self.assertEqual(updated[index]['review_transforms'][0]['operations'], [operation])
+        self.assertEqual(updated_ledger['one']['decision'], 'approved')
+
+    def test_wrapper_preview_rejects_ambiguous_shapes_and_empty_requests(self):
+        rules = self.server.config['redaction_suggestions']
+        prefix = '<in-app-browser-context>fixture</in-app-browser-context>\n\n## My request:\n'
+        self.assertEqual(review_web.redaction_suggestions('user text ' + prefix + 'request', rules), [])
+        self.assertEqual(review_web.redaction_suggestions(prefix + prefix + 'request', rules), [])
+        self.assertEqual(review_web.redaction_suggestions(prefix + '  ', rules), [])
+        self.assertEqual(review_web.redaction_suggestions(prefix.replace('\n\n', '\n') + 'request', rules), [])
+
+    def test_invalid_or_duplicate_wrapper_rules_reject_configuration(self):
+        path = Path(self.temp.name) / 'web-config.json'
+        config = json.loads(review_web.DEFAULT_CONFIG.read_bytes())
+        config['redaction_suggestions'].append(dict(config['redaction_suggestions'][0]))
+        path.write_text(json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'suggestion rule'):
+            review_web.load_config(path)
+        config['redaction_suggestions'] = []
+        path.write_text(json.dumps(config))
+        self.assertEqual(review_web.load_config(path)['redaction_suggestions'], [])
+
     def test_oversized_decision_is_rejected_without_approval(self):
         self.server.config['max_request_bytes'] = 10
         try:

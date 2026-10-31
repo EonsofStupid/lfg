@@ -68,6 +68,39 @@
     }
   }
 
+  function renderSuggestions() {
+    const container = el('suggestions');
+    container.replaceChildren();
+    if (!current || redactions.length || modelText !== current.text) return;
+    for (const suggestion of current.redaction_suggestions || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = suggestion.label;
+      button.addEventListener('click', () => {
+        const points = Array.from(modelText);
+        if (redactions.length || modelText !== current.text ||
+            !Number.isSafeInteger(suggestion.start) || !Number.isSafeInteger(suggestion.end) ||
+            suggestion.start < 0 || suggestion.start >= suggestion.end || suggestion.end > points.length ||
+            typeof suggestion.replacement !== 'string') {
+          el('notice').textContent = 'The suggestion no longer matches this request.';
+          return;
+        }
+        const changed = points.slice(0, suggestion.start).join('') + suggestion.replacement + points.slice(suggestion.end).join('');
+        if (!changed.trim() || changed === modelText) {
+          el('notice').textContent = 'The suggested request is empty or unchanged.';
+          return;
+        }
+        redactions.push({start: suggestion.start, end: suggestion.end, replacement: suggestion.replacement});
+        modelText = changed;
+        el('request').value = modelText;
+        el('notice').textContent = 'Preview only. Check the remaining request, context and every label before approving.';
+        renderSuggestions();
+      });
+      container.append(button);
+    }
+  }
+
   async function refresh(findId = null) {
     current = null;
     el('review').hidden = true;
@@ -94,6 +127,7 @@
     modelText = current.text;
     el('request').value = modelText;
     redactions = [];
+    renderSuggestions();
     el('source').textContent = JSON.stringify(current.source, null, 2);
     el('source-check').textContent = '';
     el('review-note').textContent = current.review_note || 'No review note recorded.';
@@ -181,6 +215,7 @@
     const modelPoints = Array.from(modelText);
     modelText = modelPoints.slice(0, modelStart).join('') + replacement + modelPoints.slice(modelEnd).join('');
     request.value = modelText;
+    renderSuggestions();
     request.focus();
     request.setSelectionRange(start, start + replacement.length);
     el('notice').textContent = 'Review the changed request and all labels before approving.';
@@ -190,6 +225,7 @@
     modelText = current.text;
     el('request').value = modelText;
     redactions = [];
+    renderSuggestions();
     el('notice').textContent = 'Request restored to its original review copy.';
   });
   el('skip').addEventListener('click', () => { offset += 1; handle(refresh()); });
