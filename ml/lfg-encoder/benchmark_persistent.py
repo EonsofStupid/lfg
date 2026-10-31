@@ -149,6 +149,10 @@ class Predictor:
         if not line or len(line) > self.config['max_response_bytes'] or not line.endswith(b'\n'):
             raise ValueError('prediction response is missing or exceeds configured limit')
         value = json.loads(line)
+        self.validate_response(value, identifier, text)
+        return elapsed, value
+
+    def validate_response(self, value: Any, identifier: str, text: str) -> None:
         if not isinstance(value, dict) or value.get('schema_version') != 'lfg.evaluation-prediction.v1' or \
                 value.get('id') != identifier or value.get('input_sha256') != digest(text.encode('utf-8')) or \
                 not isinstance(value.get('model'), dict) or not isinstance(value.get('producer_sha256'), str):
@@ -166,7 +170,6 @@ class Predictor:
         if self.model is not None and (value['model'] != self.model or value['producer_sha256'] != self.producer):
             raise ValueError('prediction identity changed during measurement')
         self.model, self.producer = value['model'], value['producer_sha256']
-        return elapsed, value
 
     def close(self) -> None:
         if self.failed and self.process.poll() is None:
