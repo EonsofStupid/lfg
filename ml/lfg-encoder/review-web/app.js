@@ -69,7 +69,10 @@
   }
 
   async function refresh() {
+    current = null;
+    el('review').hidden = true;
     el('notice').textContent = '';
+    el('source-context').textContent = '';
     const status = await api('/api/status');
     el('summary').textContent = `${status.decisions.pending} pending · ${status.decisions.approved} approved · ${status.decisions.rejected} rejected · ${status.reviewer}`;
     const result = await api(`/api/item?offset=${offset}`);
@@ -132,6 +135,22 @@
       if (current === checked) el('source-check').textContent = 'Original message and source prefix match. Check context, authorship, rights, and privacy separately.';
     } catch (error) {
       if (current === checked) el('source-check').textContent = `Source check failed: ${error.message}`;
+    }
+  })()));
+  el('show-context').addEventListener('click', () => handle((async () => {
+    if (!current) return;
+    const checked = current;
+    el('source-context').textContent = 'Loading prior user messages…';
+    try {
+      const result = await api('/api/source-context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: checked.id, annotation_sha256: checked.annotation_sha256})});
+      if (current !== checked) return;
+      const prefix = result.truncated ? 'Earlier messages were omitted by the configured limits.\n\n' : '';
+      el('source-context').textContent = prefix + (result.messages.length ?
+        result.messages.map(message => `Source line ${message.source_line}:\n${message.text}`).join('\n\n') :
+        'No prior user messages are available within the configured limits.');
+    } catch (error) {
+      if (current === checked) el('source-context').textContent = `Context unavailable: ${error.message}`;
     }
   })()));
   el('redact').addEventListener('click', () => {

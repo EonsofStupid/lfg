@@ -207,7 +207,19 @@ on demand; it does not save an approval or establish authorship, context,
 permission, privacy or label correctness. Later content appended to the session
 does not invalidate the checked prefix. A changed or unavailable prefix, a
 different review copy, unsupported source type, or an interrupted review write
-produces an error. The browser does not display additional session messages.
+produces an error. For these Codex sources, **Show prior user messages** can
+also display a bounded suffix of earlier single-text messages explicitly marked
+`user.text` after the same source-prefix verification. This is opt-in and local;
+the context can contain private information. It excludes assistant replies,
+tool output, later messages and other message types, so it is not a complete
+conversation. The response reports when the configured message or byte limit
+omitted earlier user text. Context is displayed only and is not added to the
+record, persisted by the review tool or treated as a label. Review the request
+as presented: if an isolated follow-up cannot be labeled without missing context,
+skip or reject it rather than silently treating the surrounding text as input.
+The optional `source_context` configuration controls maximum messages and UTF-8
+text bytes; omitting it disables the context endpoint. The tool uses the same
+loopback authentication and `no-store` response policy as the review API.
 The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a

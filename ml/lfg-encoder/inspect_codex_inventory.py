@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import sys
@@ -37,7 +38,8 @@ def verify_many(records: list[dict], max_bytes: int, max_line_bytes: int) -> lis
     return results
 
 
-def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, max_line_bytes: int) -> list[tuple[int, str]]:
+def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, max_line_bytes: int,
+                 on_prior_line=None) -> list[tuple[int, str]]:
     before = path.stat()
     if any(record['source_prefix_bytes'] > max_bytes or before.st_size < record['source_prefix_bytes']
            for _, record in ordered):
@@ -60,6 +62,8 @@ def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, ma
                 raise ValueError('source grew beyond byte limit')
             hasher.update(line)
             line_number += 1
+            if on_prior_line is not None and current and line_number < current[1]['source_line']:
+                on_prior_line(line_number, line)
             if current and line_number == current[1]['source_line']:
                 index, record = current
                 selected = line.rstrip(b'\r\n')
@@ -101,6 +105,49 @@ def message_text(selected: bytes, record: dict) -> str:
 
 def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
     return verify_many([record], max_bytes, max_line_bytes)[0]
+
+
+def prior_user_context(record: dict, max_bytes: int, max_line_bytes: int,
+                       max_messages: int, max_context_bytes: int) -> tuple[str, list[dict], bool]:
+    """Return a bounded suffix of explicitly marked prior user messages after prefix verification."""
+    verify_record(record)
+    if any(type(value) is not int or value < 1 for value in (max_bytes, max_line_bytes, max_messages, max_context_bytes)):
+        raise ValueError('context limits must be positive integers')
+    messages = deque()
+    size = 0
+    truncated = False
+
+    def consume(line_number: int, line: bytes) -> None:
+        nonlocal size, truncated
+        row = json.loads(line)
+        if not isinstance(row, dict) or row.get('type') != 'response_item':
+            return
+        payload = row.get('payload')
+        if not isinstance(payload, dict) or payload.get('type') != 'message' or payload.get('role') != 'user':
+            return
+        metadata, content = payload.get('internal_chat_message_metadata_passthrough'), payload.get('content')
+        if (not isinstance(metadata, dict) or metadata.get('content_item_kinds') != ['user.text']
+                or not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict)
+                or content[0].get('type') != 'input_text' or not isinstance(content[0].get('text'), str)):
+            return
+        text = content[0]['text']
+        if not text.strip():
+            return
+        length = len(text.encode('utf-8'))
+        if length > max_context_bytes:
+            messages.clear()
+            size = 0
+            truncated = True
+            return
+        messages.append((line_number, text, length))
+        size += length
+        while len(messages) > max_messages or size > max_context_bytes:
+            _, _, removed = messages.popleft()
+            size -= removed
+            truncated = True
+
+    found = verify_group(Path(record['source_file']), [(0, record)], max_bytes, max_line_bytes, consume)
+    return found[0][1], [{'source_line': line, 'text': text} for line, text, _ in messages], truncated
 
 
 def main() -> None:

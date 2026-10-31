@@ -52,7 +52,7 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
@@ -61,10 +61,17 @@ def load_config(path: Path) -> dict[str, Any]:
         if (not isinstance(limits, dict) or set(limits) != {'max_session_bytes', 'max_line_bytes'}
                 or any(type(limit) is not int or limit < 1 for limit in limits.values())):
             raise ValueError('invalid source verification limits')
+    if 'source_context' in value:
+        limits = value['source_context']
+        if ('source_verification' not in value or not isinstance(limits, dict)
+                or set(limits) != {'max_messages', 'max_context_bytes'}
+                or any(type(limit) is not int or limit < 1 for limit in limits.values())):
+            raise ValueError('invalid source context limits')
     return value
 
 
-def verify_source(workspace: Path, identifier: str, expected_digest: str, limits: dict[str, int] | None) -> str:
+def verify_source(workspace: Path, identifier: str, expected_digest: str, limits: dict[str, int] | None,
+                  context_limits: dict[str, int] | None = None) -> str | dict[str, Any]:
     """Check the source attached to a pending record, without changing the review."""
     if limits is None:
         raise ValueError('source verification is not configured')
@@ -82,7 +89,12 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
     if not isinstance(original, dict) or original.get('kind') != 'codex-session-user-text':
         raise ValueError('automatic source verification is unavailable for this source type')
     entry = {**original, 'schema_version': 'lfg.unreviewed-codex-message.v2'}
-    text = inspect_codex_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
+    if context_limits is None:
+        text = inspect_codex_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
+    else:
+        text, messages, truncated = inspect_codex_inventory.prior_user_context(
+            entry, limits['max_session_bytes'], limits['max_line_bytes'],
+            context_limits['max_messages'], context_limits['max_context_bytes'])
     if text != row['text'] or row.get('review_transforms'):
         raise ValueError('review copy differs from the original source')
     # Recheck the review record after the potentially lengthy file read.
@@ -93,6 +105,8 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
             or corpus_audit.annotation_digest(rows_after[index_after], source_after['project'],
                                                source_after['split'], taxonomy_after) != current):
         raise ValueError('review record changed during source verification')
+    if context_limits is not None:
+        return {'status': 'source_prefix_and_original_text_match', 'messages': messages, 'truncated': truncated}
     return 'source_prefix_and_original_text_match'
 
 
@@ -211,7 +225,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not self.authorized(post=True):
             self.json_reply(403, {'error': 'not authorized'})
             return
-        if self.path not in ('/api/decision', '/api/verify-source') or self.headers.get('Transfer-Encoding') or \
+        if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context') or self.headers.get('Transfer-Encoding') or \
                 self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})
             return
@@ -226,13 +240,21 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
-            if self.path == '/api/verify-source':
+            if self.path in ('/api/verify-source', '/api/source-context'):
                 if (not isinstance(value, dict) or set(value) != {'id', 'annotation_sha256'}
                         or not isinstance(value['id'], str) or not isinstance(value['annotation_sha256'], str)):
                     raise ValueError('invalid source verification request')
-                status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
-                                       self.server.config.get('source_verification'))
-                self.json_reply(200, {'status': status})
+                if self.path == '/api/source-context':
+                    limits = self.server.config.get('source_context')
+                    if limits is None:
+                        raise ValueError('source context is not configured')
+                    result = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
+                                           self.server.config.get('source_verification'), limits)
+                    self.json_reply(200, result)
+                else:
+                    status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
+                                           self.server.config.get('source_verification'))
+                    self.json_reply(200, {'status': status})
                 return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
             if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256'}):
