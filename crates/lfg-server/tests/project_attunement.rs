@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{fs, process::Command};
 
 fn invoke(root: &std::path::Path, config: &Value) -> std::process::Output {
@@ -103,6 +104,54 @@ fn rejects_invalid_or_unbounded_inputs_and_keeps_missing_source_missing() {
     )
     .unwrap();
     assert!(!invoke(root.path(), &cfg).status.success());
+}
+
+#[test]
+fn text_source_attaches_exact_bounded_utf8_and_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("src")).unwrap();
+    let bytes = "[workspace]\nmembers = [\"crates/é\"]\n".as_bytes();
+    fs::write(root.path().join("Cargo.toml"), bytes).unwrap();
+    let mut cfg = config();
+    cfg["selections"] = json!([{"bankId":"rust"}]);
+    cfg["sources"] = json!([{"kind":"text","binding":"workspace layout","path":"Cargo.toml"}]);
+    let output = invoke(root.path(), &cfg);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let question = result["preview"]["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["question"]["binding"] == "workspace layout")
+        .unwrap();
+    assert_eq!(question["artifact"], std::str::from_utf8(bytes).unwrap());
+    assert_eq!(question["bindingStatus"], "supplied");
+    assert_eq!(result["sources"][0]["kind"], "text");
+    assert_eq!(
+        result["sources"][0]["sha256"],
+        format!("{:x}", Sha256::digest(bytes))
+    );
+
+    cfg["limits"]["maxFileBytes"] = json!(bytes.len() - 1);
+    assert!(!invoke(root.path(), &cfg).status.success());
+    cfg["limits"]["maxFileBytes"] = json!(512);
+    fs::write(root.path().join("Cargo.toml"), [0xff]).unwrap();
+    assert!(!invoke(root.path(), &cfg).status.success());
+    fs::write(root.path().join("Cargo.toml"), "sk-blocked-example").unwrap();
+    assert!(!invoke(root.path(), &cfg).status.success());
+    fs::remove_file(root.path().join("Cargo.toml")).unwrap();
+    let missing: Value = serde_json::from_slice(&invoke(root.path(), &cfg).stdout).unwrap();
+    assert_eq!(missing["sources"][0]["status"], "missing");
+    assert!(
+        missing["preview"]["missingBindings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("workspace layout"))
+    );
 }
 
 #[cfg(unix)]
