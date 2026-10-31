@@ -128,6 +128,10 @@ class Predictor:
         threading.Thread(target=write_lines, daemon=True).start()
 
     def request(self, identifier: str, text: str) -> int:
+        elapsed, _ = self.request_prediction(identifier, text)
+        return elapsed
+
+    def request_prediction(self, identifier: str, text: str) -> tuple[int, dict[str, Any]]:
         payload = (json.dumps({'id': identifier, 'text': text}, ensure_ascii=False) + '\n').encode('utf-8')
         if self.process.poll() is not None or self.process.stdin is None:
             raise ValueError('prediction process exited before request')
@@ -162,7 +166,7 @@ class Predictor:
         if self.model is not None and (value['model'] != self.model or value['producer_sha256'] != self.producer):
             raise ValueError('prediction identity changed during measurement')
         self.model, self.producer = value['model'], value['producer_sha256']
-        return elapsed
+        return elapsed, value
 
     def close(self) -> None:
         if self.failed and self.process.poll() is None:
