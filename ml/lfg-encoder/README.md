@@ -185,6 +185,9 @@ only checks declared IDs and family names; it cannot establish independent
 projects, provenance, human review, unseen paraphrases, or absence of other
 leakage. Without a split, separation is `not_checked`. Every report is marked
 ineligible for promotion until those requirements and promotion gates exist.
+The separate [reviewed native comparison](../../docs/lfg/REVIEWED-NATIVE-EVALUATION.md)
+binds an audited test partition to its training run, ONNX artifact and binary;
+it likewise cannot qualify a model without the remaining evidence.
 
 The configurable taxonomy defines the label universe. Per-label counts include
 false positives for labels with no positive examples; macro F1 averages only
