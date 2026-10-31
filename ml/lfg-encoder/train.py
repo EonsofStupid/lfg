@@ -163,7 +163,7 @@ def load_dataset(path: Path, *, allow_unlabeled_review: bool = False) -> tuple[l
     required = {"id", "text", "intents", "capabilities", "risks", "verified", "family"}
     seen: set[str] = set()
     for index, record in enumerate(records, 1):
-        missing = REQUIRED_FIELDS - record.keys()
+        missing = required - record.keys()
         if missing:
             raise ValueError(f"record {index} missing {sorted(missing)}")
         if record["id"] in seen:
@@ -189,6 +189,8 @@ def validate(args: argparse.Namespace) -> None:
     labels = sorted({label for record in records for key in ("intents", "capabilities", "risks") for label in record[key]})
     policy_path = getattr(args, "promotion_policy", POLICY)
     policy = load_promotion_policy(policy_path)
+    verified = sum(record["verified"] for record in records)
+    minimum = policy["minimum_human_verified_examples"]
     print(json.dumps({
         "schema_version": "lfg.encoder-dataset-report.v1",
         "records": len(records),
@@ -198,7 +200,7 @@ def validate(args: argparse.Namespace) -> None:
         "families": sorted({str(record["family"]) for record in records}),
         "labels": labels,
         "sha256": dataset_digest,
-        "sample_gate_passed": sum(record["verified"] for record in records) >= policy["minimum_human_verified_examples"],
+        "sample_gate_passed": verified >= minimum,
     }, indent=2))
 
 

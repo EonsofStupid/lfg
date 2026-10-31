@@ -14,8 +14,9 @@ counts, pack bytes and prediction bytes. The selected model must be suitable for
 this pooling method; the tool does not determine that automatically.
 
 An experimental [native encoder probe](NODE-ENCODER-NATIVE-PROBE.md) can run
-the frozen encoder in the Rust binary and compare its vectors with Python. It
-does not yet load this exemplar pack or make node suggestions.
+the frozen encoder in the Rust binary and compare its vectors with Python. A
+separate [native suggestion command](NATIVE-NODE-SUGGESTION.md) can load a
+pinned exemplar pack for offline escalation experiments.
 
 After the [review and admission gate](NODE-REVIEW-AND-ADMISSION.md) passes,
 `build` encodes only approved **training** records into a new private exemplar
