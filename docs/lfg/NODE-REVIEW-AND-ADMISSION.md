@@ -52,6 +52,26 @@ original source, surrounding context and privacy before deciding; a digest match
 is not proof of authorship or permission. This screen does not redact text: if
 redaction is needed, reject or skip and prepare a new sanitized source and queue.
 
+To inspect prior messages without leaving the review screen, opt in with
+`--context-config ml/lfg-encoder/review-web-config.v1.json` (or a private copy
+with appropriate `source_verification` and `source_context` limits) in addition
+to `--source`. Click **Show prior source messages** for an individual pending
+item. The server verifies the queue's source-file digest and request text, then
+checks the original session prefix and text before displaying a bounded suffix
+of earlier user-marked messages. It rechecks the queue, ledger and source after
+reading. Codex context omits intervening assistant messages; Claude context
+follows only the available same-session source parent chain. Neither is
+necessarily the complete conversation. The source paths in the selected source
+file and the local machine must be trusted. This option reads private session
+files, so configure the limits and access deliberately; it does not change a
+decision or make the guide ready. Existing servers must be restarted with the
+option to expose this feature; do not interrupt an active review.
+
+An isolated local read-only smoke check against the 435-item real pending queue
+returned three prior user messages for its second item after source-prefix
+verification; the ledger hash was unchanged. This did not review or label the
+request, verify data rights, or assess completeness of the conversation.
+
 ```powershell
 python ml/lfg-encoder/node_review_web.py serve `
   --queue PRIVATE_QUEUE.jsonl --ledger PRIVATE_LEDGER.json --snapshot SNAPSHOT.json `

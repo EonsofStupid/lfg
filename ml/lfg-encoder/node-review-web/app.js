@@ -32,8 +32,9 @@
   }
 
   async function refresh() {
-    current = null; el('review').hidden = true; el('notice').textContent = '';
+    current = null; el('review').hidden = true; el('notice').textContent = ''; el('source-context').textContent = '';
     const status = await api('/api/status');
+    el('show-context').hidden = !status.sourceContextEnabled;
     el('summary').textContent = `${status.decisions.pending} pending · ${status.decisions.approved} approved · ${status.decisions.rejected} rejected · ${status.reviewer}`;
     const result = await api(`/api/item?offset=${offset}`);
     current = result.item; el('review').hidden = !current; el('empty').hidden = !!current;
@@ -77,6 +78,24 @@
   }
 
   function handle(promise) { promise.catch(error => { el('notice').textContent = error.message; }); }
+  el('show-context').addEventListener('click', () => handle((async () => {
+    if (!current) return;
+    const checked = current;
+    el('source-context').textContent = 'Checking source and loading prior messages…';
+    try {
+      const result = await api('/api/source-context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({itemSha256: checked.itemSha256})});
+      if (current !== checked) return;
+      const scope = result.contextScope === 'same_session_source_parent_chain'
+        ? 'Earlier human-marked messages linked by source metadata; other context may be missing.\n\n'
+        : 'Earlier explicitly marked user messages in this session; intervening assistant messages are not shown.\n\n';
+      el('source-context').textContent = scope + (result.truncated ? 'Earlier messages were omitted by configured limits.\n\n' : '') +
+        (result.messages.length ? result.messages.map(message => `Source line ${message.source_line}:\n${message.text}`).join('\n\n') :
+          'No prior user messages are available within the configured limits.');
+    } catch (error) {
+      if (current === checked) el('source-context').textContent = `Context unavailable: ${error.message}`;
+    }
+  })()));
   el('skip').addEventListener('click', () => { offset += 1; handle(refresh()); });
   el('skip-blocked').addEventListener('click', () => { offset += 1; handle(refresh()); });
   el('restart').addEventListener('click', () => { offset = 0; handle(refresh()); });
