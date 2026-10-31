@@ -174,6 +174,8 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
         for index, row in enumerate(rows):
             for name in (('baseline', 'candidate') if index % 2 == 0 else ('candidate', 'baseline')):
                 _, value = processes[name].request_prediction(row['id'], row['text'])
+                if name == 'candidate' and benchmark_persistent.tokenization_status(value) != 'complete':
+                    raise ValueError('candidate tokenization is truncated or coverage is unknown')
                 predictions[name][row['id']] = value
         baseline, candidate = processes['baseline'], processes['candidate']
         if any(predictor.process.poll() is not None for predictor in processes.values()):

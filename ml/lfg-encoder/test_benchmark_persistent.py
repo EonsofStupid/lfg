@@ -18,6 +18,18 @@ class PersistentBenchmarkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             benchmark.summary([])
 
+    def test_tokenization_metadata_is_validated_and_missing_is_unknown(self):
+        self.assertEqual(benchmark.tokenization_status({}), 'unknown')
+        self.assertEqual(benchmark.tokenization_status({'tokenization': {'processed_tokens': 2,
+                         'overflow_chunks': 0, 'truncated': False}}), 'complete')
+        self.assertEqual(benchmark.tokenization_status({'tokenization': {'processed_tokens': 2,
+                         'overflow_chunks': 1, 'truncated': True}}), 'truncated')
+        for value in ({'processed_tokens': 2, 'overflow_chunks': 1, 'truncated': False},
+                      {'processed_tokens': True, 'overflow_chunks': 0, 'truncated': False},
+                      {'processed_tokens': 2, 'overflow_chunks': 0, 'truncated': 0}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'tokenization'):
+                benchmark.tokenization_status({'tokenization': value})
+
     def test_config_and_input_limits_are_checked(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -54,15 +66,21 @@ from pathlib import Path
 producer=hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
 for line in sys.stdin:
     x=json.loads(line)
-    print(json.dumps({'schema_version':'lfg.evaluation-prediction.v1','id':x['id'],
+    result={'schema_version':'lfg.evaluation-prediction.v1','id':x['id'],
       'input_sha256':hashlib.sha256(x['text'].encode()).hexdigest(),'producer_sha256':producer,
-      'model':{'id':sys.argv[1],'version':'1','sha256':'a'*64},'intents':[],'capabilities':[],'risks':[]}),flush=True)
+      'model':{'id':sys.argv[1],'version':'1','sha256':'a'*64},'intents':[],'capabilities':[],'risks':[]}
+    if sys.argv[1]=='candidate':
+      truncated=x['text'].endswith('1')
+      result['tokenization']={'processed_tokens':2,'overflow_chunks':int(truncated),'truncated':truncated}
+    print(json.dumps(result),flush=True)
 ''', encoding='utf-8')
             result = benchmark.run(Path(sys.executable), data, config_path,
                                    ['-u', str(fixture), 'baseline'], ['-u', str(fixture), 'candidate'])
             self.assertEqual(result['results']['baseline']['latency']['count'], 4)
             self.assertEqual(result['results']['candidate']['latency']['count'], 4)
             self.assertEqual(result['results']['candidate']['model']['id'], 'candidate')
+            self.assertEqual(result['results']['baseline']['tokenization'], {'complete': 0, 'truncated': 0, 'unknown': 4})
+            self.assertEqual(result['results']['candidate']['tokenization'], {'complete': 2, 'truncated': 2, 'unknown': 0})
             self.assertFalse(result['promotion_eligible'])
             self.assertNotIn('private fixture', json.dumps(result))
             self.assertEqual(result['dataset_sha256'], hashlib.sha256(data.read_bytes()).hexdigest())

@@ -9,6 +9,15 @@ use std::{
 use serde_json::{Value, json};
 
 fn predict(exe: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+    predict_text(exe, cwd, args, "Review the requested change")
+}
+
+fn predict_text(
+    exe: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[&str],
+    text: &str,
+) -> std::process::Output {
     let mut child = Command::new(exe)
         .current_dir(cwd)
         .args(args)
@@ -23,7 +32,7 @@ fn predict(exe: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> std::
         .stdin
         .take()
         .unwrap()
-        .write_all(b"{\"id\":\"fixture\",\"text\":\"Review the requested change\"}\n")
+        .write_all(format!("{}\n", json!({"id": "fixture", "text": text})).as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
 }
@@ -42,6 +51,28 @@ fn copied_binary_runs_embedded_model_and_accepts_runtime_override() {
         String::from_utf8_lossy(&embedded.stderr)
     );
     let actual: Value = serde_json::from_slice(&embedded.stdout).unwrap();
+    assert_eq!(actual["tokenization"]["truncated"], false);
+    assert_eq!(actual["tokenization"]["overflow_chunks"], 0);
+
+    let long = predict_text(
+        &exe,
+        temp.path(),
+        &["embedded-onnx-predict"],
+        &"review ".repeat(1000),
+    );
+    assert!(
+        long.status.success(),
+        "{}",
+        String::from_utf8_lossy(&long.stderr)
+    );
+    let long_value: Value = serde_json::from_slice(&long.stdout).unwrap();
+    assert_eq!(long_value["tokenization"]["truncated"], true);
+    assert!(
+        long_value["tokenization"]["overflow_chunks"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let artifact =
         std::env::var("LFG_EMBEDDED_ONNX_DIR").expect("feature build artifact directory");
