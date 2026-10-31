@@ -198,7 +198,7 @@ class NodeHandler(review_web.ReviewHandler):
 
     def do_POST(self) -> None:
         if not self.authorized(post=True):
-            self.json_reply(403, {'error': 'not authorized'})
+            self.reject_unauthorized_post(self.server.config['maxRequestBytes'])
             return
         if self.path != '/api/decision' or self.headers.get('Transfer-Encoding') or self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})

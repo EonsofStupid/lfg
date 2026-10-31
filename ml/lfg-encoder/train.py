@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import importlib.metadata
 import json
@@ -13,6 +14,7 @@ import os
 import platform
 import random
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -159,9 +161,12 @@ def package_versions(names: tuple[str, ...]) -> dict[str, str | None]:
     return versions
 
 
+RUN_LOCK_MAGIC = b"lfg.training-lock.v2\n"
+
+
 @contextlib.contextmanager
 def run_lock(output: Path):
-    """Refuse concurrent writers; a crash leaves a lock requiring operator review."""
+    """Preserve the legacy exclusive-create lock used by review workspaces."""
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     lock = output.with_name(output.name + ".lock")
@@ -175,6 +180,48 @@ def run_lock(output: Path):
         yield
     finally:
         lock.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def training_run_lock(output: Path):
+    """Hold an OS lock on a persistent marker; do not unlink the shared inode."""
+    output = output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    lock = output.with_name(output.name + ".lock")
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(lock, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        descriptor = os.open(lock, flags)
+        created = False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"run lock is not a regular file: {lock}")
+        if created:
+            if os.write(descriptor, RUN_LOCK_MAGIC) != len(RUN_LOCK_MAGIC):
+                raise OSError("could not write complete training lock marker")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            elif os.name == "posix":
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                raise ValueError("training locks are unsupported on this platform")
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or getattr(error, "winerror", None) in (33, 36):
+                raise ValueError(f"run lock exists and is held by another trainer: {lock}") from error
+            raise
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.read(descriptor, len(RUN_LOCK_MAGIC) + 1) != RUN_LOCK_MAGIC:
+            raise ValueError(f"unrecognized or legacy run lock: {lock}; verify no trainer is active before removing it")
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -991,7 +1038,7 @@ def main() -> None:
         validate(args)
     else:
         try:
-            with run_lock(args.output):
+            with training_run_lock(args.output):
                 train(args)
         except (OSError, ValueError, UnicodeError) as error:
             raise SystemExit(str(error)) from error

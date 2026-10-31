@@ -185,10 +185,18 @@ classification head must be initialized for a test, explicitly enable
 `--allow-mismatched-sizes` and inspect every model-loading warning; the option
 can also allow other mismatched weights, so it is not a promotion guarantee.
 
-An exclusive lock rejects concurrent trainers for one output. An unclean kill
-can leave `<output>.lock`. Verify the process is no longer running before
-manually removing that lock; never remove it while a trainer is active. Saving
-can be interrupted, so the latest checkpoint may be incomplete and is rejected.
+An operating-system lock rejects concurrent trainers for one output. The
+`<output>.lock` marker remains after a run; a process crash releases the OS
+lock so a later trainer can acquire an initialized marker. A crash during
+marker creation can leave an empty or incomplete marker that fails closed.
+Do not remove or replace the marker while any trainer might be active. Old,
+empty or unrecognized lock files fail closed: verify no earlier trainer is
+active before removing one. Earlier trainer versions also treat the new marker
+as a held lock even after the OS lock is released; do not remove it for those
+versions until all current trainers have stopped. These locks
+coordinate cooperating processes on a trusted local filesystem; shared or
+network filesystem semantics have not been qualified. Saving can be interrupted,
+so the latest checkpoint may be incomplete and is rejected.
 Do not assume a failed checkpoint or a loss value qualifies a model.
 
 For a Spark, run this in a persistent `tmux` session or an operator-managed job

@@ -111,3 +111,21 @@ qualified CPU binary follows from these checks. A real run still needs reviewed,
 authorized data and adequate label support, a durable supervised job with
 resource isolation, independent evaluation, ONNX/CPU qualification and release
 checks. Do not lower the review or quality gates to use this environment.
+
+The trainer's versioned local-file marker now uses an operating-system lock.
+On 2026-10-31, Windows and Spark tests verified that a second process is
+rejected while the lock is held, that a hard-killed process releases it, and
+that legacy and current trainers cannot simultaneously acquire the same output.
+The review-workspace lock retains its previous behavior. An opt-in Spark systemd user-service
+test killed its own fixture process while it held the lock; systemd restarted
+the fixture once and the next process acquired it. The test unit reported the
+configured CPU quota, memory limit, task limit and `NoNewPrivileges` setting,
+then was stopped. It did not run training or test GPU memory isolation,
+checkpoint recovery, host reboot, or a persistent production service. The user
+manager reported lingering enabled and five pre-existing failed units whose
+causes were not inspected. Rerun the opt-in check in a suitable Linux user
+session with:
+
+```bash
+LFG_TEST_SYSTEMD_USER=1 python3 -m unittest discover -s ml/lfg-encoder -p test_systemd_training_lock.py
+```
