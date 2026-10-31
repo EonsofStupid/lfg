@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unicodedata
@@ -155,11 +156,14 @@ def apply_redactions(text: str, operations: list[dict[str, Any]]) -> str:
 def record_decision(workspace: Path, identifier: str, reviewer: str, decision: str,
                     expected_digest: str, proposed: dict[str, list[str]] | None = None,
                     redactions: list[dict[str, Any]] | None = None,
-                    max_result_bytes: int | None = None) -> None:
+                    max_result_bytes: int | None = None, guide_sha256: str | None = None) -> None:
     if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
         raise ValueError('reviewer must be a nonempty single-line identifier')
     if decision not in ('approved', 'rejected'):
         raise ValueError('decision must be approved or rejected')
+    if guide_sha256 is not None and (decision != 'approved' or not isinstance(guide_sha256, str)
+                                     or not re.fullmatch(r'[0-9a-f]{64}', guide_sha256)):
+        raise ValueError('guide digest requires an approval and a SHA-256 value')
     plan, report, ledger = load_workspace(workspace)
     item = ledger.get(identifier)
     if item is None or item['decision'] != 'pending':
@@ -173,6 +177,8 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
     if not row['verified'] and item['annotation_sha256'] != current_digest:
         raise ValueError('pending record changed; reinitialize review')
     changed = dict(row)
+    if guide_sha256 is not None:
+        changed['review_guide_sha256'] = guide_sha256
     if redactions is not None and (decision != 'approved' or not isinstance(redactions, list)):
         raise ValueError('redactions require an approved record')
     if redactions:

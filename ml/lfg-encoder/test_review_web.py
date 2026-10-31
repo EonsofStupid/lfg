@@ -195,6 +195,50 @@ class ReviewWebTests(unittest.TestCase):
         body['annotation_sha256'] = '0' * 64
         self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
 
+    def test_guided_review_binds_approval_to_displayed_guide_and_rejects_changes(self):
+        guide = {'schema_version': 'lfg.review-label-guide.v1', 'revision': 'fixture', 'notice': 'Review carefully.',
+                 'labels': {'intents': {'build': {'apply': 'Build.', 'boundary': 'Not explanation.'},
+                                        'explain': {'apply': 'Explain.', 'boundary': 'Not building.'}},
+                            'capabilities': {'write': {'apply': 'Write.', 'boundary': 'Not reading.'}},
+                            'risks': {'sensitive': {'apply': 'Sensitive.', 'boundary': 'Not generic.'}}}}
+        path = Path(self.temp.name) / 'guide.json'
+        path.write_text(json.dumps(guide), encoding='utf-8')
+        self.stop_server()
+        self.server = review_web.ReviewServer(self.workspace, 'fixture-reviewer', 0,
+                                               review_web.load_config(review_web.DEFAULT_CONFIG), self.token, path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        status, _, data = self.request('GET', '/api/item?offset=0')
+        self.assertEqual(status, 200)
+        response = json.loads(data)
+        self.assertEqual(response['guide']['labels']['intents']['build']['boundary'], 'Not explanation.')
+        item = response['item']
+        decision = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                    'decision': 'approved', 'confirmation': 'APPROVE',
+                    'labels': {'intents': ['build'], 'capabilities': [], 'risks': []}}
+        self.assertEqual(self.request('POST', '/api/decision', body=decision, origin=self.server.origin)[0], 400)
+        decision['guide_sha256'] = response['guide_sha256']
+        guide['notice'] = 'Changed after display.'
+        path.write_text(json.dumps(guide), encoding='utf-8')
+        self.assertEqual(self.request('POST', '/api/decision', body=decision, origin=self.server.origin)[0], 400)
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['approved'], 0)
+        guide['notice'] = 'Review carefully.'
+        path.write_text(json.dumps(guide), encoding='utf-8')
+        self.assertEqual(self.request('POST', '/api/decision', body=decision, origin=self.server.origin)[0], 200)
+        row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(row['review_guide_sha256'], response['guide_sha256'])
+        self.assertEqual(review_corpus.status(self.workspace)['counts']['train']['ready_for_reviewed_subset'], 1)
+        output = Path(self.temp.name) / 'guided-export'
+        review_corpus.export_approved(self.workspace, output)
+        exported = json.loads((output / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(exported['review_guide_sha256'], response['guide_sha256'])
+        self.assertEqual(corpus_audit.audit(output / 'plan.json')[0]['counts']['train']['ready_for_reviewed_subset'], 1)
+
+    def test_guide_must_cover_the_workspace_taxonomy(self):
+        taxonomy, _ = review_web.evaluate.load_taxonomy(self.workspace / 'taxonomy.json')
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            review_web.load_guide(review_web.DEFAULT_GUIDE, taxonomy)
+
 
 if __name__ == '__main__':
     unittest.main()
