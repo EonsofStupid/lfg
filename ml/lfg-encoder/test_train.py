@@ -2,6 +2,8 @@ import argparse
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +19,21 @@ def record(index, verified):
 
 
 class DatasetGateTests(unittest.TestCase):
+    def test_cli_validates_dataset_and_rejects_unintegrated_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "examples.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            script = Path(train.__file__)
+            result = subprocess.run([sys.executable, str(script), "validate", "--dataset", str(dataset)],
+                                    capture_output=True, text=True, check=True)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["verified"], 0)
+            self.assertFalse(report["sample_gate_passed"])
+            for command in ("plan", "export", "benchmark"):
+                result = subprocess.run([sys.executable, str(script), command], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("not yet integrated", result.stderr)
+
     def test_unverified_records_do_not_satisfy_sample_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "examples.jsonl"

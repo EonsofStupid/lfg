@@ -460,6 +460,9 @@ def train(args: argparse.Namespace) -> None:
     tokenizer.save_pretrained(args.output)
     (args.output / "labels.json").write_text(json.dumps(binarizer.classes_.tolist(), indent=2), encoding="utf-8")
     print(f"trained experimental model at {args.output}; ONNX export and promotion remain separate gates")
+    # The separately authored GPU prototype below has not been integrated with
+    # this reviewed training path and must not run after it.
+    return
 
     def compute_metrics(eval_prediction: Any) -> dict[str, float]:
         logits, expected = eval_prediction
@@ -938,7 +941,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
     parser.add_argument("--allow-below-gate", action="store_true", help="development only; output remains ineligible")
     parser.add_argument("--audited-plan", type=Path, help="reviewed and project-separated corpus plan")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.command not in ("validate", "train"):
+        raise SystemExit(f"{args.command} is not yet integrated with the reviewed training pipeline")
     try:
         config_bytes = args.training_config.read_bytes()
         config = parse_training_config(config_bytes)
