@@ -106,3 +106,47 @@ developer statistics endpoint from a separate local working directory with a
 restricted environment. Its inspected import table listed Windows system DLLs,
 not an MSVC runtime or ONNX Runtime DLL. This is not a clean-machine test,
 an independent toolchain build, a signed release, or evidence of model quality.
+
+## Linux ARM64 baseline
+
+The following command rebuilds a Linux musl baseline twice using explicitly
+selected, trusted source and prebuilt UI archives. The UI archive must contain
+`dist/index.html`. Supply their SHA-256 digests, a prepared Cargo cache, a new
+output directory, a locally supported musl target and a job count:
+
+```bash
+bash scripts/build-linux-baseline.sh SOURCE_TAR SOURCE_SHA256 UI_TAR UI_SHA256 \
+  CARGO_CACHE NEW_OUTPUT_DIR aarch64-unknown-linux-musl 2
+```
+
+The script checks archive digests, extracts each into separate directories,
+builds with Cargo's locked offline mode and path remapping, checks for ELF
+interpreter and shared-library dependencies, and compares both executables.
+It writes `build-report.json` when they match. Archives are trusted inputs;
+their hashes do not establish origin or protect against malicious contents.
+Prepare the selected Rust target, linker, toolchain and dependency cache first.
+Offline Cargo mode does not sandbox build scripts from the network.
+
+On 2026-10-31, the `Clyffy-Ring` Spark built commit
+`fd594a8f8759790829ed5560f74e709ed25f38cd` using Rust 1.97.1 and an isolated
+Cargo cache populated from the lock before offline builds. The source archive
+SHA-256 was `c0fa3346a9c5ef7459d257c2fa368ae6a5924daa640e9b4c86b50dd4e554f4cf`.
+The UI archive SHA-256 was
+`5fd344c076a5bef1b1e8f4f36969505081a4529641fab34e430c967f113780dc`;
+it contained the Windows-built UI assets from the prior check, and the UI
+source was unchanged between those commits. Two separate Spark source and
+target directories produced identical 10,009,008-byte ARM64 executables with
+SHA-256 `e68989acee41152e82e5e72c976ec752af8e63684b336d8d92eb49424dbb552d`.
+`readelf` reported no interpreter or `NEEDED` entries.
+The reusable script was also run end to end under a path containing spaces and
+produced the same digest; it rejected an invalid digest and an existing output
+directory. Its report and separate builds remain on the Spark.
+
+That binary matched the same LFG kernel golden inside a Docker `scratch`
+container running as a non-root user with a read-only filesystem, no network,
+and no bundled operating-system libraries. A separate scratch-container check
+with a writable temporary filesystem and host networking bound to loopback
+served the embedded index, JavaScript and developer statistics endpoint. These
+checks share the Spark's kernel and do not prove behavior on a clean machine,
+other Linux architectures, an authenticated hosted deployment, or a trained
+model. No private project requests or model weights were transferred for them.
