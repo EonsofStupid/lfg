@@ -183,3 +183,13 @@ export type AppContext = {
   pollIntervalMs: number | null
   providers: Array<{ id: string; activated: boolean; capabilities: string[] }> | null
 }
+
+export type BoundaryQuestion = {
+  id: string; section: string; number: number; question: string; sourceTerm: string
+  domain?: string | null; binding: string | null
+}
+export type BoundaryCatalog = {
+  catalog: { schemaVersion: string; revision: string; sourceNotice: string; banks: Array<{
+    id: string; title: string; status: string; questions: BoundaryQuestion[]
+  }> }; digest: string
+}
