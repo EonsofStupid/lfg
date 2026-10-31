@@ -6,19 +6,23 @@ run, and trained on its own.
 
 ## Project objective
 
-Build a self-contained, CPU-oriented binary and UI that help an operator or
-downstream orchestration system assess a prompt before execution: how complex
-the work is, where it may need to be decomposed, and what model class, agent
-count, and reasoning depth may be appropriate. LFG should make that assessment
-visible and traceable so it can inform a better execution plan.
+Build a self-contained, CPU-oriented classification system and UI that provide
+fast, inspectable observations for an operator or downstream orchestration
+system. The recovered LFG v3 notes describe a deterministic five-operation
+kernel that produces an address and recipe, with an evaluated suggestion
+extension for cases that escalate. Later project requirements include tracing,
+model and effort profiles, cloud/local use, and configurable integrations.
+See [notes alignment](docs/lfg/NOTES-ALIGNMENT.md) for the design and the gap
+between it and the current implementation.
 
 The intended product is an operational assessment and routing overlay for a
 larger reasoning workflow. It should visualize task strands and boundaries,
 surface intent and routing signals, and preserve a clean signal trail. Its
 recommendations are inputs to the operator or downstream agents; producing the
-final answer remains their responsibility. In RRFlow's target architecture,
-LFG supplies optional CPU-derived observations to SWAG, the separate System One
-controller; the RRFlow engine retains authorization and execution authority.
+final answer remains their responsibility. LFG's observations do not grant
+authorization. The roles and integration boundaries described by the recovered
+notes and the current RRFlow repository need reconciliation before integration
+can be claimed complete.
 
 ### Development path and current status
 

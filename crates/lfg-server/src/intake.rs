@@ -166,7 +166,7 @@ impl Template {
     }
 }
 
-fn valid_pointer(path: &str) -> bool {
+pub(crate) fn valid_pointer(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;
     }
