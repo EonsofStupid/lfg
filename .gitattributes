@@ -1,6 +1,8 @@
 ml/lfg-encoder/locks/*.requirements.txt text eol=lf
 ci/isolated-runner/entrypoint.sh text eol=lf
 scripts/build-linux-baseline.sh text eol=lf
+ml/lfg-encoder/systemd/*.service text eol=lf
+ml/lfg-encoder/training_supervisor.py text eol=lf
 ml/lfg-encoder/dataset/synthetic.v1.jsonl text eol=lf
 ml/lfg-encoder/benchmark_kernel_persistent.py text eol=lf
 ml/lfg-encoder/benchmark_persistent.py text eol=lf

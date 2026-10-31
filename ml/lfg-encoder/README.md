@@ -199,10 +199,10 @@ network filesystem semantics have not been qualified. Saving can be interrupted,
 so the latest checkpoint may be incomplete and is rejected.
 Do not assume a failed checkpoint or a loss value qualifies a model.
 
-For a Spark, run this in a persistent `tmux` session or an operator-managed job
-service with checkpoint storage on a durable filesystem. This repository does
-not install or supervise a service, and the workflow is not yet qualified for
-production on a Spark. Checkpointing does not guarantee a save at the instant of a crash;
+For a Spark, the opt-in [reviewed training service](../../docs/lfg/SUPERVISED-TRAINING.md)
+provides a systemd user-service template and a guarded launcher. An operator must
+configure limits, pinned inputs and a reviewed corpus before enabling an instance;
+the workflow is not yet qualified for production. Checkpointing does not guarantee a save at the instant of a crash;
 work since the last completed save is lost. Configure the interval for the
 machine's storage cost and acceptable loss, and test interruption/restart on
 the actual host before relying on it. Use one trainer per output directory.
