@@ -70,6 +70,18 @@ The copied trainer had SHA-256
 `da8c06f34e9e83a578072ee75176dfba7e31ffe8f36b4ea76f4f7765ce392ac4`.
 No project examples were transferred and no model training took place.
 
+Another local probe used the locked Transformers environment and the pinned
+ModernBERT tokenizer with two texts already published in the LFG repository:
+the kernel golden request and an authored boundary question. Their token lengths
+were 9 and 19. The former default trainer collator failed to stack the batch;
+dynamic padding produced a `[2, 19]` batch. With the updated trainer wiring, both
+training and validation loaders produced that shape and the real ModernBERT
+model returned finite forward losses on CUDA using a newly initialized head and
+test-only labels. There was no optimizer step or reviewed-data training. The
+optional `test_training_collation_runtime.py` check also passed on that locked
+environment. This establishes batch mechanics for these inputs, not model
+accuracy, training repeatability or capacity at production sequence lengths.
+
 Re-run the probe with the copied scripts and selected files in the isolated
 directory, changing paths and settings as appropriate:
 

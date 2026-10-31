@@ -130,8 +130,18 @@ from `training-support-policy.v1.json` or `--support-policy`. A threshold of
 one only establishes basic coverage; it does not qualify model quality. The
 policy digest and counts are included in the run manifest. A separate reviewed
 test project remains reserved for
-final evaluation and is not fed to the trainer. The audit still reads the test
-file; genuinely blinded evaluation needs independent access controls.
+final evaluation and is not fed to the trainer. A legacy complete-plan audit
+reads the test file; a development-only audit excludes it. Genuinely blinded
+evaluation needs independent access controls.
+
+The active trainer dynamically pads each training and validation batch to its
+longest tokenized request. The selected tokenizer must support padding. Batch
+size and maximum sequence length remain configurable; padding does not ensure
+that a batch fits GPU memory. To exercise the data loaders using an existing
+local tokenizer and the installed training dependencies, set
+`LFG_TEST_LOCAL_TOKENIZER` to its directory and run
+`python -m unittest discover -s ml/lfg-encoder -p test_training_collation_runtime.py`.
+That test uses fixture labels and does not train a model.
 
 ## Checkpointing and restart
 
