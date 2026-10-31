@@ -116,3 +116,24 @@ requests remained private and unreviewed. This confirms the flag for those two
 cases, not all tokenizer inputs or model quality. A separate two-request debug
 benchmark counted one complete and one truncated candidate response; the
 baseline's two tokenization statuses were unknown.
+
+An updated local optimized Windows binary with embedded UI and the same
+unqualified model had SHA-256
+`42942aaf8619cc8755e73e8920a6954f580426bddb6692ff2129ba96f4a4c7d5`
+and was 125,399,552 bytes. Its static import table listed Windows system
+libraries and no ONNX Runtime or MSVC runtime DLL. A copy served the embedded
+UI and developer-statistics endpoint from an otherwise empty working directory,
+and ran two real unreviewed inputs without supplying external model files.
+This was one local build using existing UI assets, not a clean-host or
+reproducibility qualification. The executable contains weights derived from
+private project data and is not suitable for distribution.
+
+Three more non-isolated runs used that updated binary and the same 422-request
+corpus and settings. Baseline median latency ranged from 0.130–0.144 ms and
+p95 from 0.196–0.210 ms; the embedded model's median ranged from 10.33–12.04 ms
+and p95 from 60.80–72.56 ms. Baseline cycles per request ranged from
+147,425–169,323; model cycles ranged from 49.97–56.38 million. Each run's 844
+measured model responses included 812 complete and 32 truncated tokenizations,
+representing the same 16 over-limit inputs repeated twice. These are local
+resource observations, not quality or release evidence. Build evidence and
+aggregate reports remain in the local private output directories.

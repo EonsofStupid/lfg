@@ -90,7 +90,38 @@ existing output directory. It requires the selected Node, npm, Rust and MSVC
 toolchain and complete dependency caches. It records tool versions but does not
 attest the compiler, operating system, caches or upstream package publishers;
 package-manager offline mode is not a network sandbox for build scripts.
-It builds the deterministic baseline with the UI, not a trained model.
+By default it builds the deterministic baseline with the UI, without a model.
+To embed an operator-selected ONNX artifact instead, supply both its directory
+and independently selected manifest digest:
+
+```powershell
+.\scripts\build-windows-baseline.ps1 -Commit FULL_COMMIT_SHA -OutputDir NEW_PRIVATE_DIRECTORY `
+  -Jobs 2 -ModelArtifactDir PRIVATE_ARTIFACT_DIRECTORY -ModelManifestSha256 EXPECTED_LOWERCASE_SHA256
+```
+
+The optional model build verifies the manifest and every listed file digest,
+copies the complete manifested artifact to one shared snapshot for the two builds, rechecks that
+snapshot, and builds with `embedded-ui,embedded-onnx`. The output retains the
+snapshot and both executables; protect it as private when the weights derive
+from private project data. Matching hashes establish same-machine repeatability
+for these selected inputs, not model quality, artifact authenticity, clean-host
+reproducibility, or release eligibility.
+
+On 2026-10-31, two clean Windows x86-64 MSVC builds of commit
+`fcfe4a53a105874d06e13e6e2845c87100cf4151` used Rust 1.98.1 and the same
+private experimental model manifest
+`f28f78e72442df23c46fce129c50c8121f2976eb28c6c9104274fe7db22c22e8`.
+The separate source and target directories produced identical five-file UI
+assets and 125,399,552-byte executables with SHA-256
+`42942aaf8619cc8755e73e8920a6954f580426bddb6692ff2129ba96f4a4c7d5`.
+The retained snapshot passed the existing evaluator's file-identity check for
+all eight manifest entries. A copied first executable served its embedded UI
+and developer statistics and processed two real unreviewed inputs without
+external model files. Both executable hashes also matched an earlier local
+in-place build. These are same-machine observations with a model trained on
+unreviewed development data, not a qualified model, clean-host proof, or
+permission to distribute its private-derived weights. The private build report
+and artifacts remain under `target/lfg-embedded-repro-20261031-v3/`.
 The command was also run end to end with an output path containing spaces; its
 two executables matched each other and the digest reported below. npm warned
 that one package's install script was not approved; the offline UI builds
