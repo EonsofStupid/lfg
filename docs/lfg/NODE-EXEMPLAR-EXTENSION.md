@@ -23,9 +23,10 @@ After the [review and admission gate](NODE-REVIEW-AND-ADMISSION.md) passes,
 pack. It stores item digests, labels and vectors, not raw requests. Vectors and
 digests can themselves be sensitive and must remain access-controlled. The pack
 identifies the snapshot, review inputs, model manifest, environment, encoder
-configuration and builder. It is marked `promotionEligible: false`. The gate
-currently reads supplied test records to check support and separation; it is not
-a blinded holdout. Declarations and hashes do not authenticate a reviewer, model
+configuration and builder. It is marked `promotionEligible: false`. The v1 gate
+reads supplied test records; the v2 development gate can use separately supplied
+train and validation sources without a test queue. Neither establishes a blinded
+or independent final holdout. Declarations and hashes do not authenticate a reviewer, model
 publisher or source rights, and a person with write access can forge artifacts.
 
 The `predict` command requires the trusted pack digest and the same audited

@@ -24,9 +24,11 @@ operations configuration hashes before and after the run, validates the
 returned IDs and input and snapshot digests, and prints aggregate metrics
 without request text. The selected binary and local filesystem must be trusted;
 these checks do not authenticate the binary or prevent concurrent tampering.
-The current audit reads the supplied test records for support and separation,
-so this workflow is not a blinded holdout. Preserve a genuinely independent,
-access-controlled test for final evaluation.
+The v1 admission policy reads supplied test records for support and separation.
+The v2 development policy instead accepts train/validation inputs without a
+test queue and rejects test-assigned ledgers. It cannot identify unassigned test
+records in mixed queues or prove a separate holdout exists. Preserve a genuinely
+independent, access-controlled test for a later controlled final evaluation.
 
 For each reviewed validation item, the baseline is counted as **correct** or
 **wrong** when it commits a choice at the target node, **escalated** when it

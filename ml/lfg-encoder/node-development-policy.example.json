@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "lfg.node-admission-policy.v2",
+  "minimumPerChoice": {"train": 1, "validation": 1},
+  "minimumProjectGroups": {"train": 1, "validation": 1}
+}

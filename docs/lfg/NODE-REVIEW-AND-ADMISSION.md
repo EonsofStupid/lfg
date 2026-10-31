@@ -73,7 +73,7 @@ python ml/lfg-encoder/node_review.py audit `
   --snapshot SNAPSHOT.json --policy PRIVATE_POLICY.json --node NODE_ID
 ```
 
-For the target node, admission requires all its supplied items to have a
+With the v1 policy, admission requires all supplied items for the target node to have a
 decision, at least one approved item, and the configured minimum number of
 approved examples for **every** option and project-group count in train,
 validation and test. It rejects normalized exact-text duplicates within the
@@ -90,15 +90,34 @@ schema. It is not statistically adequate, a recommended production threshold,
 or a quality gate. Set thresholds appropriate to the actual evaluation plan.
 Passing admission is never a claim that a model is trained or qualified.
 
+For development without opening a held-out test queue, use a v2 policy such as
+the [development policy example](../../ml/lfg-encoder/node-development-policy.example.json).
+It requires support and separate project groups only for train and validation,
+and produces `lfg.node-admission-report.v2` with `scope: development` and
+`holdoutAssessment: not_performed`. Supply only queues and ledgers explicitly
+reserved for development. Before opening any queue, the audit reads all supplied
+ledgers and rejects a test-assigned record; it checks that those ledgers did not
+change before their queues are read. Pending and rejected records have no split,
+so the tool cannot determine whether they belong to a hidden holdout. Operators
+must physically separate holdout files and avoid supplying mixed queues or
+ledgers. This does not establish that a holdout exists, that related sources are
+independent, or that no test information has previously been seen. A separate,
+controlled final evaluation and leakage check remain necessary. The example
+thresholds of one are for mechanics only and are not sufficient for quality.
+Admission reports bind the audit script digest. Changing the audit tool or
+policy changes that identity; rebuild any development pack from the newly
+audited inputs rather than treating an older pack as a current audit result.
+
 After admission, `export` takes the same inputs plus `--output NEW_PRIVATE.json`.
 It creates a new file containing only approved train and validation texts,
 choices and provenance; test texts are not exported. It refuses to overwrite an
 existing file or export while gates fail. This format is a per-node handoff and
 is **not** consumed by the existing global encoder trainer. An interruption
 during writing can leave a partial file; inspect it and choose a new path. The
-audit and export process itself reads test records and reports test support, so
-it does not provide a blinded holdout. Genuine blinding and an independent
-evaluation process remain necessary. The report records input, snapshot, policy
+v1 audit and export process itself reads test records and reports test support.
+The v2 development policy does not require test records but cannot prove they
+were kept separate. Genuine blinding and an independent evaluation process
+remain necessary. The report records input, snapshot, policy
 and tool hashes plus Python and Unicode versions; these hashes identify the
 bytes used, not their trustworthiness. Filesystem checks do not protect against
 hostile concurrent changes.
