@@ -100,7 +100,8 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
     example = tokenizer([rows[0]["text"]], truncation=True, padding=True,
                         max_length=manifest["max_length"], return_tensors="pt")
     names = list(example.keys())
-    if not names or any(value.ndim != 2 for value in example.values()):
+    if (not names or "input_ids" not in names or set(names) - {"input_ids", "token_type_ids", "attention_mask"}
+            or any(value.ndim != 2 for value in example.values())):
         raise ValueError("unsupported tokenizer input shape")
 
     class Logits(torch.nn.Module):
@@ -159,6 +160,18 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
     if predict_model.artifact_digest(args.model) != artifact_hash:
         raise ValueError("source model changed during export")
     tokenizer.save_pretrained(args.output)
+    tokenizer_path = args.output / "tokenizer.json"
+    if not tokenizer_path.is_file():
+        raise ValueError("native shadow requires a serialized fast tokenizer")
+    tokenizer_data = json.loads(tokenizer_path.read_bytes())
+    truncation = tokenizer_data.get("truncation") or {}
+    padding = tokenizer_data.get("padding") or {}
+    if (truncation.get("max_length") != manifest["max_length"]
+            or str(truncation.get("direction", "")).lower() != tokenizer.truncation_side
+            or truncation.get("strategy") != "LongestFirst" or truncation.get("stride") != 0
+            or padding.get("strategy") != "BatchLongest" or padding.get("pad_to_multiple_of") is not None
+            or str(padding.get("direction", "")).lower() != tokenizer.padding_side):
+        raise ValueError("tokenizer settings are unsupported by native shadow")
     (args.output / "labels.json").write_bytes(labels_raw)
     (args.output / "prediction-config.json").write_bytes(prediction_raw)
     (args.output / "taxonomy.json").write_bytes(taxonomy_raw)
@@ -167,11 +180,13 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
         if not path.is_file() or path.is_symlink():
             raise ValueError("unexpected non-file output")
         files[path.name] = file_digest(path)
-    result = {"schema_version": "lfg.encoder-onnx-artifact.v1", "promotion_eligible": False,
+    result = {"schema_version": "lfg.encoder-onnx-artifact.v2", "promotion_eligible": False,
               "source_artifact_sha256": artifact_hash, "export_config_sha256": config_hash,
               "prediction_config_sha256": decision_hash, "taxonomy_sha256": taxonomy_hash,
               "parity_dataset_sha256": dataset_hash, "exporter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "inputs": names, "outputs": ["logits"], "opset_version": config["opset_version"],
+              "max_length": manifest["max_length"], "padding_side": tokenizer.padding_side,
+              "truncation_side": tokenizer.truncation_side,
               "cases": cases, "observed_batch_token_shapes": sorted([list(shape) for shape in shapes]),
               "max_absolute_logit_error": worst, "absolute_tolerance": config["absolute_tolerance"],
               "relative_tolerance": config["relative_tolerance"], "decision_mismatches": 0,
