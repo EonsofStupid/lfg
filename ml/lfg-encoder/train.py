@@ -184,6 +184,14 @@ def select_training_records(records: list[dict[str, Any]], minimum: int, develop
     return records if development else verified
 
 
+def validate_validation_labels(training: list[dict[str, Any]], validation: list[dict[str, Any]]) -> None:
+    def labels(rows: list[dict[str, Any]]) -> set[str]:
+        return {label for row in rows for field in ("intents", "capabilities", "risks") for label in row[field]}
+    unseen = labels(validation) - labels(training)
+    if unseen:
+        raise ValueError(f"validation contains labels absent from the training partition: {sorted(unseen)}")
+
+
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
     policy_path = getattr(args, "promotion_policy", POLICY)
@@ -198,14 +206,17 @@ def train(args: argparse.Namespace) -> None:
             raise SystemExit("training gate blocked: --audited-plan is required for non-development training")
         try:
             import corpus_audit as audit_module
-            audit_report = audit_module.validate_training_corpus(records, args.audited_plan)
+            audit_report, validation_rows = audit_module.load_reviewed_validation(records, args.audited_plan)
+            train_rows = records
             corpus_audit = {key: audit_report[key] for key in (
                 "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
                 "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise SystemExit(f"training corpus gate blocked: {error}") from error
     try:
-        train_rows, validation_rows = grouped_split(records, args.seed)
+        if args.allow_below_gate:
+            train_rows, validation_rows = grouped_split(records, args.seed)
+        validate_validation_labels(train_rows, validation_rows)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     if not re.fullmatch(r"[0-9a-f]{40}", args.model_revision or ""):
@@ -227,6 +238,7 @@ def train(args: argparse.Namespace) -> None:
         "dataset_sha256": dataset_digest,
         "seed": args.seed,
         "development_override": args.allow_below_gate,
+        "validation_source": "grouped-development-split" if args.allow_below_gate else "audited-validation-partition",
         "corpus_audit": corpus_audit,
         "train_ids": [row["id"] for row in train_rows],
         "validation_ids": [row["id"] for row in validation_rows],

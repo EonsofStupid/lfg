@@ -97,11 +97,17 @@ class CorpusAuditTests(unittest.TestCase):
         (self.root / "c.jsonl").write_text(json.dumps(extra), encoding="utf-8")
         self.write()
         corpus_audit.validate_training_corpus([self.rows[0]], self.root / "plan.json")
+        _, validation = corpus_audit.load_reviewed_validation([self.rows[0]], self.root / "plan.json")
+        self.assertEqual([row["id"] for row in validation], ["c"])
         snapshot, _ = corpus_audit.assemble_training(self.root / "plan.json")
         self.assertEqual([json.loads(line)["id"] for line in snapshot.splitlines()], ["a"])
         changed = {**self.rows[0], "text": "not the reviewed text"}
         with self.assertRaisesRegex(ValueError, "does not exactly match"):
             corpus_audit.validate_training_corpus([changed], self.root / "plan.json")
+        extra["text"] = "changed after review"
+        (self.root / "c.jsonl").write_text(json.dumps(extra), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "validation example requires"):
+            corpus_audit.load_reviewed_validation([self.rows[0]], self.root / "plan.json")
 
 
 if __name__ == "__main__":

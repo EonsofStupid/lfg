@@ -74,6 +74,10 @@ if result.returncode:
     raise SystemExit(result.returncode)
 manifest = json.loads((work / "model/run-manifest.json").read_text())
 assert manifest["split"]["corpus_audit"]["review_ledger_sha256"]
+assert manifest["split"]["validation_source"] == "audited-validation-partition"
+assert set(manifest["split"]["train_ids"]) == {"fixture-1", "fixture-2"}
+assert manifest["split"]["validation_ids"] == ["fixture-3"]
+assert "fixture-4" not in manifest["split"]["train_ids"] + manifest["split"]["validation_ids"]
 assert (work / "model/model.safetensors").is_file()
 print(json.dumps({"fixture_only": True, "training_rows": len(rows[:2]), "audit_bound": True,
                   "model_sha256": hashlib.sha256((work / "model/model.safetensors").read_bytes()).hexdigest()}))

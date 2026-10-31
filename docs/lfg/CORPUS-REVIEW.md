@@ -46,6 +46,10 @@ For a review workflow:
    duplicate normalized text within a split, and incomplete review. The
    training command additionally enforces the configured sample threshold and
    `--audited-plan PLAN`; the input must exactly match the audited train rows.
+   Audited training loads the separate validation partition and verifies its
+   source hashes and audit again. It rejects validation labels missing from the
+   training partition; test rows are not supplied to the trainer. This does not
+   establish adequate positive or negative support for every label.
    Its run manifest records audit, plan, taxonomy, ledger, source and code
    digests. Changing them prevents an ordinary resume.
 
@@ -82,6 +86,11 @@ machine using the cached tiny random BERT revision recorded in the
 reviewed training examples, bound the fixture audit into the run manifest, and
 saved model weights. This exercises the gate; the fixture approvals, two-example
 threshold and resulting model are not real training or quality evidence.
+After the audited-validation fix, a separate offline fixture run checked that
+both train records reached training, the validation record came from the
+declared validation project, and the test record was not passed to either
+training or validation. It explicitly replaced the tiny test model's mismatched
+classification head. This proves the split wiring, not model quality.
 
 ## Current local inventory
 
