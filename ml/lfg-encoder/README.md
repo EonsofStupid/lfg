@@ -16,6 +16,8 @@ The separate [PR review batch](dataset/rrflow-pr-review.v1.jsonl) contains
 actual PR titles and excerpts linked to outcome journals, not original prompts.
 For a bounded real-corpus measurement of the baseline process, including
 Windows CPU-time and cycle counters, see the [process benchmark](../../docs/lfg/CPU-PROCESS-BENCHMARK.md).
+For the first below-gate run using real conversation requests and its negative
+diagnostic result, see the [development experiment](../../docs/lfg/REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
 ## Current lane (classifier)
 
