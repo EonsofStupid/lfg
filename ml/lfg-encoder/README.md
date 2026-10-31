@@ -5,9 +5,11 @@ MasterClyffy CPU encoder. Runtime prompts are not collected here. The checked-in
 corpus is intentionally authored synthetic data.
 
 These experiments support the assessment and routing objective in the root
-[README](../../README.md). The classifier is exploratory and is not the authoritative runtime encoder.
-Any learned candidate needs task-specific evaluation before integration or
-promotion.
+[README](../../README.md). The classifier and CPU LLM paths are exploratory;
+neither is currently the authoritative runtime encoder. The coding-oriented
+teacher and student work below also explores general model capabilities, and
+its contribution to LFG's assessment role needs to be demonstrated through
+task-specific evaluation before integration or promotion.
 
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for
