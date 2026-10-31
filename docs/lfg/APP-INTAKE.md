@@ -18,6 +18,10 @@ states that engine-admitted LFG/SWAG execution is unimplemented. These are
 derived questions, not evidence that the original notes have all been found or
 that the owner has approved this wording.
 
+The owner's separate authored governance questions have since been recovered
+and are available in the [boundary question catalog](BOUNDARY-QUESTION-BANK.md).
+They are not the intake questionnaire described on this page.
+
 Every answer is filled only from the supplied snapshot path. Adding questions
 does not connect those paths to an app: the LFG UI currently supplies the
 request, project ID, and configured model declarations, plus the optional
