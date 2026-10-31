@@ -2,6 +2,30 @@
 
 The bundled questions and their source paths are defined in `crates/lfg-server/config/intake-template.v1.json`. Set `LFG_INTAKE_TEMPLATE` to a JSON file using the same schema to replace them at server startup; an invalid configuration stops startup. `GET /api/lfg/intake/template` returns the effective template and its digest. Questions use JSON pointers into an app snapshot, a value kind, and a required flag. A missing or incorrectly typed value is reported rather than guessed. An explicitly supplied empty array or `false` is a value.
 
+### Sources and current coverage
+
+The bundled questions are a working draft, not a verified transcription of the
+owner's complete original question set. The project conversation requested
+per-project AI subscriptions and model/effort profiles, CPU efficiency,
+MCP/RRFlow/SWAG connectivity, tracing and developer statistics, and local or
+hosted deployment with configurable model and weight updates. These requests
+inform the provider, model, tools, integration, deployment, observability and
+update questions. The current RRFlow repository's
+`docs/reference/inference/lfg-swag.md` defines bounded authorized inputs and
+observable outputs with provenance and explicit missing/inconclusive states;
+those requirements inform the analysis input and output questions. It also
+states that engine-admitted LFG/SWAG execution is unimplemented. These are
+derived questions, not evidence that the original notes have all been found or
+that the owner has approved this wording.
+
+Every answer is filled only from the supplied snapshot path. Adding questions
+does not connect those paths to an app: the LFG UI currently supplies the
+request, project ID, and configured model declarations, plus the optional
+DevPulse provider projection described below. It does not populate the new
+deployment, analysis, observability or update paths. An integrating app must
+explicitly supply these facts; absent or unknown facts stay missing. The UI
+does not yet edit or save the missing answers as a per-project profile.
+
 A host can submit a snapshot to `POST /api/lfg/intake/preview`, for example:
 
 ```json
