@@ -49,6 +49,7 @@ def load_training_config(path: Path) -> dict[str, Any]:
 def parse_training_config(raw: bytes) -> dict[str, Any]:
     config = json.loads(raw)
     validate_training_config(config)
+    config.setdefault("device", "auto")
     return config
 
 
@@ -64,6 +65,32 @@ def validate_training_config(config: dict[str, Any]) -> None:
         raise ValueError("invalid epochs")
     if type(config.get("allow_mismatched_sizes")) is not bool:
         raise ValueError("invalid allow_mismatched_sizes")
+    if config.get("device", "auto") not in ("auto", "cpu", "cuda"):
+        raise ValueError("device must be auto, cpu, or cuda")
+
+
+def verify_training_device(requested: str, selected: str, cuda_available: bool) -> None:
+    """Fail closed when an explicit training target is unavailable or ignored."""
+    if requested not in ("auto", "cpu", "cuda"):
+        raise ValueError("invalid requested training device")
+    if requested == "cuda" and not cuda_available:
+        raise ValueError("CUDA training requested but CUDA is unavailable")
+    if requested != "auto" and selected != requested:
+        raise ValueError(f"training device mismatch: requested {requested}, selected {selected}")
+
+
+def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_class: Any) -> tuple[Any, bool]:
+    cuda_available = torch.cuda.is_available()
+    if args.device == "cuda" and not cuda_available:
+        raise ValueError("CUDA training requested but CUDA is unavailable")
+    result = arguments_class(
+        output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=args.batch_size,
+        eval_strategy="steps", eval_steps=args.checkpoint_steps, save_strategy="steps",
+        save_steps=args.checkpoint_steps, load_best_model_at_end=True, save_only_model=False,
+        use_cpu=args.device == "cpu", report_to="none")
+    verify_training_device(args.device, result.device.type, cuda_available)
+    return result, cuda_available
 
 
 def prepare_run(output: Path, manifest: dict[str, Any], resume: bool) -> None:
@@ -320,6 +347,9 @@ def train(args: argparse.Namespace) -> None:
     except ImportError as error:
         raise SystemExit("Install requirements.txt before training") from error
 
+    training_arguments, cuda_available = make_training_arguments(args, torch, TrainingArguments)
+    selected_device = training_arguments.device
+
     combined = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in records]
     # Reviewed training always exposes the complete audited taxonomy rather
     # than silently dropping labels that happen to be absent from the data.
@@ -361,6 +391,9 @@ def train(args: argparse.Namespace) -> None:
                                       "scikit-learn", "scipy", "tokenizers", "huggingface-hub", "safetensors", "pyarrow")),
         "cuda_version": torch.version.cuda,
         "cudnn_version": torch.backends.cudnn.version(),
+        "requested_device": args.device,
+        "selected_device": str(selected_device),
+        "cuda_available": cuda_available,
         "devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())],
     }
     try:
@@ -397,12 +430,10 @@ def train(args: argparse.Namespace) -> None:
             args.base_model, revision=args.model_revision, num_labels=len(binarizer.classes_),
             problem_type="multi_label_classification", ignore_mismatched_sizes=args.allow_mismatched_sizes,
             local_files_only=bool(model_manifest))
-    trainer = Trainer(model_init=model_init, args=TrainingArguments(
-        output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=args.batch_size,
-        eval_strategy="steps", eval_steps=args.checkpoint_steps, save_strategy="steps",
-        save_steps=args.checkpoint_steps, load_best_model_at_end=True, save_only_model=False,
-        report_to="none"), train_dataset=train_data, eval_dataset=validation_data)
+    trainer = Trainer(model_init=model_init, args=training_arguments,
+                      train_dataset=train_data, eval_dataset=validation_data)
+    verify_training_device(args.device, trainer.args.device.type, torch.cuda.is_available())
+    verify_training_device(args.device, next(trainer.model.parameters()).device.type, torch.cuda.is_available())
     trainer.train(resume_from_checkpoint=checkpoint)
     check_model_snapshot()
     if verify_payload and training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra,
@@ -437,6 +468,8 @@ def main() -> None:
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--checkpoint-steps", type=int)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"),
+                        help="training compute target; cuda refuses CPU fallback")
     parser.add_argument("--allow-mismatched-sizes", action=argparse.BooleanOptionalAction, default=None,
                         help="permit reinitialization of mismatched weights (review model loading warnings)")
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
@@ -447,7 +480,7 @@ def main() -> None:
         config_bytes = args.training_config.read_bytes()
         config = parse_training_config(config_bytes)
         args.training_config_sha256 = hashlib.sha256(config_bytes).hexdigest()
-        fields = ("base_model", "seed", "epochs", "max_length", "batch_size", "checkpoint_steps", "allow_mismatched_sizes")
+        fields = ("base_model", "seed", "epochs", "max_length", "batch_size", "checkpoint_steps", "allow_mismatched_sizes", "device")
         for field in fields:
             if getattr(args, field) is None:
                 setattr(args, field, config[field])

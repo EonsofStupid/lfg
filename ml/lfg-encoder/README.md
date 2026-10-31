@@ -124,6 +124,16 @@ evidence for reproducing an experiment, not a guarantee of bitwise-identical
 GPU results. The manifest and split contain IDs and family names: protect them
 as project data and do not put sensitive information in those fields.
 
+The `device` setting accepts `auto`, `cpu`, or `cuda`; `--device` overrides it.
+For a Spark run use `--device cuda` to require CUDA instead of silently falling
+back to the CPU. `cpu` forces CPU execution even when a GPU is visible. The
+trainer checks the selected device and the model's device, and records the
+requested device, selected device and CUDA availability in the run manifest.
+`auto` retains the library's automatic selection and can select CPU. Device
+selection does not prove the selected batch size fits memory or that training
+will succeed. Existing runs whose trainer code or manifest differs remain
+subject to the existing resume check; do not bypass it to resume across changes.
+
 Checkpoints are written every configured number of optimizer steps. To resume,
 use the exact same command and add `--resume`; it verifies the existing manifest
 and requires the latest checkpoint's trainer, optimizer, scheduler and RNG

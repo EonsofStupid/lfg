@@ -5,6 +5,7 @@
   "epochs": 3.0,
   "max_length": 512,
   "batch_size": 8,
+  "device": "auto",
   "checkpoint_steps": 100,
   "allow_mismatched_sizes": false
 }
