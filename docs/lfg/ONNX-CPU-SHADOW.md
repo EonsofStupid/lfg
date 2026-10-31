@@ -117,6 +117,8 @@ identity, so these numbers include reading the much larger binary, startup,
 parsing, inference and serialization. They are not per-request latency,
 memory, an isolated benchmark, or evidence of acceptable model quality.
 The parity and performance reports remain in the private dataset directory.
+For an interleaved, long-lived-process comparison that separates startup from
+per-request timing, see [persistent CPU comparison](PERSISTENT-CPU-BENCHMARK.md).
 
 ## Local compatibility evidence
 
