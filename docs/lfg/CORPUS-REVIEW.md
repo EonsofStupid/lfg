@@ -648,10 +648,13 @@ deduplicates against explicitly supplied development reference plans, and
 creates an unlabeled pending-only workspace. Its source verification is also
 available in the browser review screen when the configured session and line
 limits cover the selected sources. On request, the screen can display a bounded
-suffix of prior human-marked, single-text messages from the same file and exact
-project root. It verifies the selected prefix first; the displayed file order
-does not establish conversation ancestry and may include a different branch.
-Tool results, assistant output and later messages are excluded. A prefix match does not establish full conversational
+suffix of prior human-marked, single-text messages reached through same-session
+parent links in that file and exact project root. It verifies the selected
+prefix first and fails if a required link is missing, ambiguous, cyclic or
+crosses sessions. The `max_ancestry_records` context setting bounds the number
+of source record identities retained; add it to older custom review configs.
+Source links are metadata assertions and can omit context. Tool results,
+assistant output and later messages are excluded. A prefix match does not establish full conversational
 context, privacy, rights, label correctness or project independence. A source
 may be appended after inventory; the selected prefix must remain unchanged.
 

@@ -9,7 +9,8 @@
   },
   "source_context": {
     "max_messages": 3,
-    "max_context_bytes": 16384
+    "max_context_bytes": 16384,
+    "max_ancestry_records": 100000
   },
   "redaction_suggestions": [
     {"id": "ambient-browser-envelope", "label": "Preview removing browser context envelope",
