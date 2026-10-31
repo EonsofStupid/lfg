@@ -303,6 +303,32 @@ and a caveat for the reviewer. Use it instead of its original
 `additional-training-review-draft.v1/workspace`, never alongside it. The two
 draft workspaces together contain 18 AI drafts, not 18 human-reviewed examples.
 
+On 2026-10-31, eleven additional assistant-drafted suggestions were made from
+actual requests in the three live training workspaces. The source verification
+endpoint matched each selected record to its recorded session prefix and
+original text, both before preparation and in the resulting workspace. The
+suggestions remain unreviewed, include reviewer caveats, and do not establish
+authorship, rights, context or correctness. Other messages were left unlabeled
+when the task or implied negatives were unclear.
+
+The original review servers retained their locks and were not stopped. Private
+point-in-time copies were made after comparing the source files before and
+after the copy; a separate pending-only union of those copies contains 598
+training candidates, including 29 draft-labeled and 569 unlabeled records, with
+zero approvals and no normalized exact duplicates. It is at
+`dataset/private/combined-source-grounded-training-review-20261031-v1/workspace`.
+The private `priority-review-list.md` in its parent identifies the eleven new
+suggestions. A separate local review server was started for this union; its URL
+is in `dataset/private/combined-review-running-20261031-v1/review.stdout`.
+That URL grants review access and should remain private.
+
+Review the union **instead of** its component or original workspaces; decisions
+do not synchronize, and later work in either copy can make the other stale.
+The copies are optimistic snapshots, not a lock on the original sessions.
+Neither the count of drafts nor a source-text match makes a reviewed corpus or
+proves representative label support. Validation and test workspaces were not
+opened for this preparation.
+
 ### Local browser review
 
 The same workspace can be reviewed in a browser using the Python training
