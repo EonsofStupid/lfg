@@ -76,6 +76,7 @@
     el('request').value = modelText;
     redactions = [];
     el('source').textContent = JSON.stringify(current.source, null, 2);
+    el('source-check').textContent = '';
     el('review-note').textContent = current.review_note || 'No review note recorded.';
     if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
@@ -103,6 +104,18 @@
   }
 
   function handle(promise) { promise.catch(error => { el('notice').textContent = error.message; }); }
+  el('verify-source').addEventListener('click', () => handle((async () => {
+    if (!current) return;
+    const checked = current;
+    el('source-check').textContent = 'Checking source…';
+    try {
+      await api('/api/verify-source', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: checked.id, annotation_sha256: checked.annotation_sha256})});
+      if (current === checked) el('source-check').textContent = 'Original message and source prefix match. Check context, authorship, rights, and privacy separately.';
+    } catch (error) {
+      if (current === checked) el('source-check').textContent = `Source check failed: ${error.message}`;
+    }
+  })()));
   el('redact').addEventListener('click', () => {
     const request = el('request');
     const start = request.selectionStart;

@@ -142,6 +142,18 @@ resources. The server rejects non-loopback host headers, requests without the
 token, and cross-origin decisions. Responses are marked `no-store`.
 
 The browser displays one pending request, source and proposed labels at a time.
+For a `codex-session-user-text` record, **Check original source** rereads the
+bounded original session prefix, verifies its recorded hash and selected line,
+and compares the original message with the review copy. The source check is
+on demand; it does not save an approval or establish authorship, context,
+permission, privacy or label correctness. Later content appended to the session
+does not invalidate the checked prefix. A changed or unavailable prefix, a
+different review copy, unsupported source type, or an interrupted review write
+produces an error. The browser does not display additional session messages.
+The `source_verification` object in the web configuration sets the maximum
+session-prefix and line sizes. Configurations without that optional object
+disable this check; it is independent of whether a reviewer can decide a
+record. Local source paths and hashes remain private metadata.
 Approving requires the attestation checkbox and typing `APPROVE`; rejection
 requires typing `REJECT`. The underlying workspace checks the displayed digest,
 taxonomy, project and split before saving. Skipped items remain pending.

@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import json
 import secrets
 import tempfile
@@ -137,6 +138,62 @@ class ReviewWebTests(unittest.TestCase):
         self.assertIn("default-src 'none'", headers['Content-Security-Policy'])
         self.assertIn(b'Corpus review', data)
         self.assertEqual(self.request('GET', '/app.js', auth=False)[0], 200)
+
+    def test_source_check_validates_original_and_never_approves(self):
+        root = Path(self.temp.name)
+        text = 'a private request'
+        line = (json.dumps({'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                 'content': [{'type': 'input_text', 'text': text}],
+                 'internal_chat_message_metadata_passthrough': {'content_item_kinds': ['user.text']}}}) + '\n').encode()
+        session = root / 'session.jsonl'
+        session.write_bytes(line)
+        source = {'project': 'fixture', 'kind': 'codex-session-user-text', 'source_file': str(session),
+                  'source_line': 1, 'source_line_sha256': hashlib.sha256(line.rstrip(b'\r\n')).hexdigest(),
+                  'source_prefix_sha256': hashlib.sha256(line).hexdigest(), 'source_prefix_bytes': len(line),
+                  'source_file_sha256': hashlib.sha256(line).hexdigest(),
+                  'text_sha256': hashlib.sha256(text.encode()).hexdigest()}
+        path = root / 'source.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        row.update(text=text, source=source)
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        workspace = root / 'codex-workspace'
+        review_corpus.init_workspace(root / 'plan.json', workspace)
+        self.server.workspace = workspace
+        _, _, data = self.request('GET', '/api/item?offset=0')
+        item = json.loads(data)['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256']}
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin='https://evil.example')[0], 403)
+        status, _, data = self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)['status'], 'source_prefix_and_original_text_match')
+        self.assertNotIn(text.encode(), data)
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        original_limit = self.server.config['source_verification']['max_line_bytes']
+        self.server.config['source_verification']['max_line_bytes'] = 1
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        self.server.config['source_verification']['max_line_bytes'] = original_limit
+        with session.open('ab') as output:
+            output.write(b'additional later content\n')
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 200)
+        row['text'] = 'different review copy'
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        different = root / 'different-workspace'
+        review_corpus.init_workspace(root / 'plan.json', different)
+        _, _, ledger = review_corpus.load_workspace(different)
+        with self.assertRaisesRegex(ValueError, 'differs from the original'):
+            review_web.verify_source(different, 'one', ledger['one']['annotation_sha256'],
+                                     self.server.config['source_verification'])
+        session.write_bytes(line.replace(b'private', b'changed'))
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+
+    def test_source_check_rejects_unsupported_and_stale_records(self):
+        _, _, data = self.request('GET', '/api/item?offset=0')
+        item = json.loads(data)['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256']}
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        body['annotation_sha256'] = '0' * 64
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
 
 
 if __name__ == '__main__':
