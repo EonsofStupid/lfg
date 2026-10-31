@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 DATASET = ROOT / "dataset" / "synthetic.v1.jsonl"
 POLICY = ROOT / "promotion-policy.json"
 TRAINING_CONFIG = ROOT / "training-config.v1.json"
+SUPPORT_POLICY = ROOT / "training-support-policy.v1.json"
 
 
 def load_promotion_policy(path: Path) -> dict[str, Any]:
@@ -192,6 +193,53 @@ def validate_validation_labels(training: list[dict[str, Any]], validation: list[
         raise ValueError(f"validation contains labels absent from the training partition: {sorted(unseen)}")
 
 
+def training_support(training: list[dict[str, Any]], validation: list[dict[str, Any]],
+                     taxonomy: dict[str, set[str]], raw_policy: bytes) -> dict[str, Any]:
+    """Count reviewed positive and negative labels; never inspect the test partition."""
+    policy = json.loads(raw_policy)
+    if not isinstance(policy, dict) or set(policy) != {"schema_version", "defaults", "overrides"} or \
+            policy.get("schema_version") != "lfg.encoder-training-support.v1":
+        raise ValueError("unsupported training support policy")
+    defaults, overrides = policy["defaults"], policy["overrides"]
+    splits = ("train", "validation")
+    fields = ("minimum_positive", "minimum_negative")
+    if not isinstance(defaults, dict) or set(defaults) != set(splits) or not isinstance(overrides, dict):
+        raise ValueError("invalid training support defaults or overrides")
+    all_labels = set.union(*taxonomy.values())
+    if set(overrides) - all_labels:
+        raise ValueError("training support override names an unknown label")
+    for split in splits:
+        rule = defaults[split]
+        if not isinstance(rule, dict) or set(rule) != set(fields) or \
+                any(type(rule[name]) is not int or rule[name] < 1 for name in fields):
+            raise ValueError(f"invalid {split} training support defaults")
+    for label, rules in overrides.items():
+        if not isinstance(rules, dict) or not rules or set(rules) - set(splits):
+            raise ValueError(f"invalid training support override for {label}")
+        for split, rule in rules.items():
+            if not isinstance(rule, dict) or not rule or set(rule) - set(fields) or \
+                    any(type(value) is not int or value < 1 for value in rule.values()):
+                raise ValueError(f"invalid {split} training support override for {label}")
+    result: dict[str, Any] = {}
+    failures = []
+    for split, rows in (("train", training), ("validation", validation)):
+        result[split] = {}
+        for group, labels in taxonomy.items():
+            for label in sorted(labels):
+                rule = {**defaults[split], **overrides.get(label, {}).get(split, {})}
+                positives = sum(label in row[group] for row in rows)
+                negatives = len(rows) - positives
+                result[split][label] = {"positive": positives, "negative": negatives, **rule}
+                if positives < rule["minimum_positive"] or negatives < rule["minimum_negative"]:
+                    failures.append(f"{split}:{label} has {positives} positive/{negatives} negative; "
+                                    f"requires {rule['minimum_positive']}/{rule['minimum_negative']}")
+    if failures:
+        raise ValueError("training support gate blocked: " + "; ".join(failures))
+    return {"schema_version": "lfg.encoder-training-support-result.v1",
+            "policy_sha256": hashlib.sha256(raw_policy).hexdigest(),
+            "counts": result}
+
+
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
     policy_path = getattr(args, "promotion_policy", POLICY)
@@ -199,6 +247,8 @@ def train(args: argparse.Namespace) -> None:
     policy = parse_promotion_policy(policy_bytes)
     records = select_training_records(input_records, policy["minimum_human_verified_examples"], args.allow_below_gate)
     corpus_audit = None
+    support = None
+    taxonomy = None
     if not args.allow_below_gate:
         if len(records) != len(input_records):
             raise SystemExit("training corpus gate blocked: remove unverified examples from the training input")
@@ -208,6 +258,15 @@ def train(args: argparse.Namespace) -> None:
             import corpus_audit as audit_module
             audit_report, validation_rows = audit_module.load_reviewed_validation(records, args.audited_plan)
             train_rows = records
+            plan_raw = args.audited_plan.read_bytes()
+            if hashlib.sha256(plan_raw).hexdigest() != audit_report["plan_sha256"]:
+                raise ValueError("plan changed during support validation")
+            import evaluate as evaluation_module
+            taxonomy, taxonomy_hash = evaluation_module.load_taxonomy(
+                audit_module.resolve(args.audited_plan.parent, json.loads(plan_raw)["taxonomy"]))
+            if taxonomy_hash != audit_report["taxonomy_sha256"]:
+                raise ValueError("taxonomy changed during support validation")
+            support = training_support(train_rows, validation_rows, taxonomy, args.support_policy.read_bytes())
             corpus_audit = {key: audit_report[key] for key in (
                 "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
                 "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
@@ -232,12 +291,16 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit("Install requirements.txt before training") from error
 
     combined = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in records]
-    binarizer = MultiLabelBinarizer().fit(combined)
+    # Reviewed training always exposes the complete audited taxonomy rather
+    # than silently dropping labels that happen to be absent from the data.
+    classes = sorted(set.union(*taxonomy.values())) if taxonomy else None
+    binarizer = MultiLabelBinarizer(classes=classes).fit(combined)
     split = {
         "schema_version": "lfg.encoder-development-split.v1",
         "dataset_sha256": dataset_digest,
         "seed": args.seed,
         "development_override": args.allow_below_gate,
+        "training_support": support,
         "validation_source": "grouped-development-split" if args.allow_below_gate else "audited-validation-partition",
         "corpus_audit": corpus_audit,
         "train_ids": [row["id"] for row in train_rows],
@@ -311,6 +374,8 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--training-config", type=Path, default=TRAINING_CONFIG)
     parser.add_argument("--promotion-policy", type=Path, default=POLICY)
+    parser.add_argument("--support-policy", type=Path, default=SUPPORT_POLICY,
+                        help="reviewed train/validation positive and negative support requirements")
     parser.add_argument("--base-model")
     parser.add_argument("--model-revision", help="full immutable Hugging Face commit hash")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "experimental")
