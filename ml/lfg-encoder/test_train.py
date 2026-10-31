@@ -30,7 +30,7 @@ class DatasetGateTests(unittest.TestCase):
         tokenizer = Tokenizer()
         rows = [{"text": "private one"}, {"text": "private one two"}]
         self.assertEqual(train.token_coverage(rows, tokenizer, 5, "train"),
-                         {"examples": 2, "maximum_tokens": 5, "over_limit": 0})
+                         {"examples": 2, "maximum_tokens": 5, "over_limit": 0, "effective_limit": 5})
         self.assertEqual(tokenizer.options, {"add_special_tokens": True, "truncation": False, "padding": False})
         with self.assertRaisesRegex(ValueError, "train token coverage gate blocked: 1 of 2") as error:
             train.token_coverage(rows, tokenizer, 4, "train")
@@ -38,6 +38,14 @@ class DatasetGateTests(unittest.TestCase):
         self.assertEqual(len(train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 5)["input_ids"]), 2)
         with self.assertRaisesRegex(ValueError, "exceeds"):
             train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 4)
+        tokenizer.model_max_length = 4
+        with self.assertRaisesRegex(ValueError, "effective maximum 4"):
+            train.token_coverage(rows, tokenizer, 100, "train")
+        with self.assertRaisesRegex(ValueError, "effective maximum"):
+            train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 100)
+        tokenizer.model_max_length = 0
+        with self.assertRaisesRegex(ValueError, "invalid tokenizer"):
+            train.token_coverage(rows, tokenizer, 100, "train")
 
     def test_token_coverage_rejects_invalid_tokenizer_output(self):
         for ids in ([], None, [True], [[1]]):

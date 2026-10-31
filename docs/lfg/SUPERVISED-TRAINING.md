@@ -134,8 +134,9 @@ train a model or establish a reviewed corpus.
 
 Before creating a run directory, the trainer tokenizes every selected training
 and validation request with the chosen tokenizer, special tokens enabled and
-truncation disabled. It rejects either split if any input exceeds the configured
-`max_length`, and reports aggregate counts and the longest length without
+truncation disabled. It rejects either split if any input exceeds the smaller
+of the configured `max_length` and the tokenizer's `model_max_length`, when
+the tokenizer supplies that limit. It reports aggregate counts and the longest length without
 printing request text. The command can still create its parent directory and
 the persistent sibling lock marker before the check. The run manifest records
 the successful coverage counts.
@@ -158,3 +159,22 @@ held-out data were not inspected for this check. An operator must review the
 long requests and select a suitable model and length or create separately
 reviewed, correctly labeled examples. Raising the length may increase memory
 and compute substantially and has not been capacity-tested for this workload.
+
+A later local census used the live review servers' read-only APIs for all 598
+pending training candidates, with the same verified ModernBERT tokenizer and
+512-token configuration. Seven exceeded 512 tokens; three exceeded the model
+configuration's 8,192 positions, and the longest was 22,422 tokens. Their
+labels were all pending. The private census report includes IDs, current
+annotation digests and offsets for the seven, but no request text; offsets can
+change after review. It is stored at
+`dataset/private/pending-training-modernbert-token-census-20261031-v3.json`.
+The scan checked workspace file hashes before and after each server scan but
+did not lock the running reviewer; revalidate each item before making a decision.
+No validation or test workspace was scanned. The source data remain unreviewed.
+
+Tokenizer `model_max_length` is an advertised limit, not proof of a model's
+actual context capability, GPU capacity or correctness. A longer supported model
+or independently reviewed segments may be needed; copying whole-request labels
+onto every segment would introduce unreviewed assumptions. The Spark was also
+running a separate vLLM workload and using swap during this assessment, so no
+long-sequence GPU capacity test was run against that live workload.

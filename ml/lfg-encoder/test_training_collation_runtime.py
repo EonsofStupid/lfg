@@ -51,6 +51,11 @@ class TrainingCollationRuntimeTests(unittest.TestCase):
             train.token_coverage(rows, tokenizer, lengths[1] - 1, "train")
         with self.assertRaisesRegex(ValueError, "exceeds"):
             train.tokenize_complete_batch({"text": [short, long]}, tokenizer, lengths[1] - 1)
+        tokenizer.model_max_length = lengths[1] - 1
+        with self.assertRaisesRegex(ValueError, "effective maximum"):
+            train.token_coverage(rows, tokenizer, lengths[1], "train")
+        with self.assertRaisesRegex(ValueError, "effective maximum"):
+            train.tokenize_complete_batch({"text": [short, long]}, tokenizer, lengths[1])
 
     def test_variable_lengths_work_in_training_and_validation_loaders(self):
         import torch

@@ -699,6 +699,18 @@ No candidate was approved, and the reserved test workspace was not opened or
 compared during this preparation. A local review-server check verified one
 original source and its context endpoint without recording a decision.
 
+A later read-only check of the three live training review servers found 598
+pending candidates and zero approvals. Of the 598, 580 had no draft labels;
+18 had draft labels, all still pending review. The configured triage patterns
+flagged none of the 78 newer Claude candidates; this does not establish that
+they are clean, complete, independent or correctly labeled. The local private
+report is `dataset/private/claude-live-training-triage-20261031-v1.json` and
+contains IDs and annotation digests, not request text. The scan compared file
+hashes before and after but did not lock the active reviewer, so it is an
+optimistic snapshot; recheck each item before a decision. The existing 83
+marker hits among the earlier 520 candidates and the human-review, label
+support and independent-validation requirements remain relevant.
+
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
 commit-message prompts. All 34 are unverified, and this plan references no
