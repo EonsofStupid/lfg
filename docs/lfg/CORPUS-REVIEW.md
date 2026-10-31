@@ -164,6 +164,47 @@ The current real-request review workspace is
 earlier experiment and it has no test source; review alone cannot turn this
 plan into an independent final evaluation.
 
+### Development-only assembly
+
+To avoid supplying the test workspace to development assembly, explicitly select
+`--scope development` and pass only separate train and validation workspaces:
+
+```powershell
+python ml/lfg-encoder/combine_reviewed_workspaces.py --scope development `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
+  --status
+```
+
+For an assembly, replace `--status` with `--output NEW_PRIVATE_DIRECTORY` after
+genuine review. The tool checks every selected workspace plan before opening
+source records or ledgers, and rejects any declared test source. Mixed-split
+workspaces must be separated before use. It writes a v2 development plan and
+marks its report and assembly manifest `holdout_assessment: not_performed`.
+Both train and validation still require current approvals; the ordinary sample,
+label-support, model and environment checks still apply at training. Reviewers
+and project/split assignments are assertions; this does not establish source
+rights or independence, or detect a mislabeled test source. Files and plans
+must be trusted against concurrent modification. Keep holdout files physically
+separate and access-controlled.
+The audit and training scripts are identity-bound inputs to these runs; changing
+their bytes changes the recorded code identities and can prevent resuming or
+evaluating an earlier run. Preserve the exact scripts for existing experiments.
+
+The reviewed trainer accepts the v2 development plan and records its scope;
+the existing final evaluator deliberately rejects it. A separate controlled
+final evaluator that binds a frozen development run to an independently
+committed test set, checks cross-split leakage and runs the native comparison is
+still required. The v1 complete-plan workflow remains available and still reads
+test data in its audit, so it does not enforce a blinded holdout.
+
+A read-only status check of the three local development workspaces returned 520
+train and 35 validation candidates, all pending and zero approved. No holdout
+workspace was supplied. Those counts are candidates, not usable reviewed
+training examples; the single-session validation source remains inadequate for
+broad qualification.
+
 ### Local browser review
 
 The same workspace can be reviewed in a browser using the Python training

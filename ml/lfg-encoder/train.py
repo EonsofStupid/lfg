@@ -315,6 +315,8 @@ def train(args: argparse.Namespace) -> None:
             corpus_audit = {key: audit_report[key] for key in (
                 "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
                 "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
+            if audit_report.get("scope") == "development":
+                corpus_audit.update(scope="development", holdout_assessment="not_performed")
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise SystemExit(f"training corpus gate blocked: {error}") from error
     try:

@@ -30,6 +30,8 @@ def file_hash(path: Path) -> str:
 def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str, Any]) -> tuple[dict, list[dict], dict]:
     training, dataset_hash = train.load_dataset(training_dataset)
     report, validation = corpus_audit.load_reviewed_validation(training, plan_path)
+    if report.get('scope') == 'development':
+        raise ValueError('development-only training requires a separate controlled holdout evaluator; this evaluator requires a complete v1 plan')
     environment = run_manifest.get('environment_evidence')
     model_input = run_manifest.get('model_snapshot_evidence')
     digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None

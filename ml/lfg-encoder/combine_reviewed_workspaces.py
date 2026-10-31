@@ -53,7 +53,10 @@ def inspect(workspaces: list[Path]) -> tuple[list[dict], dict]:
     return reports, {'counts': counts, 'decisions': decisions, 'promotion_eligible': False}
 
 
-def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY) -> dict:
+def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY,
+        scope: str = 'complete') -> dict:
+    if scope not in ('complete', 'development'):
+        raise ValueError('invalid assembly scope')
     workspaces = workspace_paths(paths)
     policy_raw = policy_path.read_bytes()
     minimum = train.parse_promotion_policy(policy_raw)['minimum_human_verified_examples']
@@ -67,13 +70,25 @@ def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY
     with contextlib.ExitStack() as locks:
         for path in sorted(workspaces, key=lambda path: os.path.normcase(str(path))):
             locks.enter_context(train.run_lock(path / 'review'))
+        if scope == 'development':
+            # Read all plans before opening any source or review ledger.
+            for workspace in workspaces:
+                plan = json.loads(review_corpus.private_path(workspace, 'plan.json').read_bytes())
+                sources = plan.get('sources') if isinstance(plan, dict) else None
+                if (not isinstance(sources, list) or not sources
+                        or any(not isinstance(source, dict) or source.get('split') not in ('train', 'validation')
+                               for source in sources)):
+                    raise ValueError('development assembly permits only train and validation sources')
         initial, summary = inspect(workspaces)
+        if scope == 'development':
+            summary.update(scope='development', holdout_assessment='not_performed')
         summary['sample_gate'] = {'policy_sha256': digest(policy_raw), 'minimum_train_examples': minimum,
                                   'approved_train_shortfall': max(0, minimum - summary['counts']['train']['ready']),
                                   'candidate_train_shortfall': max(0, minimum - summary['counts']['train']['examples'])}
         if output is None:
             return summary
-        if any(value['ready'] == 0 for value in summary['counts'].values()):
+        required = ('train', 'validation') if scope == 'development' else corpus_audit.SPLITS
+        if any(summary['counts'][split]['ready'] == 0 for split in required):
             raise ValueError('each split needs at least one current approval before combining')
         with tempfile.TemporaryDirectory(prefix='.lfg-combine-', dir=parent) as temp:
             stage = Path(temp).resolve(strict=True)
@@ -101,7 +116,8 @@ def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY
                     review_corpus.new_file(combined / name, (export / source['path']).read_bytes())
                     sources.append({**source, 'path': name})
             review_corpus.new_file(combined / 'reviews.jsonl', review_corpus.encoded_rows(ledger))
-            plan = {'schema_version': corpus_audit.PLAN_SCHEMA, 'taxonomy': 'taxonomy.json',
+            plan = {'schema_version': (corpus_audit.DEVELOPMENT_PLAN_SCHEMA if scope == 'development'
+                                       else corpus_audit.PLAN_SCHEMA), 'taxonomy': 'taxonomy.json',
                     'review_ledger': 'reviews.jsonl', 'sources': sources}
             review_corpus.new_file(combined / 'plan.json', (json.dumps(plan, indent=2) + '\n').encode())
             training, report = corpus_audit.assemble_training(combined / 'plan.json')
@@ -116,6 +132,8 @@ def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY
                         'code_sha256': {path.name: digest(path.read_bytes()) for path in code},
                         'files_sha256': {name: digest((combined / name).read_bytes()) for name in files},
                         'counts': report['counts'], 'sample_gate': summary['sample_gate'], 'promotion_eligible': False}
+            if scope == 'development':
+                manifest.update(scope='development', holdout_assessment='not_performed')
             review_corpus.new_file(combined / 'assembly-manifest.json',
                                    (json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + '\n').encode())
             output.mkdir(mode=0o700)
@@ -128,7 +146,10 @@ def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY
                            for name, expected in manifest['files_sha256'].items())
                     or any(digest(path.read_bytes()) != manifest['code_sha256'][path.name] for path in code)):
                 raise ValueError('inputs or combined output changed during assembly')
-            return {'counts': checked['counts'], 'sample_gate': summary['sample_gate'], 'promotion_eligible': False}
+            result = {'counts': checked['counts'], 'sample_gate': summary['sample_gate'], 'promotion_eligible': False}
+            if scope == 'development':
+                result.update(scope='development', holdout_assessment='not_performed')
+            return result
 
 
 def main() -> None:
@@ -136,12 +157,13 @@ def main() -> None:
     parser.add_argument('--workspace', type=Path, action='append', required=True)
     parser.add_argument('--promotion-policy', type=Path, default=train.POLICY,
                         help='sample gate policy selected for the prospective training run')
+    parser.add_argument('--scope', choices=('complete', 'development'), default='complete')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--status', action='store_true')
     mode.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:
-        print(json.dumps(run(args.workspace, args.output, args.promotion_policy), indent=2, allow_nan=False))
+        print(json.dumps(run(args.workspace, args.output, args.promotion_policy, args.scope), indent=2, allow_nan=False))
     except (OSError, ValueError, KeyError, TypeError, UnicodeError) as error:
         raise SystemExit(f'combined review rejected: {error}') from error
 
