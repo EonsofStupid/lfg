@@ -16,16 +16,20 @@ Governance is separate, RRFlow owns durable data, and the runtime must not
 silently grant authorization. The notes describe a bundled, offline first
 binary and an eventual server mode using the same engine.
 
-The current repository's global multi-label classifier, corpus review tooling,
-and ONNX experiments do not implement that five-operation kernel, hierarchical
-address/recipe contract, exemplar-based extension, rule promotion chain, or the
-requested end-to-end proof. They remain experiments, not the final product
-architecture or evidence of model quality. The prior real-data work and hardware
-probes remain useful evidence about their own limited scope.
+The repository now includes an [experimental deterministic kernel](DETERMINISTIC-KERNEL.md)
+with all five node types and a CLI golden for the note's example. Its small JSON
+snapshot, rule scoring and tests are an initial implementation, not the full
+compiled snapshot and promotion architecture. The global multi-label classifier,
+corpus review tooling, and ONNX experiments remain separate experiments; they
+do not implement the exemplar-based extension or rule promotion chain and do not
+establish model quality. The prior real-data work and hardware probes remain
+useful evidence about their own limited scope.
 
 The engine plan's first proof target is a real CLI classification from an
 embedded core tree to one exact address and rule evidence, compared with a
-golden artifact. Before using learned suggestions in that chain, define the
+golden artifact. That local CLI comparison now exists; the CI artifact cannot
+yet be produced while Actions is blocked. Before using learned suggestions in
+that chain, define the
 per-node outcomes and reviewed journal data, establish a genuinely independent
 evaluation split, and compare against the deterministic kernel. The notes
 explicitly distinguish a correction journal from fabricated labels. The current

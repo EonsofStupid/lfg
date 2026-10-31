@@ -1,3 +1,5 @@
 ml/lfg-encoder/locks/*.requirements.txt text eol=lf
 ml/lfg-encoder/probe_untrained_onnx.py text eol=lf
 docs/lfg/evidence/modernbert-onnx-probe.v3.manifest.json text eol=lf
+crates/lfg-core/config/kernel-core.v1.json text eol=lf
+crates/lfg-server/tests/fixtures/kernel-logout.v1.json text eol=lf

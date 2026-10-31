@@ -1,4 +1,4 @@
-use std::{env, io::Read, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeMap, env, io::Read, net::SocketAddr, path::PathBuf};
 
 use axum::Router;
 use clap::{Parser, Subcommand};
@@ -6,6 +6,7 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 mod baseline_predict;
+mod kernel_predict;
 #[cfg(feature = "onnx-shadow")]
 mod onnx_predict;
 
@@ -21,6 +22,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Classify with the experimental deterministic LFG kernel.
+    Classify {
+        prompt: String,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Additional named input fields as NAME=VALUE.
+        #[arg(long = "field")]
+        fields: Vec<String>,
+    },
+    /// Stream real examples through one compiled kernel for offline analysis.
+    KernelPredict {
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        #[arg(long)]
+        max_examples: usize,
+    },
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
     /// Run an unpromoted ONNX artifact for offline comparison only.
@@ -61,6 +78,15 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Classify {
+            prompt,
+            snapshot,
+            fields,
+        } => classify(prompt, snapshot, fields)?,
+        Command::KernelPredict {
+            snapshot,
+            max_examples,
+        } => kernel_predict::run(snapshot, max_examples)?,
         Command::BaselinePredict => baseline_predict::run()?,
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxPredict {
@@ -81,6 +107,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve { bind } => serve(bind).await?,
     }
     Ok(())
+}
+
+fn classify(
+    prompt: String,
+    snapshot: Option<PathBuf>,
+    additional: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fields = BTreeMap::from([("prompt".to_string(), prompt)]);
+    for field in additional {
+        let (name, value) = field.split_once('=').ok_or("fields must be NAME=VALUE")?;
+        if fields.insert(name.to_owned(), value.to_owned()).is_some() {
+            return Err("duplicate input field".into());
+        }
+    }
+    let engine = load_kernel(snapshot)?;
+    println!("{}", serde_json::to_string(&engine.evaluate(&fields)?)?);
+    Ok(())
+}
+
+fn load_kernel(
+    snapshot: Option<PathBuf>,
+) -> Result<lfg_core::kernel::Engine, Box<dyn std::error::Error>> {
+    if let Some(path) = snapshot {
+        let limit = lfg_server::configured_operations()?.max_http_body_bytes();
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take((limit as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err("snapshot exceeds configured byte limit".into());
+        }
+        Ok(lfg_core::kernel::Engine::from_json(&bytes)?)
+    } else {
+        Ok(lfg_core::kernel::Engine::bundled()?)
+    }
 }
 
 fn lfg_bench(
