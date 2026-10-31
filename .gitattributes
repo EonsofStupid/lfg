@@ -1,5 +1,9 @@
 ml/lfg-encoder/locks/*.requirements.txt text eol=lf
 ml/lfg-encoder/dataset/synthetic.v1.jsonl text eol=lf
+ml/lfg-encoder/benchmark_kernel_persistent.py text eol=lf
+ml/lfg-encoder/benchmark_persistent.py text eol=lf
+ml/lfg-encoder/benchmark_process.py text eol=lf
+ml/lfg-encoder/node_evaluate.py text eol=lf
 ml/lfg-encoder/probe_untrained_onnx.py text eol=lf
 docs/lfg/evidence/modernbert-onnx-probe.v3.manifest.json text eol=lf
 crates/lfg-core/config/kernel-core.v1.json text eol=lf

@@ -44,15 +44,18 @@ repetitions of those 11 inputs, not independent tasks.
 
 | Measurement | Range across three runs |
 | --- | ---: |
-| Median request latency | 0.066–0.103 ms |
-| p95 request latency | 0.097–0.153 ms |
-| Process cycles, total for 110 measured requests | 7.18–11.11 million |
-| Working set after measurement | 7.78–7.96 MiB |
-| Time to first response | 29.6–362.3 ms |
+| Median request latency | 0.081–0.088 ms |
+| p95 request latency | 0.188–0.369 ms |
+| Process cycles, total for 110 measured requests | 7.86–8.64 million |
+| Working set after measurement | 7.69–7.89 MiB |
+| Time to first response | 41.3–47.6 ms |
 
-The measured CPU time was 15.625 ms in every run, too coarse for a useful
-per-request CPU-time estimate. The machine was not isolated from other work;
+The measured CPU-time delta was zero in every run despite nonzero cycles, too
+coarse for a useful per-request CPU-time estimate. The machine was not isolated from other work;
 the variations, small sample, and repeated inputs limit interpretation. This is
 not a production threshold, an independent quality evaluation, or a comparison
 with an admitted learned extension. No simulated exemplar pack was used. Raw
-aggregate reports remain under the Git-ignored private dataset directory.
+aggregate reports remain under the Git-ignored private dataset directory as
+`kernel-persistent-real-local.v2.run1.json` through `run3.json`. Earlier v1
+reports used Windows-converted benchmark source files; the v2 run uses the
+LF-pinned source bytes committed with the benchmark.
