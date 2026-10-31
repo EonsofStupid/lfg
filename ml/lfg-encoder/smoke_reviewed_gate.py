@@ -87,6 +87,7 @@ if result.returncode:
     print(result.stderr.decode(errors="replace"))
     raise SystemExit(result.returncode)
 manifest = json.loads((work / "model/run-manifest.json").read_text())
+assert manifest["environment_evidence"]["locked_wheel_payload"]["files"] > 0
 assert manifest["split"]["corpus_audit"]["review_ledger_sha256"]
 assert manifest["split"]["validation_source"] == "audited-validation-partition"
 assert manifest["split"]["training_support"]["counts"]["train"]["sensitive-data"]["positive"] == 1

@@ -300,10 +300,14 @@ def train(args: argparse.Namespace) -> None:
     allowed_extra = getattr(args, "environment_allowed_extra", [])
     validate_input_options(args.allow_below_gate, environment_lock, wheelhouse, model_manifest, allowed_extra)
     environment_evidence = model_evidence = None
+    verify_payload = not args.allow_below_gate or getattr(args, "verify_installed_payload", False)
+    if verify_payload and not environment_lock:
+        raise ValueError("installed payload verification requires an environment lock and wheelhouse")
     if environment_lock or model_manifest:
         import training_inputs
         if environment_lock:
-            environment_evidence = training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra)
+            environment_evidence = training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra,
+                                                                      verify_payload=verify_payload)
         if model_manifest:
             model_evidence = training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision)
     try:
@@ -401,6 +405,9 @@ def train(args: argparse.Namespace) -> None:
         report_to="none"), train_dataset=train_data, eval_dataset=validation_data)
     trainer.train(resume_from_checkpoint=checkpoint)
     check_model_snapshot()
+    if verify_payload and training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra,
+                                                              verify_payload=True) != environment_evidence:
+        raise ValueError("installed wheel payload evidence changed during training")
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
     (args.output / "labels.json").write_text(json.dumps(binarizer.classes_.tolist(), indent=2), encoding="utf-8")
@@ -422,6 +429,8 @@ def main() -> None:
     parser.add_argument("--wheelhouse", type=Path, help="exact wheelhouse used to build the environment")
     parser.add_argument("--environment-allowed-extra", action="append", default=[], metavar="DISTRIBUTION",
                         help="explicit installed bootstrap distribution not present in the wheel lock")
+    parser.add_argument("--verify-installed-payload", action="store_true",
+                        help="also verify installed locked-wheel payloads for below-gate development runs")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "experimental")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--epochs", type=float)
