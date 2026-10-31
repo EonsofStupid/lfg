@@ -413,6 +413,115 @@ impl JsonlJournal {
         Ok(sequence)
     }
 
+    pub fn review_queue(
+        &self,
+        engine: &lfg_core::kernel::Engine,
+        source: &SourceIndex,
+        output: &Path,
+        max_output_bytes: u64,
+    ) -> Result<Value, String> {
+        if max_output_bytes == 0 {
+            return Err("output size limit must be positive".into());
+        }
+        let reconciliation = self.reconcile(source)?;
+        if reconciliation["missing"] != 0 {
+            return Err("source must cover every journal observation".into());
+        }
+        let mut corrected = std::collections::BTreeSet::new();
+        for (_, event) in &self.corrections {
+            if let Event::Correction {
+                observation_sequence,
+                node,
+                ..
+            } = event
+                && !corrected.insert((*observation_sequence, node.as_str()))
+            {
+                return Err(
+                    "multiple corrections for one observation and node require resolution".into(),
+                );
+            }
+        }
+        let mut bytes = Vec::new();
+        let mut nodes = BTreeMap::<String, u64>::new();
+        let mut already_corrected = 0u64;
+        let mut baseline_selected = 0u64;
+        let mut baseline_unselected = 0u64;
+        for (sequence, observation) in &self.observations {
+            if observation.snapshot_sha256 != engine.snapshot_digest() {
+                return Err("observation does not match the supplied snapshot".into());
+            }
+            let text = source
+                .rows
+                .get(&observation.request_id)
+                .ok_or("source missing observation")?;
+            let mut review_nodes = BTreeMap::new();
+            for choice in &observation.choices {
+                if !engine.has_choice(&choice.node, &choice.option)
+                    || review_nodes
+                        .insert(choice.node.as_str(), Some(choice.option.as_str()))
+                        .is_some()
+                {
+                    return Err("observation contains invalid or duplicate node choices".into());
+                }
+            }
+            if engine.choice_options(&observation.at_node).is_some() {
+                review_nodes.entry(&observation.at_node).or_insert(None);
+            }
+            for (node, baseline) in review_nodes {
+                if corrected.contains(&(*sequence, node)) {
+                    already_corrected += 1;
+                    continue;
+                }
+                let options = engine
+                    .choice_options(node)
+                    .ok_or("observation node is not a choice")?;
+                let row = json!({"schemaVersion":"lfg.node-review-queue-item.v1", "status":"pending_review",
+                    "requestId":observation.request_id, "text":text, "inputSha256":observation.input_sha256,
+                    "sourceFileSha256":source.sha256, "snapshotSha256":observation.snapshot_sha256,
+                    "snapshotRevision":observation.snapshot_revision, "journalTailSha256":self.tail,
+                    "observationSequence":sequence, "node":node, "options":options,
+                    "baselineState":observation.state, "baselineChoice":baseline,
+                    "reviewedChoice":null, "reviewer":null, "project":null, "family":null, "split":null});
+                let line = serde_json::to_vec(&row).map_err(|error| error.to_string())?;
+                let next = (bytes.len() as u64)
+                    .checked_add(line.len() as u64)
+                    .and_then(|n| n.checked_add(1))
+                    .ok_or("output size overflow")?;
+                if next > max_output_bytes {
+                    return Err("review queue exceeds configured size limit".into());
+                }
+                bytes.extend_from_slice(&line);
+                bytes.push(b'\n');
+                *nodes.entry(node.to_owned()).or_default() += 1;
+                if baseline.is_some() {
+                    baseline_selected += 1;
+                } else {
+                    baseline_unselected += 1;
+                }
+            }
+        }
+        if bytes.is_empty() {
+            return Err("no uncorrected choice observations available for review".into());
+        }
+        source.verify_unchanged()?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .map_err(|error| format!("cannot create review queue: {error}"))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("review queue write failed: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("review queue sync failed: {error}"))?;
+        Ok(
+            json!({"schemaVersion":"lfg.node-review-queue-report.v1", "status":"pending_review",
+            "items":baseline_selected + baseline_unselected, "baselineSelected":baseline_selected,
+            "baselineUnselected":baseline_unselected,"alreadyCorrected":already_corrected,
+            "nodes":nodes,"sourceFileSha256":source.sha256,"journalTailSha256":self.tail,
+            "sha256":format!("{:x}", sha2::Sha256::digest(&bytes))}),
+        )
+    }
+
     pub fn export_candidates(
         &self,
         engine: &lfg_core::kernel::Engine,

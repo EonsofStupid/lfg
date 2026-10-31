@@ -64,6 +64,37 @@ to detect ordinary changes during the operation; this is not a lock against
 hostile concurrent modification. Inspect the original source and context before
 attesting to a correction.
 
+To prepare uncorrected choice observations for a person to inspect, create a
+new private queue from the exact matching source and snapshot:
+
+```powershell
+target/release/lfg-server.exe kernel-journal-review-queue `
+  --journal PRIVATE_JOURNAL.jsonl --journal-max-bytes 10485760 `
+  --source-jsonl PRIVATE_REQUESTS.jsonl --source-max-bytes 10485760 `
+  --output NEW_PRIVATE_REVIEW_QUEUE.jsonl --output-max-bytes 10485760 --include-text
+```
+
+This command writes the requests in plaintext, so the explicit `--include-text`
+flag is required. It reports aggregate counts without printing requests. It
+requires the source to cover the entire journal and each observation to match
+the selected snapshot, rejects ambiguous existing corrections, and does not
+overwrite an existing output. The output has one pending item per reached or
+escalated choice node that has no correction. It lists the node's snapshot
+options and the baseline choice if one was made; a null baseline choice means
+the node did not select an option. The reviewed choice, reviewer, project,
+family and split are all unset. A snapshot option is not evidence that it is
+an appropriate label for a request: review its meaning and the original context,
+and skip an item if the option set is inadequate or the decision is uncertain.
+
+The queue is a point-in-time display aid, not a ledger. Editing it does not
+record a correction. After examining an item and its source, an actual reviewer
+can use its observation sequence and node with `kernel-correct` above; the
+journal then enforces the snapshot and choice checks. Recreate the queue at a
+new path to omit already corrected nodes. A queued item or correction is not
+automatically approved for training. The output is bounded, but a failed write
+may leave a partial file; inspect it and use a new path. Source and journal
+digests are consistency checks, not proof of authorship, review or rights.
+
 When a correction has been recorded and matching text is available from either
 the journal or the explicitly selected source, export pending per-node
 candidates to a **new** private file:
@@ -112,6 +143,15 @@ check verified the chain, and export with no corrections was rejected without
 creating a file. This is real
 observation provenance, not a reviewed training dataset. The journal remains
 under `dataset/private` and was not sent to the Spark or committed.
+The new queue command was run locally on those same 11 records. It created
+`dataset/private/kernel-node-review-queue-real.v1.jsonl` with 11 pending
+`operation` items: two baseline selections and nine without a baseline choice.
+All reviewer, reviewed-choice and split fields are unset; the journal is
+unchanged. This private file contains the original text and has not been
+sanitized. The bundled two-option example snapshot is not a validated labeling
+guide. These records still need source/context review, useful per-node label
+definitions, decisions, project/family and split assignment, and a per-node
+training and evaluation gate before they can support model development.
 The journal unit tests and CLI/locking tests also passed in a separate offline
 ARM64 Spark build using test fixtures only. This does not establish production
 durability or authenticate reviewers.
