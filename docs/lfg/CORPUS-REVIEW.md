@@ -121,6 +121,36 @@ The current real-request review workspace is
 earlier experiment and it has no test source; review alone cannot turn this
 plan into an independent final evaluation.
 
+### Local browser review
+
+The same workspace can be reviewed in a browser using the Python training
+tools. This is a local corpus-review interface, not the server's developer UI
+or an LLM configuration editor:
+
+```powershell
+python ml/lfg-encoder/review_web.py --workspace ml/lfg-encoder/dataset/private/real-request-review-workspace.v1 --reviewer REVIEWER_ID
+```
+
+Open the complete URL printed in the terminal. The server chooses a loopback
+port by default; `--port` selects one explicitly. Its configurable request,
+display and timeout limits come from `review-web-config.v1.json`, or an
+operator-selected `--config` file. It runs until Ctrl+C and holds the same
+workspace lock as the terminal tool. A session token in the URL authorizes
+access to the local workspace for that server session; do not share it. The
+page removes the token from the address bar after loading and uses no external
+resources. The server rejects non-loopback host headers, requests without the
+token, and cross-origin decisions. Responses are marked `no-store`.
+
+The browser displays one pending request, source and proposed labels at a time.
+Approving requires the attestation checkbox and typing `APPROVE`; rejection
+requires typing `REJECT`. The underlying workspace checks the displayed digest,
+taxonomy, project and split before saving. Skipped items remain pending.
+Decisions, export and subsequent training use the same rules as the terminal
+workflow above. The interface does not verify source authorship, user identity,
+data rights or secrets, and it does not create approvals on its own. Local
+processes or browser extensions with access to the session URL or workspace
+may access private data; this is not a hosted authentication boundary.
+
 `smoke_reviewed_gate.py` tests the gate through an actual short model-training
 call using invented fixture records and simulated approvals. It creates a new
 output directory, requires an explicitly chosen cached model and immutable
