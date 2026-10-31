@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "lfg.provider-inventory.v1",
+  "revision": "fixture-baseline-1",
+  "providers": [
+    {"targetId":"openai-codex-seat","displayName":"Codex subscription","provider":"openai","adapterId":"openai.codex-cli","model":"provider-default","provenance":"configured","availability":"configured","capabilities":["text.generate","filesystem.write","test.execute","web.access"]},
+    {"targetId":"fixture-anthropic","displayName":"Claude fixture","provider":"anthropic","adapterId":"anthropic.messages.fixture","model":"sonnet-fixture","provenance":"fixture","availability":"replay-only","capabilities":["text.generate","web.access","evaluation.grade"]},
+    {"targetId":"fixture-google","displayName":"Gemini fixture","provider":"google","adapterId":"google.gemini.fixture","model":"gemini-fixture","provenance":"fixture","availability":"replay-only","capabilities":["text.generate","image.generate"]},
+    {"targetId":"fixture-xai","displayName":"Grok fixture","provider":"xai","adapterId":"xai.responses.fixture","model":"grok-fixture","provenance":"fixture","availability":"replay-only","capabilities":["text.generate","web.access"]},
+    {"targetId":"fixture-cursor","displayName":"Cursor fixture","provider":"cursor","adapterId":"cursor.agent.fixture","model":"cursor-fixture","provenance":"fixture","availability":"replay-only","capabilities":["filesystem.write","test.execute"]}
+  ]
+}

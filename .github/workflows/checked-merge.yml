@@ -1,0 +1,89 @@
+name: Verify and merge completed work
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test and build UI
+        working-directory: ui/master-clyffy-web
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test Rust and embedded UI
+        run: cargo test --locked --workspace --features lfg-server/embedded-ui
+      - name: Record the deterministic kernel golden
+        shell: bash
+        run: |
+          cargo run --locked -q -p lfg-server -- classify "logout doesn't clear the session" > target/kernel-logout.actual.json
+          cmp crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
+      - name: Keep the kernel golden output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-logout-golden
+          path: target/kernel-logout.actual.json
+          if-no-files-found: warn
+      - name: Check optional native inference
+        run: cargo check --locked --workspace --all-targets --features lfg-server/embedded-ui,lfg-server/onnx-shadow
+      - name: Test dataset and evaluation tools
+        run: python -m unittest discover -s ml/lfg-encoder -p 'test_*.py'
+
+  merge:
+    needs: verify
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'codex/') &&
+      contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge only the tested head against the tested base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TESTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          TESTED_BASE: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          live_head=$(jq -r '.head.sha' <<< "$pr")
+          live_base=$(gh api "repos/$REPOSITORY/branches/main" --jq '.commit.sha')
+          jq -e --arg repo "$REPOSITORY" '
+            .state == "open" and .draft == false and .base.ref == "main" and
+            .head.repo.full_name == $repo and (.head.ref | startswith("codex/")) and
+            any(.labels[]; .name == "ready-to-auto-merge")
+          ' <<< "$pr" >/dev/null
+          if [[ "$live_head" != "$TESTED_HEAD" || "$live_base" != "$TESTED_BASE" ]]; then
+            echo 'Head or base changed after this run started; a new verification run is required.' >&2
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --merge --match-head-commit "$TESTED_HEAD"

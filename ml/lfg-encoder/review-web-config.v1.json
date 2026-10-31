@@ -1,0 +1,14 @@
+{
+  "schema_version": "lfg.review-web-config.v1",
+  "max_request_bytes": 65536,
+  "max_prompt_bytes": 262144,
+  "request_timeout_seconds": 10,
+  "source_verification": {
+    "max_session_bytes": 536870912,
+    "max_line_bytes": 16777216
+  },
+  "source_context": {
+    "max_messages": 3,
+    "max_context_bytes": 16384
+  }
+}

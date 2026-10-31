@@ -1,4 +1,4 @@
-import type { ClassificationSnapshot, GraphSnapshot, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
+import type { AppContext, ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -12,7 +12,26 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export const getStatus = () => requestJSON<RuntimeStatus>('/api/shippin/intelligence/lfg/status')
+export const getStatus = async () => {
+  const status = await requestJSON<RuntimeStatus>('/api/shippin/intelligence/lfg/status')
+  const operations = status.operations
+  if (!operations || operations.schemaVersion !== 'lfg.operations.v1' ||
+      !Number.isSafeInteger(operations.maxPromptBytes) || operations.maxPromptBytes <= 0 ||
+      !Number.isSafeInteger(operations.uiDebounceMs) || operations.uiDebounceMs <= 0 ||
+      !Number.isSafeInteger(operations.uiTimingHistorySamples) || operations.uiTimingHistorySamples <= 0) {
+    throw new Error('Server operational configuration is missing or incompatible')
+  }
+  const dev = operations.devTools
+  if (dev && (!Number.isSafeInteger(dev.statsPollIntervalMs) || dev.statsPollIntervalMs <= 0 ||
+      !Number.isSafeInteger(dev.debounceMinMs) || !Number.isSafeInteger(dev.debounceMaxMs) ||
+      operations.uiDebounceMs < dev.debounceMinMs || operations.uiDebounceMs > dev.debounceMaxMs ||
+      !Number.isSafeInteger(dev.historyMinSamples) || !Number.isSafeInteger(dev.historyMaxSamples) ||
+      dev.historyMinSamples <= 0 || operations.uiTimingHistorySamples < dev.historyMinSamples ||
+      operations.uiTimingHistorySamples > dev.historyMaxSamples)) {
+    throw new Error('Server development configuration is incompatible')
+  }
+  return status
+}
 
 export const preflight = (sessionId: string, revision: number, text: string) =>
   requestJSON<PreflightSnapshot>('/api/shippin/intelligence/lfg/preflight', {
@@ -27,7 +46,16 @@ export const commitPlan = (sessionId: string, revision: number, text: string) =>
 export const getGraph = (workflowId: string, throughSequence?: number) =>
   requestJSON<GraphSnapshot>(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(workflowId)}/graph${throughSequence === undefined ? '' : `?throughSequence=${throughSequence}`}`)
 
-export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string) =>
+export const getDevStats = () => requestJSON<DevStats>('/api/lfg/dev-stats')
+
+export const getAppContext = () => requestJSON<AppContext>('/api/lfg/intake/app-context')
+
+export const previewIntake = (facts: Record<string, unknown>) =>
+  requestJSON<IntakePreview>('/api/lfg/intake/preview', {
+    method: 'POST', body: JSON.stringify({ schemaVersion: 'lfg.app-snapshot.v1', sourceApp: 'lfg-ui', facts })
+  })
+
+export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string | null) =>
   requestJSON<ClassificationSnapshot>('/api/lfg/classify', {
-    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, routingNeed })
+    method: 'POST', body: JSON.stringify({ sessionId, revision, text, activeSubscriptions, ...(routingNeed ? { routingNeed } : {}) })
   })

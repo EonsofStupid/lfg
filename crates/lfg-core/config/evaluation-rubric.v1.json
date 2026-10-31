@@ -1,0 +1,6 @@
+{
+  "id": "lfg-semantic-quality",
+  "version": "1.0.0",
+  "criteria": {"correctness": 0.40, "evidence": 0.25, "completeness": 0.20, "safety": 0.15},
+  "passThreshold": 0.80
+}

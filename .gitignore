@@ -14,8 +14,9 @@ dist/
 .env
 .env.*
 
-# Python ML lane
+# Python
+.venv/
 __pycache__/
 *.pyc
 ml/lfg-encoder/artifacts/
-unsloth_compiled_cache/
+ml/lfg-encoder/dataset/private/

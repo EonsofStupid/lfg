@@ -4,7 +4,7 @@ use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
@@ -12,18 +12,27 @@ use axum::{
 use lfg_codex::{CodexRunner, CodexStatus, ExecutionResult};
 use lfg_core::{
     CategoryClassifier, ClassificationSnapshot, ClassifierConfig, ClassifyRequest,
-    CpuCategoryClassifier, ExperimentStatistics, GraphSnapshot, PreflightRequest,
-    PreflightSnapshot, PromotionDecision, PromotionDecisionRequest, SemanticGrade,
-    SemanticGradeRequest, SignalEnvelope,
+    CpuCategoryClassifier, CpuRuleEncoder, EvaluationRubric, ExperimentStatistics, GraphSnapshot,
+    PreflightRequest, PreflightRuleConfig, PreflightSnapshot, PromotionDecision,
+    PromotionDecisionRequest, PromotionPolicy, SemanticGrade, SemanticGradeRequest, SignalEnvelope,
 };
 use lfg_runtime::{
-    CommitPlanRequest, ExecutionMetrics, LfgRuntime, PlanCommit, RuntimeError, RuntimeSignalStore,
-    RuntimeStatus,
+    CommitPlanRequest, ExecutionMetrics, LfgRuntime, OperationsConfig, PlanCommit,
+    ProviderInventoryConfig, RuntimeError, RuntimeSignalStore, RuntimeStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+
+mod boundary_questions;
+mod dev_stats;
+mod devpulse_context;
+#[cfg(feature = "embedded-ui")]
+mod embedded_ui;
+mod intake;
+mod project_attunement;
+use dev_stats::{DevStats, Operation};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,58 +40,188 @@ pub struct AppState {
     lfg_events: broadcast::Sender<SignalEnvelope>,
     codex: CodexRunner,
     classifier_config: Arc<ClassifierConfig>,
+    operations: OperationsConfig,
+    dev_stats: Arc<DevStats>,
+    intake: Arc<intake::Template>,
+    boundary_questions: Arc<boundary_questions::Catalog>,
+    devpulse_context: Option<Arc<devpulse_context::Source>>,
 }
 
 impl AppState {
+    pub fn operations(&self) -> &OperationsConfig {
+        &self.operations
+    }
+
     pub fn new() -> Self {
-        let (lfg_events, _) = broadcast::channel(512);
+        let operations = OperationsConfig::default();
+        let dev_stats = make_dev_stats(&operations);
+        let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Self {
             lfg: Arc::new(Mutex::new(LfgRuntime::new(RuntimeSignalStore::memory()))),
             lfg_events,
             codex: CodexRunner::from_environment(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
-            classifier_config: Arc::new(load_classifier_config()),
+            classifier_config: Arc::new(ClassifierConfig::default_alpha()),
+            operations,
+            dev_stats,
+            intake: Arc::new(intake::Template::bundled()),
+            boundary_questions: Arc::new(boundary_questions::Catalog::bundled()),
+            devpulse_context: None,
         }
     }
 
     pub fn persistent(signal_path: impl AsRef<std::path::Path>) -> Result<Self, RuntimeError> {
-        let (lfg_events, _) = broadcast::channel(512);
+        let encoder = configured_preflight_encoder().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("preflight configuration: {error}"))
+        })?;
+        let classifier_config = load_classifier_config().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("classifier configuration: {error}"))
+        })?;
+        let inventory = load_provider_inventory().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("provider configuration: {error}"))
+        })?;
+        let rubric = load_evaluation_rubric()
+            .map_err(|error| RuntimeError::InvalidRequest(format!("evaluation rubric: {error}")))?;
+        let policy = load_promotion_policy()
+            .map_err(|error| RuntimeError::InvalidRequest(format!("promotion policy: {error}")))?;
+        let operations = configured_operations().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("operational configuration: {error}"))
+        })?;
+        let intake = configured_intake().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("intake configuration: {error}"))
+        })?;
+        let boundary_questions = configured_boundary_questions().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("boundary question configuration: {error}"))
+        })?;
+        let devpulse_context = std::env::var_os("LFG_DEVPULSE_CONTEXT_CONFIG")
+            .map(|path| devpulse_context::Source::from_path(std::path::Path::new(&path)))
+            .transpose()
+            .map_err(|error| {
+                RuntimeError::InvalidRequest(format!("DevPulse context configuration: {error}"))
+            })?
+            .map(Arc::new);
+        let dev_stats = make_dev_stats(&operations);
+        let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Ok(Self {
-            lfg: Arc::new(Mutex::new(LfgRuntime::new(RuntimeSignalStore::jsonl(
-                signal_path,
-            )?))),
+            lfg: Arc::new(Mutex::new(LfgRuntime::with_configuration(
+                RuntimeSignalStore::jsonl(signal_path)?,
+                encoder,
+                inventory,
+                rubric,
+                policy,
+                operations.clone(),
+            ))),
             lfg_events,
             codex: CodexRunner::from_environment(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
-            classifier_config: Arc::new(load_classifier_config()),
+            classifier_config: Arc::new(classifier_config),
+            operations,
+            dev_stats,
+            intake: Arc::new(intake),
+            boundary_questions: Arc::new(boundary_questions),
+            devpulse_context,
         })
     }
 }
 
-fn load_classifier_config() -> ClassifierConfig {
+fn configured_intake() -> Result<intake::Template, String> {
+    let Some(path) = std::env::var_os("LFG_INTAKE_TEMPLATE") else {
+        return Ok(intake::Template::bundled());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    intake::Template::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn configured_boundary_questions() -> Result<boundary_questions::Catalog, String> {
+    let Some(path) = std::env::var_os("LFG_BOUNDARY_QUESTION_BANK") else {
+        return Ok(boundary_questions::Catalog::bundled());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    boundary_questions::Catalog::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+/// Prepare the authored boundary questions from explicitly configured local project evidence.
+pub fn attune_local_project(root: &std::path::Path, config: &str) -> Result<Value, String> {
+    project_attunement::run(
+        root,
+        config,
+        &configured_boundary_questions()?,
+        &configured_intake()?,
+    )
+}
+
+fn make_dev_stats(operations: &OperationsConfig) -> Arc<DevStats> {
+    let config = operations.dev_tools();
+    Arc::new(DevStats::new(
+        config.is_some_and(|value| value.stats_enabled),
+        config.map_or(0, |value| value.trace_capacity as usize),
+    ))
+}
+
+pub fn configured_operations() -> Result<OperationsConfig, String> {
+    let Some(path) = std::env::var_os("LFG_OPERATIONS_CONFIG") else {
+        return Ok(OperationsConfig::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    OperationsConfig::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_evaluation_rubric() -> Result<EvaluationRubric, String> {
+    let Some(path) = std::env::var_os("LFG_EVALUATION_RUBRIC") else {
+        return Ok(EvaluationRubric::default_alpha());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    EvaluationRubric::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_promotion_policy() -> Result<PromotionPolicy, String> {
+    let Some(path) = std::env::var_os("LFG_PROMOTION_POLICY") else {
+        return Ok(PromotionPolicy::default_alpha());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    PromotionPolicy::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_provider_inventory() -> Result<ProviderInventoryConfig, String> {
+    let Some(path) = std::env::var_os("LFG_PROVIDER_CONFIG") else {
+        return Ok(ProviderInventoryConfig::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    ProviderInventoryConfig::from_json_str(&text)
+        .map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_classifier_config() -> Result<ClassifierConfig, String> {
     let path = match std::env::var_os("LFG_CLASSIFIER_CONFIG") {
         Some(path) => path,
-        None => return ClassifierConfig::default_alpha(),
+        None => return Ok(ClassifierConfig::default_alpha()),
     };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match ClassifierConfig::from_json_str(&text) {
-            Ok(config) => config,
-            Err(error) => {
-                eprintln!(
-                    "LFG_CLASSIFIER_CONFIG at {path:?} failed to parse ({error}); using the default taxonomy"
-                );
-                ClassifierConfig::default_alpha()
-            }
-        },
-        Err(error) => {
-            eprintln!(
-                "LFG_CLASSIFIER_CONFIG at {path:?} could not be read ({error}); using the default taxonomy"
-            );
-            ClassifierConfig::default_alpha()
-        }
-    }
+    read_classifier_config(std::path::Path::new(&path))
+}
+
+fn read_classifier_config(path: &std::path::Path) -> Result<ClassifierConfig, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    ClassifierConfig::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+pub fn configured_preflight_encoder() -> Result<CpuRuleEncoder, String> {
+    let Some(path) = std::env::var_os("LFG_PREFLIGHT_CONFIG") else {
+        return Ok(CpuRuleEncoder::default());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    let config = PreflightRuleConfig::from_json_str(&text)
+        .map_err(|error| format!("invalid {path:?}: {error}"))?;
+    CpuRuleEncoder::new(config)
 }
 
 impl Default for AppState {
@@ -98,6 +237,7 @@ struct HealthResponse {
 }
 
 pub fn router(state: AppState) -> Router {
+    let max_http_body_bytes = state.operations.max_http_body_bytes();
     Router::new()
         .route("/health", get(health))
         .route("/api/shippin/intelligence/lfg/status", get(lfg_status))
@@ -141,23 +281,138 @@ pub fn router(state: AppState) -> Router {
             get(lfg_promotions).post(lfg_decide_promotion),
         )
         .route("/api/lfg/classify", post(lfg_classify))
+        .route("/api/lfg/dev-stats", get(lfg_dev_stats))
+        .route("/api/lfg/intake/template", get(lfg_intake_template))
+        .route("/api/lfg/intake/preview", post(lfg_intake_preview))
+        .route("/api/lfg/intake/app-context", get(lfg_app_context))
+        .route("/api/lfg/boundaries/questions", get(lfg_boundary_questions))
+        .route("/api/lfg/boundaries/attune", post(lfg_boundary_attune))
+        .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
+}
+
+async fn lfg_boundary_questions(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<Value>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(
+            serde_json::json!({"catalog": &*state.boundary_questions, "digest": state.boundary_questions.digest()}),
+        ),
+    )
+}
+
+async fn lfg_boundary_attune(
+    State(state): State<AppState>,
+    Json(request): Json<boundary_questions::Attunement>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<boundary_questions::Preview>,
+    ),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let preview = state
+        .boundary_questions
+        .attune(request, &state.intake)
+        .map_err(|error| error_response(StatusCode::BAD_REQUEST, "invalid_attunement", &error))?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(preview),
+    ))
+}
+
+async fn lfg_app_context(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<devpulse_context::Context>,
+) {
+    let context = match &state.devpulse_context {
+        Some(source) => source.context(&state.intake).await,
+        None => devpulse_context::disabled(),
+    };
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(context),
+    )
+}
+
+async fn lfg_intake_template(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<Value>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({"template": &*state.intake, "digest": state.intake.digest()})),
+    )
+}
+
+async fn lfg_intake_preview(
+    State(state): State<AppState>,
+    Json(request): Json<intake::AppSnapshot>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<intake::Preview>,
+    ),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let preview = state
+        .intake
+        .preview(request)
+        .map_err(|error| error_response(StatusCode::BAD_REQUEST, "invalid_intake", &error))?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(preview),
+    ))
 }
 
 async fn lfg_classify(
     State(state): State<AppState>,
     Json(request): Json<ClassifyRequest>,
 ) -> Result<Json<ClassificationSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    if request.session_id.trim().is_empty() || request.text.len() > 12_000 {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "sessionId and up to 12,000 characters of text are required",
-        ));
-    }
-    Ok(Json(
-        CpuCategoryClassifier.classify(&request, &state.classifier_config),
-    ))
+    let start = state.dev_stats.start();
+    let work = state.dev_stats.start();
+    let result = state
+        .operations
+        .validate_prompt(&request.session_id, &request.text)
+        .map(|()| Json(CpuCategoryClassifier.classify(&request, &state.classifier_config)))
+        .map_err(lfg_error);
+    state.dev_stats.record(
+        Operation::Classification,
+        start,
+        None,
+        DevStats::elapsed(work),
+        result.is_ok(),
+    );
+    result
+}
+
+async fn lfg_dev_stats(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<dev_stats::Snapshot>,
+) {
+    let status = state.lfg.lock().await.status();
+    let classifier_digest = lfg_core::digest_value(
+        &serde_json::to_value(&*state.classifier_config).expect("classifier config serializes"),
+    );
+    let snapshot = state.dev_stats.snapshot().with_context(
+        status.operations_digest,
+        status.encoder.sha256,
+        classifier_digest,
+    );
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(snapshot),
+    )
 }
 
 pub fn router_with_ui(state: AppState, ui_directory: impl AsRef<std::path::Path>) -> Router {
@@ -169,6 +424,11 @@ pub fn router_with_ui(state: AppState, ui_directory: impl AsRef<std::path::Path>
                 ui_directory.join("index.html"),
             )),
     )
+}
+
+#[cfg(feature = "embedded-ui")]
+pub fn router_with_embedded_ui(state: AppState) -> Router {
+    router(state).fallback(embedded_ui::serve)
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -228,6 +488,10 @@ async fn lfg_run_codex(
     State(state): State<AppState>,
     Json(request): Json<CodexRunRequest>,
 ) -> Result<(StatusCode, Json<CodexRunResponse>), (StatusCode, Json<ErrorResponse>)> {
+    state
+        .operations
+        .validate_prompt(&request.session_id, &request.text)
+        .map_err(lfg_error)?;
     let runner = state.codex.clone();
     let probe_runner = runner.clone();
     let provider = tokio::task::spawn_blocking(move || probe_runner.probe())
@@ -339,13 +603,22 @@ async fn lfg_preflight(
     State(state): State<AppState>,
     Json(request): Json<PreflightRequest>,
 ) -> Result<Json<PreflightSnapshot>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .lfg
-        .lock()
-        .await
-        .preflight(&request)
-        .map(Json)
-        .map_err(lfg_error)
+    let start = state.dev_stats.start();
+    let queue = state.dev_stats.start();
+    let runtime = state.lfg.lock().await;
+    let queue_micros = DevStats::elapsed(queue);
+    let work = state.dev_stats.start();
+    let result = runtime.preflight(&request).map(Json).map_err(lfg_error);
+    let work_micros = DevStats::elapsed(work);
+    drop(runtime);
+    state.dev_stats.record(
+        Operation::Preflight,
+        start,
+        queue_micros,
+        work_micros,
+        result.is_ok(),
+    );
+    result
 }
 
 async fn lfg_commit_plan(
@@ -394,7 +667,12 @@ async fn lfg_signals(
     if let Some(through) = query.through_sequence {
         signals.retain(|signal| signal.data.sequence <= through);
     }
-    signals.truncate(query.limit.unwrap_or(100).clamp(1, 500));
+    signals.truncate(
+        query
+            .limit
+            .unwrap_or(state.operations.default_signal_page_size())
+            .clamp(1, state.operations.max_signal_page_size()),
+    );
     let next_sequence = signals
         .last()
         .map(|signal| signal.data.sequence)
@@ -427,7 +705,9 @@ async fn lfg_replay(
         .replay(
             workflow_id,
             query.after_sequence.unwrap_or(0),
-            query.limit.unwrap_or(100),
+            query
+                .limit
+                .unwrap_or(state.operations.default_signal_page_size()),
         )
         .map_err(lfg_error)?;
     let next_sequence = signals
@@ -480,7 +760,9 @@ async fn lfg_stream(
         });
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(Duration::from_secs(
+                state.operations.stream_keepalive_seconds(),
+            ))
             .text("keepalive"),
     )
 }
@@ -639,6 +921,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn explicit_classifier_path_reports_errors_instead_of_using_defaults() {
+        let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("missing-classifier-config-for-test.json");
+        assert!(read_classifier_config(&missing).is_err());
+    }
+
     async fn json_response(app: Router, request: Request<Body>) -> (StatusCode, Value) {
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
@@ -646,6 +935,77 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn authored_questions_attune_only_from_supplied_project_artifacts() {
+        let state = AppState::new();
+        let (status, catalog) = json_response(
+            router(state.clone()),
+            Request::builder()
+                .uri("/api/lfg/boundaries/questions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let banks = catalog["catalog"]["banks"].as_array().unwrap();
+        assert_eq!(
+            banks
+                .iter()
+                .map(|bank| bank["questions"].as_array().unwrap().len())
+                .sum::<usize>(),
+            425
+        );
+        let request = |artifacts: Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/lfg/boundaries/attune")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"schemaVersion":"lfg.boundary-attunement.v1",
+                "sourceApp":"test-app", "selections":[{"bankId":"core","sections":["A"]}],
+                "artifacts":artifacts})
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (status, missing) = json_response(router(state.clone()), request(json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = missing["questions"].as_array().unwrap();
+        assert_eq!(rows.len(), 9);
+        let reuse = rows
+            .iter()
+            .find(|row| row["question"]["id"] == "core.a.8")
+            .unwrap();
+        assert_eq!(
+            reuse["question"]["question"],
+            "Does this reinvent something the codebase already provides?"
+        );
+        assert_eq!(reuse["bindingStatus"], "missing");
+        assert!(reuse["artifact"].is_null());
+        assert_eq!(missing["missingBindings"], json!(["module inventory"]));
+        let (status, bound) = json_response(
+            router(state.clone()),
+            request(json!({"module inventory":["module-a"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let reuse = bound["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["question"]["id"] == "core.a.8")
+            .unwrap();
+        assert_eq!(reuse["bindingStatus"], "supplied");
+        assert_eq!(reuse["artifact"], json!(["module-a"]));
+        assert_eq!(bound["missingBindings"], json!([]));
+        let (status, _) = json_response(
+            router(state),
+            request(json!({"module inventory":{"apiKey":"hidden"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -662,8 +1022,51 @@ mod tests {
         let categories = snapshot["categories"].as_array().unwrap();
         assert!(categories.len() >= 7);
         assert_eq!(snapshot["needsBiggerModel"], true);
-        assert!(!snapshot["escalationCatalog"].as_array().unwrap().is_empty());
-        assert_eq!(snapshot["recommendedEscalation"]["model"], "sonnet-5");
+        assert!(snapshot["escalationCatalog"].as_array().unwrap().is_empty());
+        assert!(snapshot["recommendedEscalation"].is_null());
+    }
+
+    #[tokio::test]
+    async fn intake_preview_accepts_app_facts_without_persisting_them() {
+        let state = AppState::new();
+        let request = Request::builder().method("POST").uri("/api/lfg/intake/preview")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"schemaVersion":"lfg.app-snapshot.v1", "sourceApp":"app",
+                "facts":{"project":{"id":"one"},"request":{"text":"Build a real feature"},"providers":[]}}).to_string())).unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let preview: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(preview["sourceApp"], "app");
+        assert_eq!(preview["missingRequired"], 2);
+        assert!(state.lfg.lock().await.signals(None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_context_is_disabled_by_default_and_not_cacheable() {
+        let response = router(AppState::new())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/lfg/intake/app-context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let context: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(context["status"], "disabled");
+        assert!(context["providers"].is_null());
     }
 
     #[tokio::test]
@@ -679,8 +1082,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(snapshot["recommendedEscalation"].is_null());
         let catalog = snapshot["escalationCatalog"].as_array().unwrap();
-        assert!(!catalog.is_empty());
-        assert!(catalog.iter().all(|candidate| candidate["active"] == false));
+        assert!(catalog.is_empty());
     }
 
     #[tokio::test]

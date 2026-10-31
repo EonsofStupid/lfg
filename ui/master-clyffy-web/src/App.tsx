@@ -5,33 +5,23 @@ import { classify, commitPlan, getGraph, getStatus, preflight } from './api'
 import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { PromptBranchView } from './PromptBranchView'
+import { DevPanel } from './DevPanel'
+import { IntakePanel } from './IntakePanel'
 import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
 
-const DEFAULT_PROMPT = 'Research cutting-edge agent routing, implement the visual system, test it, and independently grade the result.'
 const SESSION_ID = `browser-${crypto.randomUUID()}`
 const GraphCanvas = lazy(() => import('./GraphCanvas'))
 
 type Mode = 'guided' | 'inspector'
 
-// Automaton's own canonical provider ids (docs/14-frontier-roster.md) — LFG
-// doesn't invent parallel naming. Real seat activation (OAuth/subscription
-// detection) lives in Automaton; until that's wired up, these are a manual
-// stand-in the operator toggles themselves.
-const SUBSCRIPTIONS: { id: string; label: string }[] = [
-  { id: 'claude', label: 'Claude' },
-  { id: 'codex', label: 'OpenAI' },
-  { id: 'grok', label: 'Grok' },
-  { id: 'cursor', label: 'Cursor' }
-]
-
 export default function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [prompt, setPrompt] = useState('')
   const [revision, setRevision] = useState(1)
   const [preview, setPreview] = useState<PreflightSnapshot | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
-  const [routingNeed, setRoutingNeed] = useState<RoutingNeed>('balanced')
+  const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
   const [overrideTarget, setOverrideTarget] = useState<EscalationTarget | null>(null)
   const [commit, setCommit] = useState<PlanCommit | null>(null)
   const [graph, setGraph] = useState<GraphSnapshot | null>(null)
@@ -41,35 +31,41 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState(0)
+  const [debounceOverride, setDebounceOverride] = useState<number | null>(null)
+  const [historyOverride, setHistoryOverride] = useState<number | null>(null)
   const requestRevision = useRef(0)
   const classifyRevision = useRef(0)
   const publicEmbed = new URLSearchParams(window.location.search).get('embed') === 'public'
+  const promptBytes = useMemo(() => new TextEncoder().encode(prompt).length, [prompt])
+  const promptTooLarge = status !== null && promptBytes > status.operations.maxPromptBytes
+  const debounceMs = debounceOverride ?? status?.operations.uiDebounceMs
+  const historyLimit = historyOverride ?? status?.operations.uiTimingHistorySamples
 
   useEffect(() => { void getStatus().then(setStatus).catch((value: Error) => setError(value.message)) }, [])
 
   useEffect(() => {
-    const text = prompt.trim()
-    if (!text) { setPreview(null); return }
     const current = ++requestRevision.current
+    const text = prompt
+    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setPreview(null); return }
     const timer = window.setTimeout(() => {
       void preflight(SESSION_ID, revision, text).then((value) => {
         if (requestRevision.current === current) setPreview(value)
       }).catch((value: Error) => setError(value.message))
-    }, 140)
+    }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision])
+  }, [prompt, revision, status, promptTooLarge, debounceMs])
 
   useEffect(() => {
-    const text = prompt.trim()
-    if (!text) { setClassification(null); return }
     const current = ++classifyRevision.current
+    const text = prompt
+    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setClassification(null); return }
     const timer = window.setTimeout(() => {
       void classify(SESSION_ID, revision, text, activeSubscriptions, routingNeed).then((value) => {
         if (classifyRevision.current === current) setClassification(value)
       }).catch((value: Error) => setError(value.message))
-    }, 140)
+    }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, activeSubscriptions, routingNeed])
+  }, [prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge, debounceMs])
 
   const toggleSubscription = useCallback((id: string) => {
     setActiveSubscriptions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
@@ -88,15 +84,15 @@ export default function App() {
   }, [commit])
 
   const handleCommit = useCallback(async () => {
-    if (!prompt.trim() || busy) return
+    if (!status || !prompt.trim() || promptTooLarge || busy) return
     setBusy(true); setError(null); setSelected(null)
     try {
-      const result = await commitPlan(SESSION_ID, revision, prompt.trim())
+      const result = await commitPlan(SESSION_ID, revision, prompt)
       setCommit(result); setGraph(result.graph); setCursor(result.graph.throughSequence)
     } catch (value) {
       setError(value instanceof Error ? value.message : 'Plan compilation failed')
     } finally { setBusy(false) }
-  }, [prompt, revision, busy])
+  }, [prompt, revision, busy, status, promptTooLarge])
 
   const handleReplay = useCallback(async (value: number) => {
     if (!commit) return
@@ -106,6 +102,7 @@ export default function App() {
 
   const displayedTotals = graph?.totals ?? { predicted: preview?.predictedAgents ?? 0, committed: 0, queued: 0, active: 0, blocked: 0, completed: 0, failed: 0 }
   const narrative = useMemo(() => guidedNarrative(preview, graph), [preview, graph])
+  const subscriptions = [...new Set(classification?.escalationCatalog.map((candidate) => candidate.target.subscriptionId) ?? [])]
 
   return (
     <div className={`lfg-shell ${publicEmbed ? 'is-embed' : ''}`}>
@@ -124,27 +121,28 @@ export default function App() {
             <span>TYPE HERE</span><b>↘</b>
           </motion.div>
           <div className="composer-heading"><div><p className="eyebrow">PROMPT SIGNAL INTAKE</p><h1 id="prompt-label">Watch a team compile itself.</h1></div><span className="privacy-pill">MEMORY ONLY · CPU PREFLIGHT</span></div>
-          <textarea value={prompt} maxLength={12000} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" />
+          <textarea value={prompt} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" placeholder="Describe what you want to do" aria-invalid={promptTooLarge} />
           <div className="composer-footer">
-            <button className="commit-button" onClick={handleCommit} disabled={busy || !prompt.trim()}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
-            <span>{prompt.length.toLocaleString()} / 12,000</span>
-            <span>{preview ? `${(preview.durationMicros / 1000).toFixed(3)} ms CPU` : 'waiting for signal'}</span>
+            <button className="commit-button" onClick={handleCommit} disabled={busy || !status || !prompt.trim() || promptTooLarge}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
+            <span>{promptBytes.toLocaleString()} / {status?.operations.maxPromptBytes.toLocaleString() ?? '…'} UTF-8 bytes</span>
+            <span>{preview ? `${(preview.durationMicros / 1000).toFixed(3)} ms elapsed` : 'waiting for signal'}</span>
             <span>{preview?.mode ?? status?.encoder.id ?? 'encoder unavailable'}</span>
             <span>{status ? `${status.liveProviders} live · ${status.configuredProviders} ready to probe · ${status.fixtureProviders} fixtures` : 'provider inventory loading'}</span>
           </div>
+          {promptTooLarge && <p className="error-message" role="alert">Prompt exceeds the configured UTF-8 byte limit.</p>}
           <div className="subscription-row" role="group" aria-label="Active subscriptions">
-            <span className="subscription-row-label">Active subscriptions</span>
-            {SUBSCRIPTIONS.map((subscription) => (
+            <span className="subscription-row-label">Available subscriptions</span>
+            {subscriptions.map((id) => (
               <button
-                key={subscription.id}
-                className={activeSubscriptions.includes(subscription.id) ? 'is-active' : ''}
-                onClick={() => toggleSubscription(subscription.id)}
-                title={activeSubscriptions.includes(subscription.id) ? `${subscription.label} is active — its models are selectable` : `${subscription.label} is not active — activate to select its models`}
+                key={id}
+                className={activeSubscriptions.includes(id) ? 'is-active' : ''}
+                onClick={() => toggleSubscription(id)}
+                title={`Manually mark ${id} as available for this session`}
               >
-                {subscription.label}
+                {id}
               </button>
             ))}
-            <span className="subscription-row-note">stand-in for Automaton seat detection — not yet wired to real OAuth</span>
+            <span className="subscription-row-note">{subscriptions.length ? 'Manual selection; subscription availability is not verified' : 'No model subscriptions configured'}</span>
           </div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
@@ -153,7 +151,7 @@ export default function App() {
           <Metric label="Predicted" value={preview?.predictedAgents ?? 0} detail="advisory while typing" />
           <Metric label="Committed" value={displayedTotals.committed} detail="from canonical events" />
           <Metric label="Branches" value={preview?.predictedBranches ?? 0} detail="natural task fan-out" />
-          <Metric label="CPU" value={preview ? `${(preview.durationMicros / 1000).toFixed(2)}ms` : '—'} detail="measured, not estimated" />
+          <Metric label="Elapsed" value={preview ? `${(preview.durationMicros / 1000).toFixed(2)}ms` : '—'} detail="wall time, not CPU time" />
         </section>
 
         <section className="graph-stage" aria-label={graph ? 'LFG committed routing graph' : 'LFG live category branches'}>
@@ -166,6 +164,7 @@ export default function App() {
           ) : (
             <PromptBranchView
               snapshot={classification}
+              historyLimit={historyLimit}
               routingNeed={routingNeed}
               onRoutingNeedChange={setRoutingNeed}
               overrideTarget={overrideTarget}
@@ -173,6 +172,15 @@ export default function App() {
             />
           )}
         </section>
+
+        {!publicEmbed && mode === 'inspector' && status && debounceMs && <IntakePanel
+          prompt={prompt} promptTooLarge={promptTooLarge} revision={revision} classification={classification} activeSubscriptions={activeSubscriptions} debounceMs={debounceMs}
+        />}
+        {!publicEmbed && mode === 'inspector' && status && debounceMs && historyLimit && <DevPanel
+          status={status} debounceMs={debounceMs} historyLimit={historyLimit}
+          onDebounce={setDebounceOverride} onHistory={setHistoryOverride}
+          onReset={() => { setDebounceOverride(null); setHistoryOverride(null) }}
+        />}
 
         {commit && <section className="replay-bar">
           <div><span>SIGNAL REPLAY</span><strong>{cursor + 1} / {commit.committedSignals}</strong></div>
