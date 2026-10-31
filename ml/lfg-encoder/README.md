@@ -1,13 +1,23 @@
-# LFG encoder experiment
+# LFG prompt-recipe encoder
 
 This is the offline, non-authoritative training lane for the Rust
-MasterClyffy CPU encoder. Runtime prompts are not collected here. The checked-in
-corpus is intentionally authored synthetic data.
+MasterClyffy CPU preflight encoder. It learns multi-label intent, capability,
+and risk classification. It is not the Jina/GTE retrieval lesson and it does
+not write the final CoSTAR packet. Runtime prompts are not collected here. The
+checked-in corpus is intentionally authored synthetic data.
+
+Training is GPU-only. CPU is reserved for the exported ONNX/Rust proof; the
+trainer refuses to fall back to CPU. Unsloth is the default engine, using its
+current `FastModel` sequence-classification path with full fine-tuning. The
+plain Transformers engine is available only as an explicit compatibility
+diagnostic.
 
 These experiments support the assessment and routing objective in the root
-[README](../../README.md). The classifier is exploratory and is not the authoritative runtime encoder.
-Any learned candidate needs task-specific evaluation before integration or
-promotion.
+[README](../../README.md). The classifier and CPU LLM paths are exploratory;
+neither is currently the authoritative runtime encoder. The coding-oriented
+teacher and student work below also explores general model capabilities, and
+its contribution to LFG's assessment role needs to be demonstrated through
+task-specific evaluation before integration or promotion.
 
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for
