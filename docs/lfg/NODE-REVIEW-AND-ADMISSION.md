@@ -207,3 +207,35 @@ These are real requests, but the two-option example snapshot is not a validated
 labeling guide and the records are not reviewed training data. They were not
 sent to the Spark. The review and admission mechanics were tested on Windows
 and the Spark using explicitly test-only fixtures.
+
+On 2026-10-31, a separate private queue was prepared from the two existing
+training-only review workspaces. Of 520 pending source records, 83 previously
+triage-flagged records and four over the example snapshot's input limit were
+deferred; 11 exact-text matches were already present in the original queue.
+These are preparation decisions, not final dataset exclusions. The remaining
+422 requests cover 12 declared projects and 17 session families. Their recorded
+source prefixes and message text matched 17 local session files during a
+read-only check. A repeated grouped check reported 34 records unverified with
+`ValueError` but did not retain the reason; a subsequent full check matched all
+422. Both aggregate reports are retained in the private directory. These checks
+do not lock the sessions or establish authorship, privacy, rights, context,
+independence or suitable labels.
+
+The example LFG kernel produced 435 pending node observations for those 422
+requests: 422 at `operation`, 11 at `work-kind` and two at `domain`. Its
+`operation` choice selected `tool_call` for 20 user-message requests; those are
+unreviewed kernel outputs, not verified labels. The notes' signal-normalization
+draft uses `tool_call` for a model's structured action signal, whereas the example
+snapshot can select that option from prompt text. The intended meaning of this
+choice must be resolved before a reviewer can consistently label it.
+
+The private files are under
+`dataset/private/kernel-real-train-pending-20261031-v1/`: `source.jsonl`,
+`observations.jsonl`, `queue.jsonl`, `ledger.json`, and a contextual draft
+guide. The ledger has 435 pending items and zero approvals. The guide records
+the open questions and remains `draft`, so the browser disables approval.
+Source and queue contain plaintext, paths and hashes and require access controls.
+These 422 requests were not sent to the Spark, and this training-source queue is
+not an independent validation or test set. Avoid combining overlapping queue
+versions; run the admission audit on every selected queue once real reviews
+and suitable choice definitions exist.
