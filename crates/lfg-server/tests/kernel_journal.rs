@@ -173,3 +173,99 @@ fn captured_correction_exports_only_as_an_unassigned_pending_candidate() {
     assert!(candidate["project"].is_null() && candidate["split"].is_null());
     assert!(!export().status.success());
 }
+
+#[test]
+fn digest_only_observation_can_use_a_verified_source_for_pending_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("journal.jsonl");
+    let source = dir.path().join("source.jsonl");
+    let output = dir.path().join("candidate.jsonl");
+    assert!(predict(&journal, false).status.success());
+    std::fs::write(
+        &source,
+        b"{\"id\":\"one\",\"text\":\"unmatched private fixture\",\"verified\":false}\n",
+    )
+    .unwrap();
+    let reconcile = || {
+        Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+            .args(["kernel-journal-reconcile", "--journal"])
+            .arg(&journal)
+            .args(["--journal-max-bytes", "100000", "--source-jsonl"])
+            .arg(&source)
+            .args(["--source-max-bytes", "100000"])
+            .output()
+            .unwrap()
+    };
+    let result = reconcile();
+    assert!(result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("unmatched private fixture"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()["matched"],
+        1
+    );
+    let show = |include_text: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lfg-server"));
+        command
+            .args(["kernel-journal-show", "--journal"])
+            .arg(&journal)
+            .args([
+                "--journal-max-bytes",
+                "100000",
+                "--observation",
+                "1",
+                "--source-jsonl",
+            ])
+            .arg(&source)
+            .args(["--source-max-bytes", "100000"]);
+        if include_text {
+            command.arg("--include-text");
+        }
+        command.output().unwrap()
+    };
+    let hidden: serde_json::Value = serde_json::from_slice(&show(false).stdout).unwrap();
+    assert_eq!(hidden["sourceTextAvailable"], true);
+    assert!(hidden["sourceText"].is_null());
+    let shown: serde_json::Value = serde_json::from_slice(&show(true).stdout).unwrap();
+    assert_eq!(shown["sourceText"], "unmatched private fixture");
+    let correction = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+        .args(["kernel-correct", "--journal"])
+        .arg(&journal)
+        .args([
+            "--journal-max-bytes",
+            "100000",
+            "--observation",
+            "1",
+            "--node",
+            "operation",
+            "--choice",
+            "chat",
+            "--reviewer",
+            "fixture-reviewer",
+            "--attest",
+        ])
+        .output()
+        .unwrap();
+    assert!(correction.status.success());
+    let export = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+        .args(["kernel-journal-export", "--journal"])
+        .arg(&journal)
+        .args(["--journal-max-bytes", "100000", "--source-jsonl"])
+        .arg(&source)
+        .args(["--source-max-bytes", "100000", "--output"])
+        .arg(&output)
+        .args(["--output-max-bytes", "100000"])
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let row: serde_json::Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(row["status"], "pending_review");
+    assert_eq!(row["textOrigin"], "source_jsonl");
+    assert!(row["split"].is_null());
+    std::fs::write(&source, b"{\"id\":\"one\",\"text\":\"changed\"}\n").unwrap();
+    assert!(!reconcile().status.success());
+    assert!(!show(true).status.success());
+}
