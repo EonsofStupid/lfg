@@ -9,6 +9,8 @@
   let current = null;
   let redactions = [];
   let modelText = '';
+  let assessmentProfile = null;
+  let assessmentModels = [];
 
   function textareaMapping(text) {
     const source = Array.from(text);
@@ -68,6 +70,57 @@
         group.append(label);
       }
       container.append(group);
+    }
+  }
+
+  function renderAssessment(profile, configHash) {
+    assessmentProfile = profile;
+    assessmentModels = [];
+    el('assessment').hidden = !profile;
+    if (!profile) return;
+    const previous = current.assessment_targets && current.assessment_targets.config_sha256 === configHash ?
+      current.assessment_targets.values : null;
+    const complexity = el('assessment-complexity');
+    complexity.replaceChildren(new Option('Unknown', ''));
+    for (const item of profile.complexities) complexity.add(new Option(item.label, item.id));
+    complexity.value = previous?.complexity || '';
+    const container = el('assessment-models');
+    container.replaceChildren();
+    const heading = document.createElement('h4');
+    heading.textContent = 'Models recommended (none selected means unknown)';
+    container.append(heading);
+    for (const item of profile.models) {
+      const row = document.createElement('div');
+      const label = document.createElement('label');
+      label.className = 'choice';
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.disabled = item.availability !== 'available';
+      const old = previous?.models?.find(value => value.id === item.id);
+      check.checked = !!old && !check.disabled;
+      const text = document.createElement('span');
+      text.textContent = `${item.label} · ${item.provider} / ${item.model} · ${item.subscription_id || 'subscription unspecified'} · ${item.availability}`;
+      label.append(check, text);
+      const effort = document.createElement('select');
+      effort.setAttribute('aria-label', `Effort for ${item.label}`);
+      effort.add(new Option('Effort unknown', ''));
+      for (const level of item.effort_levels) effort.add(new Option(level, level));
+      effort.value = old?.effort || '';
+      effort.disabled = !check.checked;
+      check.addEventListener('change', () => { effort.disabled = !check.checked; });
+      row.append(label, effort);
+      container.append(row);
+      assessmentModels.push({id: item.id, check, effort});
+    }
+    const agents = el('assessment-agents');
+    agents.disabled = !profile.agent_range;
+    agents.value = previous?.agent_count ?? '';
+    if (profile.agent_range) {
+      agents.min = String(profile.agent_range.min);
+      agents.max = String(profile.agent_range.max);
+    } else {
+      agents.removeAttribute('min');
+      agents.removeAttribute('max');
     }
   }
 
@@ -137,11 +190,16 @@
     if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
     if (current.pending_changed) el('notice').textContent = 'This pending record changed. Reinitialize the workspace before deciding.';
+    if (current.assessment_targets && !result.assessment_profile) el('notice').textContent = 'This record has assessment targets. Configure its project profile before approving.';
+    if (current.assessment_targets && result.assessment_profile && current.assessment_targets.config_sha256 !== result.assessment_config_sha256)
+      el('notice').textContent = 'The assessment profile changed. Previous targets were not prefilled; review them again.';
     el('attest').checked = false;
     current.guide_sha256 = result.guide_sha256;
     el('guide-notice').textContent = result.guide ? `${result.guide.notice} Guide revision: ${result.guide.revision}.` :
       'No label guide was configured for this review server.';
     labels(result.taxonomy, current.labels, result.guide);
+    current.assessment_config_sha256 = result.assessment_config_sha256;
+    renderAssessment(result.assessment_profile, result.assessment_config_sha256);
   }
 
   async function decide(decision) {
@@ -157,6 +215,18 @@
     const data = { id: current.id, annotation_sha256: current.annotation_sha256, decision,
       confirmation, labels: selected };
     if (decision === 'approved' && current.guide_sha256) data.guide_sha256 = current.guide_sha256;
+    if (decision === 'approved' && assessmentProfile) {
+      const raw = el('assessment-agents').value;
+      const count = raw === '' ? null : Number(raw);
+      if (count !== null && (!Number.isSafeInteger(count) || !el('assessment-agents').checkValidity())) {
+        el('notice').textContent = 'Enter a whole agent count within the configured range, or leave it unknown.';
+        return;
+      }
+      const models = assessmentModels.filter(item => item.check.checked).map(item => ({id: item.id, effort: item.effort.value || null}));
+      data.assessment_values = {complexity: el('assessment-complexity').value || null,
+        models: models.length ? models : null, agent_count: count};
+      data.assessment_config_sha256 = current.assessment_config_sha256;
+    }
     if (decision === 'approved' && redactions.length) data.redactions = redactions;
     await api('/api/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data) });

@@ -44,7 +44,7 @@ def load_config(path: Path):
 def triage(paths: list[Path], config_path: Path) -> dict:
     workspaces = combine.workspace_paths(paths)
     config, patterns, config_hash = load_config(config_path)
-    code_paths = [Path(__file__), Path(combine.__file__), Path(corpus_audit.__file__),
+    code_paths = [Path(__file__), Path(review_corpus.assessment_targets.__file__), Path(combine.__file__), Path(corpus_audit.__file__),
                   Path(review_corpus.__file__), Path(train.__file__), Path(review_corpus.evaluate.__file__)]
     code_hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in code_paths}
     flagged, sources, counters = [], [], Counter()

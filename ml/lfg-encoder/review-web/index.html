@@ -42,7 +42,16 @@
           <h2>Labels</h2><p class="hint">Unchecked labels count as negative. If anything is uncertain, skip or reject the record.</p>
           <p id="guide-notice" class="hint"></p>
           <div id="labels"></div>
-          <label class="attest"><input type="checkbox" id="attest"> I checked the source, context, privacy, and all labels.</label>
+          <section id="assessment" hidden>
+            <h3>Assessment targets</h3>
+            <p class="hint">These are reviewer judgments for this project, not measured model performance. Leave a field unknown when the evidence is missing. Declared availability does not verify a subscription.</p>
+            <label for="assessment-complexity">Complexity</label>
+            <select id="assessment-complexity"></select>
+            <div id="assessment-models"></div>
+            <label for="assessment-agents">Total agents (blank means unknown)</label>
+            <input id="assessment-agents" type="number" step="1">
+          </section>
+          <label class="attest"><input type="checkbox" id="attest"> I checked the source, context, privacy, labels, and any assessment targets.</label>
           <div class="actions"><button id="skip" type="button" class="secondary">Skip</button>
             <button id="reject" type="button" class="danger">Reject</button>
             <button id="approve" type="button" class="primary">Approve</button></div>

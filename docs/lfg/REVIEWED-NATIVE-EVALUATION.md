@@ -21,6 +21,15 @@ input checks after inference. These hashes establish consistency, not the
 authenticity of an operator-supplied artifact, reviewer identity, authorship,
 or proof that two projects are unrelated.
 
+The current evaluator also requires the run manifest to declare the trained
+label groups and bind the assessment-target validator and audited target
+coverage. Historical run manifests without these identities need their matching
+historical evaluator; they cannot be silently treated as current runs. Target
+coverage in the training manifest is limited to train and validation; the
+standalone audit can report all splits when run on a complete plan. This
+comparison scores intent, capability and risk only. Reviewed complexity, model,
+effort and agent-count judgments are not yet predicted or scored here.
+
 For example, after obtaining a genuinely reviewed, separated corpus and a
 trained model with its exported ONNX artifact, choose a new private report:
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import corpus_audit as audit
+import assessment_targets
 import evaluate
 import train
 
@@ -156,7 +157,10 @@ def apply_redactions(text: str, operations: list[dict[str, Any]]) -> str:
 def record_decision(workspace: Path, identifier: str, reviewer: str, decision: str,
                     expected_digest: str, proposed: dict[str, list[str]] | None = None,
                     redactions: list[dict[str, Any]] | None = None,
-                    max_result_bytes: int | None = None, guide_sha256: str | None = None) -> None:
+                    max_result_bytes: int | None = None, guide_sha256: str | None = None,
+                    assessment: dict[str, Any] | None = None,
+                    assessment_config_path: Path | None = None,
+                    max_assessment_profile_bytes: int | None = None) -> None:
     if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
         raise ValueError('reviewer must be a nonempty single-line identifier')
     if decision not in ('approved', 'rejected'):
@@ -177,6 +181,14 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
     if not row['verified'] and item['annotation_sha256'] != current_digest:
         raise ValueError('pending record changed; reinitialize review')
     changed = dict(row)
+    if decision == 'approved' and row.get('assessment_targets') is not None and assessment is None:
+        raise ValueError('existing assessment targets require review with a matching project profile')
+    if assessment is not None:
+        if (decision != 'approved' or assessment_config_path is None or
+                type(max_assessment_profile_bytes) is not int or max_assessment_profile_bytes < 1):
+            raise ValueError('assessment targets require approval and a profile')
+        assessment_targets.validate_stored(assessment, source['project'])
+        changed['assessment_targets'] = assessment
     if guide_sha256 is not None:
         changed['review_guide_sha256'] = guide_sha256
     if redactions is not None and (decision != 'approved' or not isinstance(redactions, list)):
@@ -217,6 +229,11 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
         changed.pop('labels_pending', None)
     if audit.audit(workspace / 'plan.json')[0] != report:
         raise ValueError('workspace changed during review')
+    if assessment is not None:
+        config, config_sha = assessment_targets.load_config(assessment_config_path, max_assessment_profile_bytes)
+        if (config_sha != assessment['config_sha256'] or config['revision'] != assessment['config_revision']
+                or assessment_targets.project_profile(config, source['project']) != assessment['project_profile']):
+            raise ValueError('assessment profile changed during review')
     if decision == 'approved' or row['verified']:
         changed['verified'] = decision == 'approved'
         rows[index] = changed
