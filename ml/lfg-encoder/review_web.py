@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import corpus_audit
 import evaluate
 import inspect_codex_inventory
+import inventory_checkpoint_prompts
 import review_corpus
 import train
 
@@ -52,7 +53,7 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'checkpoint_verification'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
@@ -67,14 +68,19 @@ def load_config(path: Path) -> dict[str, Any]:
                 or set(limits) != {'max_messages', 'max_context_bytes'}
                 or any(type(limit) is not int or limit < 1 for limit in limits.values())):
             raise ValueError('invalid source context limits')
+    if 'checkpoint_verification' in value:
+        limits = value['checkpoint_verification']
+        if (not isinstance(limits, dict) or set(limits) != {'repo', 'max_history_bytes'}
+                or not isinstance(limits['repo'], str) or not Path(limits['repo']).is_absolute()
+                or type(limits['max_history_bytes']) is not int or limits['max_history_bytes'] < 1):
+            raise ValueError('invalid checkpoint verification configuration')
     return value
 
 
 def verify_source(workspace: Path, identifier: str, expected_digest: str, limits: dict[str, int] | None,
-                  context_limits: dict[str, int] | None = None) -> str | dict[str, Any]:
+                  context_limits: dict[str, int] | None = None,
+                  checkpoint_limits: dict[str, Any] | None = None) -> str | dict[str, Any]:
     """Check the source attached to a pending record, without changing the review."""
-    if limits is None:
-        raise ValueError('source verification is not configured')
     plan, _, ledger = review_corpus.load_workspace(workspace)
     item = ledger.get(identifier)
     if item is None or item['decision'] != 'pending':
@@ -86,15 +92,41 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
     if current != expected_digest or current != item['annotation_sha256'] or row['verified']:
         raise ValueError('record changed or an earlier write was interrupted; review it again')
     original = row.get('source')
-    if not isinstance(original, dict) or original.get('kind') != 'codex-session-user-text':
+    if not isinstance(original, dict):
         raise ValueError('automatic source verification is unavailable for this source type')
-    entry = {**original, 'schema_version': 'lfg.unreviewed-codex-message.v2'}
-    if context_limits is None:
-        text = inspect_codex_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
+    if original.get('kind') == 'codex-session-user-text':
+        if limits is None:
+            raise ValueError('source verification is not configured')
+        entry = {**original, 'schema_version': 'lfg.unreviewed-codex-message.v2'}
+        if context_limits is None:
+            text = inspect_codex_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
+        else:
+            text, messages, truncated = inspect_codex_inventory.prior_user_context(
+                entry, limits['max_session_bytes'], limits['max_line_bytes'],
+                context_limits['max_messages'], context_limits['max_context_bytes'])
+        status = 'source_prefix_and_original_text_match'
+    elif original.get('kind') == 'git-checkpoint-user-prompt' and context_limits is None:
+        if checkpoint_limits is None:
+            raise ValueError('checkpoint source verification is not configured')
+        revision = original.get('history_revision')
+        raw = inventory_checkpoint_prompts.read_history(Path(checkpoint_limits['repo']), revision,
+                                                        checkpoint_limits['max_history_bytes'])
+        if hashlib.sha256(raw).hexdigest() != original.get('history_stream_sha256'):
+            raise ValueError('Git history differs from the recorded source')
+        _, records = inventory_checkpoint_prompts.parse_history(raw, source['project'], revision)
+        candidates = [candidate for candidate in records if candidate['id'] == original.get('commit')]
+        if len(candidates) != 1:
+            raise ValueError('checkpoint commit is absent from the recorded history')
+        candidate = candidates[0]
+        if (any(original.get(key) != value for key, value in candidate['source'].items())
+                or original.get('text_sha256') != candidate['text_sha256']
+                or row['id'] != 'checkpoint-' + candidate['id']
+                or row['family'] != 'checkpoint-session-' + (candidate['session_sha256'] or 'unknown-session')):
+            raise ValueError('checkpoint source metadata differs from the recorded history')
+        text = candidate['text']
+        status = 'checkpoint_history_and_original_text_match'
     else:
-        text, messages, truncated = inspect_codex_inventory.prior_user_context(
-            entry, limits['max_session_bytes'], limits['max_line_bytes'],
-            context_limits['max_messages'], context_limits['max_context_bytes'])
+        raise ValueError('automatic source verification is unavailable for this source type')
     if text != row['text'] or row.get('review_transforms'):
         raise ValueError('review copy differs from the original source')
     # Recheck the review record after the potentially lengthy file read.
@@ -107,7 +139,7 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
         raise ValueError('review record changed during source verification')
     if context_limits is not None:
         return {'status': 'source_prefix_and_original_text_match', 'messages': messages, 'truncated': truncated}
-    return 'source_prefix_and_original_text_match'
+    return status
 
 
 class ReviewServer(HTTPServer):
@@ -253,7 +285,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     self.json_reply(200, result)
                 else:
                     status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
-                                           self.server.config.get('source_verification'))
+                                           self.server.config.get('source_verification'),
+                                           checkpoint_limits=self.server.config.get('checkpoint_verification'))
                     self.json_reply(200, {'status': status})
                 return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}

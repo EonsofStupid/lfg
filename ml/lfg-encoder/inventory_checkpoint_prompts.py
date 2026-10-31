@@ -89,15 +89,15 @@ def read_history(repo: Path, revision: str, max_bytes: int) -> bytes:
     command = ["git", "--no-replace-objects", "-c", f"safe.directory={repo}", "-C", str(repo),
                "log", "--no-notes", "--no-show-signature", "--format=%H%x00%cI%x00%B%x00", revision]
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors)
-        assert process.stdout is not None
-        raw = process.stdout.read(max_bytes + 1)
-        if len(raw) > max_bytes:
-            process.kill()
-            process.wait()
-            raise ValueError("Git history exceeds the configured byte limit")
-        if process.wait() != 0:
-            raise ValueError("Git could not read the requested history revision")
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors) as process:
+            assert process.stdout is not None
+            raw = process.stdout.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                process.kill()
+                process.wait()
+                raise ValueError("Git history exceeds the configured byte limit")
+            if process.wait() != 0:
+                raise ValueError("Git could not read the requested history revision")
     return raw
 
 
