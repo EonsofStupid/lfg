@@ -98,6 +98,26 @@ resumed from its fixture checkpoint, and verified completion was not repeated.
 Those checks transferred no project data and did not train a model. They do not
 establish actual model checkpoint recovery, reboot persistence or model quality.
 
+The template was then installed, disabled, on `Clyffy-Ring` alongside a
+versioned copy of the merged service source. A temporary instance of that
+installed template used an EnvironmentFile and per-instance limits drop-in to
+launch the real trainer with an empty dataset. The configuration path contained
+spaces. The trainer stopped at the reviewed-data gate, the unit exited with
+status 2 and zero restarts, and no training output was created. The temporary
+instance and its drop-in were removed after the check. No production training
+instance was enabled. Rerun the installed-template and fixture-recovery tests
+from matching source on a suitable Linux user manager with:
+
+```bash
+LFG_TEST_SYSTEMD_USER=1 LFG_TEST_INSTALLED_TRAINING_TEMPLATE=1 \
+  python3 -m unittest discover -s ml/lfg-encoder -p test_systemd_training_supervisor.py -v
+```
+
+The installed-template test requires the installed template bytes to match the
+source under test. It creates a unique temporary instance and configuration,
+starts and stops only that instance, and reloads the user manager. Its limits
+and empty input are test settings, not recommended production values.
+
 A separate Windows check passed the real local 23-record LFG/DevPulse
 development dataset through the actual trainer subprocess. All 23 records
 were unverified, so the 500-record gate stopped it before output creation.
