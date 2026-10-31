@@ -36,6 +36,7 @@ class WindowsEmbeddedBuilderTests(unittest.TestCase):
 
     def test_unpaired_invalid_and_mismatched_artifacts_are_rejected_before_output(self):
         cases = [(['-ModelArtifactDir', str(self.model)], 'must be supplied together'),
+                 (['-ModelArtifactDir', '', '-ModelManifestSha256', ''], 'must be supplied together'),
                  (['-ModelArtifactDir', str(self.model), '-ModelManifestSha256', 'bad'], 'lowercase sha-256'),
                  (['-ModelArtifactDir', str(self.model), '-ModelManifestSha256', '0' * 64], 'manifest digest mismatch')]
         for args, message in cases:

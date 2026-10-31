@@ -18,7 +18,9 @@ if (Test-Path -LiteralPath $destination) {
 }
 $hasModelDirectory = -not [string]::IsNullOrWhiteSpace($ModelArtifactDir)
 $hasModelDigest = -not [string]::IsNullOrWhiteSpace($ModelManifestSha256)
-if ($hasModelDirectory -ne $hasModelDigest) {
+if (($hasModelDirectory -ne $hasModelDigest) -or
+    (($PSBoundParameters.ContainsKey('ModelArtifactDir') -or $PSBoundParameters.ContainsKey('ModelManifestSha256')) -and
+     (-not $hasModelDirectory -or -not $hasModelDigest))) {
     throw 'ModelArtifactDir and ModelManifestSha256 must be supplied together.'
 }
 if ($hasModelDigest -and $ModelManifestSha256 -cnotmatch '^[0-9a-f]{64}$') {

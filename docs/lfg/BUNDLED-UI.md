@@ -118,7 +118,9 @@ The retained snapshot passed the existing evaluator's file-identity check for
 all eight manifest entries. A copied first executable served its embedded UI
 and developer statistics and processed two real unreviewed inputs without
 external model files. Both executable hashes also matched an earlier local
-in-place build. These are same-machine observations with a model trained on
+in-place build. The report records the builder's hash at the time of that run;
+the subsequent empty-argument validation change was tested separately. These
+are same-machine observations with a model trained on
 unreviewed development data, not a qualified model, clean-host proof, or
 permission to distribute its private-derived weights. The private build report
 and artifacts remain under `target/lfg-embedded-repro-20261031-v3/`.
