@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "lfg.node-exemplar-config.v1",
+  "revision": "example-only-v1",
+  "pooling": "attention-mask-mean-l2",
+  "maxTokens": 256,
+  "maxTextBytes": 12000,
+  "batchSize": 4,
+  "cpuThreads": 2,
+  "maxExemplars": 10000,
+  "maxValidationItems": 10000,
+  "maxDimensions": 4096,
+  "maxPackBytes": 64000000,
+  "maxPredictionBytes": 8000000,
+  "minimumSimilarity": 0.75,
+  "minimumMargin": 0.05
+}

@@ -2,9 +2,12 @@ import argparse
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import train
 
@@ -16,6 +19,21 @@ def record(index, verified):
 
 
 class DatasetGateTests(unittest.TestCase):
+    def test_cli_validates_dataset_and_rejects_unintegrated_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "examples.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            script = Path(train.__file__)
+            result = subprocess.run([sys.executable, str(script), "validate", "--dataset", str(dataset)],
+                                    capture_output=True, text=True, check=True)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["verified"], 0)
+            self.assertFalse(report["sample_gate_passed"])
+            for command in ("plan", "export", "benchmark"):
+                result = subprocess.run([sys.executable, str(script), command], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("not yet integrated", result.stderr)
+
     def test_unverified_records_do_not_satisfy_sample_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "examples.jsonl"
@@ -142,10 +160,50 @@ class DatasetGateTests(unittest.TestCase):
         train.validate_training_config(config)
         for field, invalid in (("batch_size", 0), ("checkpoint_steps", -1),
                                ("epochs", float("nan")), ("base_model", ""),
-                               ("allow_mismatched_sizes", "true")):
+                               ("allow_mismatched_sizes", "true"), ("device", "gpu")):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):
                     train.validate_training_config({**config, field: invalid})
+
+    def test_explicit_compute_target_rejects_fallback(self):
+        train.verify_training_device("cpu", "cpu", False)
+        train.verify_training_device("cuda", "cuda", True)
+        train.verify_training_device("auto", "cpu", False)
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.verify_training_device("cuda", "cpu", False)
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.verify_training_device("cuda", "cpu", True)
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.verify_training_device("cpu", "cuda", True)
+
+    def test_legacy_config_defaults_to_auto_device(self):
+        config = train.load_training_config(train.TRAINING_CONFIG)
+        del config["device"]
+        self.assertEqual(train.parse_training_config(json.dumps(config).encode())["device"], "auto")
+
+    def test_training_arguments_pass_cpu_selection_and_reject_unavailable_cuda(self):
+        args = argparse.Namespace(device="cpu", output=Path("unused"), seed=1, epochs=1,
+                                  batch_size=1, checkpoint_steps=1)
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+        captured = {}
+        def arguments(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(device=SimpleNamespace(type="cpu"))
+        train.make_training_arguments(args, torch, arguments)
+        self.assertIs(captured["use_cpu"], True)
+        args.device = "cuda"
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.make_training_arguments(args, torch, arguments)
+
+    def test_reviewed_training_requires_both_environment_and_model_inputs(self):
+        train.validate_input_options(True, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'reviewed training requires'):
+            train.validate_input_options(False, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, Path('lock'), None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, None, None, None, ['pip'])
+        train.validate_input_options(False, Path('lock'), Path('wheels'), Path('manifest'), ['pip'])
 
     def test_promotion_policy_rejects_invalid_sample_threshold(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,6 +1,7 @@
 import json
 import contextlib
 import io
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,52 @@ class ReviewWorkspaceTests(unittest.TestCase):
                 review.record_decision(self.workspace, 'id-0', reviewer, 'approved', digest, labels)
         self.assertEqual(review.status(self.workspace)['decisions']['approved'], 0)
 
+    def test_redacted_approval_preserves_provenance_and_exports_only_reviewed_text(self):
+        original = self.rows[0]['text']
+        start = original.index('request')
+        operations = [{'start': start, 'end': start + len('request'), 'replacement': '[removed]'}]
+        review.record_decision(self.workspace, 'id-0', 'person', 'approved', self.digest('id-0'),
+                               {'intents': ['build'], 'capabilities': ['write'], 'risks': []}, operations)
+        output = self.root / 'redacted-export'
+        review.export_approved(self.workspace, output)
+        exported = json.loads((output / 'source-0000.jsonl').read_text())
+        self.assertEqual(exported['text'], 'fixture [removed] 0')
+        transform = exported['review_transforms'][0]
+        self.assertEqual(transform['before_sha256'], hashlib.sha256(original.encode()).hexdigest())
+        self.assertEqual(transform['after_sha256'], hashlib.sha256(exported['text'].encode()).hexdigest())
+        self.assertEqual(transform['operations'], operations)
+        self.assertEqual(json.loads((self.root / 'input-0.jsonl').read_text())['text'], original)
+
+    def test_redaction_rejects_invalid_ranges_duplicates_and_rejections(self):
+        digest = self.digest('id-0')
+        labels = {'intents': ['build'], 'capabilities': [], 'risks': []}
+        for operations in ([{'start': True, 'end': 1, 'replacement': 'x'}],
+                           [{'start': 0, 'end': 0, 'replacement': 'x'}],
+                           [{'start': 0, 'end': 1, 'replacement': 'f'}],
+                           [{'start': 0, 'end': 1000, 'replacement': 'x'}]):
+            with self.subTest(operations=operations), self.assertRaises(ValueError):
+                review.record_decision(self.workspace, 'id-0', 'person', 'approved', digest, labels, operations)
+        with self.assertRaisesRegex(ValueError, 'require an approved'):
+            review.record_decision(self.workspace, 'id-0', 'person', 'rejected', digest, None,
+                                   [{'start': 0, 'end': 1, 'replacement': 'x'}])
+        original = self.rows[0]['text']
+        with self.assertRaisesRegex(ValueError, 'duplicates'):
+            review.record_decision(self.workspace, 'id-0', 'person', 'approved', digest, labels,
+                                   [{'start': len(original) - 1, 'end': len(original), 'replacement': '1'}])
+        with self.assertRaisesRegex(ValueError, 'display limit'):
+            review.record_decision(self.workspace, 'id-0', 'person', 'approved', digest, labels,
+                                   [{'start': 0, 'end': 1, 'replacement': 'more'}], 2)
+        self.assertEqual(review.status(self.workspace)['decisions']['approved'], 0)
+
+    def test_redaction_offsets_use_unicode_codepoints(self):
+        text = 'one \U0001f680 private data'
+        operations = [{'start': 6, 'end': 13, 'replacement': '[x]'},
+                      {'start': 0, 'end': 3, 'replacement': '1'}]
+        self.assertEqual(review.apply_redactions(text, operations), '1 \U0001f680 [x] data')
+        self.assertEqual(review.apply_redactions('one \U0001f680\r\nprivate data',
+                         [{'start': 7, 'end': 14, 'replacement': '[x]'}]),
+                         'one \U0001f680\r\n[x] data')
+
     def test_stale_display_and_changed_pending_record_are_rejected(self):
         digest = self.digest('id-0')
         path = self.workspace / 'source-0000.jsonl'
@@ -123,6 +170,24 @@ class ReviewWorkspaceTests(unittest.TestCase):
         self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
         review.record_decision(self.workspace, 'id-0', 'person', 'approved', self.digest('id-0'))
         self.assertEqual(review.status(self.workspace)['counts']['train']['ready_for_reviewed_subset'], 1)
+
+    def test_interrupted_redaction_remains_pending_and_can_be_reviewed_again(self):
+        original_replace = review.atomic_replace
+        def fail_ledger(path, content):
+            if path.name == 'reviews.jsonl':
+                raise OSError('simulated interruption')
+            original_replace(path, content)
+        operations = [{'start': 8, 'end': 15, 'replacement': '[x]'}]
+        with patch.object(review, 'atomic_replace', side_effect=fail_ledger), self.assertRaises(OSError):
+            review.record_decision(self.workspace, 'id-0', 'person', 'approved', self.digest('id-0'),
+                                   {'intents': ['build'], 'capabilities': [], 'risks': []}, operations)
+        self.assertEqual(review.status(self.workspace)['decisions']['approved'], 0)
+        with self.assertRaisesRegex(ValueError, 'no current approvals'):
+            review.export_approved(self.workspace, self.root / 'not-yet')
+        review.record_decision(self.workspace, 'id-0', 'person', 'approved', self.digest('id-0'))
+        row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(len(row['review_transforms']), 1)
+        self.assertEqual(review.status(self.workspace)['decisions']['approved'], 1)
 
     def test_interactive_approval_requires_the_exact_confirmation(self):
         with patch('builtins.input', side_effect=['a', 'no', 'a', 'APPROVE', 'q']), contextlib.redirect_stdout(io.StringIO()):

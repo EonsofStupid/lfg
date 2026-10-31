@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unicodedata
@@ -65,7 +66,7 @@ def init_workspace(plan_path: Path, workspace: Path) -> dict[str, Any]:
     copies = []
     for source, evidence in zip(plan['sources'], report['sources'], strict=True):
         source_path = audit.resolve(plan_path.parent, source['path'])
-        rows, digest = train.load_dataset(source_path)
+        rows, digest = train.load_dataset(source_path, allow_unlabeled_review=True)
         raw_source = source_path.read_bytes()
         if digest != evidence['sha256'] or hashlib.sha256(raw_source).hexdigest() != digest:
             raise ValueError('source changed during initialization')
@@ -126,19 +127,43 @@ def status(workspace: Path) -> dict[str, Any]:
 def find_row(workspace: Path, plan: dict[str, Any], identifier: str) -> tuple[Path, list[dict[str, Any]], int, dict[str, Any]]:
     for source in plan['sources']:
         path = private_path(workspace, source['path'])
-        rows, _ = train.load_dataset(path)
+        rows, _ = train.load_dataset(path, allow_unlabeled_review=True)
         for index, row in enumerate(rows):
             if row['id'] == identifier:
                 return path, rows, index, source
     raise ValueError('review record not found')
 
 
+def apply_redactions(text: str, operations: list[dict[str, Any]]) -> str:
+    """Apply reviewer-supplied replacements to ranges in the evolving text."""
+    if not isinstance(operations, list):
+        raise ValueError('redactions must be a list')
+    for operation in operations:
+        if (not isinstance(operation, dict) or set(operation) != {'start', 'end', 'replacement'}
+                or type(operation['start']) is not int or type(operation['end']) is not int
+                or not isinstance(operation['replacement'], str)
+                or not 0 <= operation['start'] < operation['end'] <= len(text)):
+            raise ValueError('invalid redaction range')
+        start, end = operation['start'], operation['end']
+        if text[start:end] == operation['replacement']:
+            raise ValueError('redaction must change the selected text')
+        text = text[:start] + operation['replacement'] + text[end:]
+    if not text.strip():
+        raise ValueError('redacted request must not be empty')
+    return text
+
+
 def record_decision(workspace: Path, identifier: str, reviewer: str, decision: str,
-                    expected_digest: str, proposed: dict[str, list[str]] | None = None) -> None:
+                    expected_digest: str, proposed: dict[str, list[str]] | None = None,
+                    redactions: list[dict[str, Any]] | None = None,
+                    max_result_bytes: int | None = None, guide_sha256: str | None = None) -> None:
     if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
         raise ValueError('reviewer must be a nonempty single-line identifier')
     if decision not in ('approved', 'rejected'):
         raise ValueError('decision must be approved or rejected')
+    if guide_sha256 is not None and (decision != 'approved' or not isinstance(guide_sha256, str)
+                                     or not re.fullmatch(r'[0-9a-f]{64}', guide_sha256)):
+        raise ValueError('guide digest requires an approval and a SHA-256 value')
     plan, report, ledger = load_workspace(workspace)
     item = ledger.get(identifier)
     if item is None or item['decision'] != 'pending':
@@ -152,6 +177,32 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
     if not row['verified'] and item['annotation_sha256'] != current_digest:
         raise ValueError('pending record changed; reinitialize review')
     changed = dict(row)
+    if guide_sha256 is not None:
+        changed['review_guide_sha256'] = guide_sha256
+    if redactions is not None and (decision != 'approved' or not isinstance(redactions, list)):
+        raise ValueError('redactions require an approved record')
+    if redactions:
+        result = apply_redactions(row['text'], redactions)
+        if max_result_bytes is not None and len(result.encode('utf-8')) > max_result_bytes:
+            raise ValueError('redacted request exceeds configured display limit')
+        result_key = audit.text_key(result)
+        for candidate_source in plan['sources']:
+            candidate_rows, _ = train.load_dataset(private_path(workspace, candidate_source['path']), allow_unlabeled_review=True)
+            if any(candidate['id'] != identifier and audit.text_key(candidate['text']) == result_key
+                   for candidate in candidate_rows):
+                raise ValueError('redacted request duplicates another workspace record')
+        previous = row.get('review_transforms', [])
+        if not isinstance(previous, list):
+            raise ValueError('invalid prior review transformations')
+        changed['text'] = result
+        changed['review_transforms'] = [*previous, {
+            'schema_version': 'lfg.review-redaction.v1',
+            'before_sha256': hashlib.sha256(row['text'].encode('utf-8')).hexdigest(),
+            'after_sha256': hashlib.sha256(result.encode('utf-8')).hexdigest(),
+            'operations': redactions,
+        }]
+    if decision == 'approved' and row.get('labels_pending') and proposed is None:
+        raise ValueError('unlabeled records require explicitly supplied labels')
     if proposed is not None:
         if decision != 'approved' or set(proposed) != set(evaluate.FIELDS):
             raise ValueError('label edits require an approved record and all label groups')
@@ -163,6 +214,7 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
             changed[field] = sorted(values)
         if not changed['intents']:
             raise ValueError('at least one intent is required')
+        changed.pop('labels_pending', None)
     if audit.audit(workspace / 'plan.json')[0] != report:
         raise ValueError('workspace changed during review')
     if decision == 'approved' or row['verified']:
@@ -194,6 +246,8 @@ def interactive_review(workspace: Path, reviewer: str) -> None:
             if 'review_note' in row:
                 print('REVIEW NOTE:', json.dumps(row['review_note'], ensure_ascii=True))
             print('PROPOSED LABELS:', json.dumps(proposed, ensure_ascii=True, sort_keys=True))
+            if row.get('labels_pending'):
+                print('LABELS NOT YET PROVIDED: select all applicable labels before approving.')
             print('Absent labels are negatives. Check attribution, context, permissions and sensitive data before approving.')
             action = input('[a]pprove, [e]dit labels, [r]eject, [s]kip, [q]uit: ').strip().lower()
             if action == 'e':
@@ -227,7 +281,7 @@ def export_approved(workspace: Path, output: Path) -> dict[str, Any]:
     selected = []
     approved_items = []
     for source in plan['sources']:
-        rows, _ = train.load_dataset(private_path(workspace, source['path']))
+        rows, _ = train.load_dataset(private_path(workspace, source['path']), allow_unlabeled_review=True)
         keep = []
         for row in rows:
             digest = audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)

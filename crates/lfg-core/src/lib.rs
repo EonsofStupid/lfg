@@ -8,6 +8,8 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+pub mod kernel;
+
 pub const PROTOCOL_VERSION: &str = "lfg.payload-signal.v0.3.0";
 pub const CLOUD_EVENTS_VERSION: &str = "1.0";
 pub const CONTROL_DATA_SCHEMA: &str = "urn:clyffy:schema:lfg:control-data:v1";

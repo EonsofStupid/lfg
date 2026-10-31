@@ -1,23 +1,39 @@
-# LFG encoder experiment
+# LFG prompt-recipe encoder
 
 This is the offline, non-authoritative training lane for the Rust
-MasterClyffy CPU encoder. Runtime prompts are not collected here. The checked-in
-corpus is intentionally authored synthetic data.
+MasterClyffy CPU preflight encoder. It learns multi-label intent, capability,
+and risk classification. It is not the Jina/GTE retrieval lesson and it does
+not write the final CoSTAR packet. Runtime prompts are not collected here. The
+checked-in corpus is intentionally authored synthetic data.
+
+Training is GPU-only. CPU is reserved for the exported ONNX/Rust proof; the
+trainer refuses to fall back to CPU. Unsloth is the default engine, using its
+current `FastModel` sequence-classification path with full fine-tuning. The
+plain Transformers engine is available only as an explicit compatibility
+diagnostic.
 
 These experiments support the assessment and routing objective in the root
-[README](../../README.md). The classifier is exploratory and is not the authoritative runtime encoder.
-Any learned candidate needs task-specific evaluation before integration or
-promotion.
+[README](../../README.md). The classifier and CPU LLM paths are exploratory;
+neither is currently the authoritative runtime encoder. The coding-oriented
+teacher and student work below also explores general model capabilities, and
+its contribution to LFG's assessment role needs to be demonstrated through
+task-specific evaluation before integration or promotion.
 
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for
 human review; their constructed examples are not a training-ready corpus.
+The [corpus review guide](../../docs/lfg/CORPUS-REVIEW.md#local-codex-project-session-messages)
+also documents an inventory of real project-session messages awaiting review.
 The separate [PR review batch](dataset/rrflow-pr-review.v1.jsonl) contains
 actual PR titles and excerpts linked to outcome journals, not original prompts.
 For a bounded real-corpus measurement of the baseline process, including
 Windows CPU-time and cycle counters, see the [process benchmark](../../docs/lfg/CPU-PROCESS-BENCHMARK.md).
 The [persistent comparison](../../docs/lfg/PERSISTENT-CPU-BENCHMARK.md) measures
 repeated local requests after process warmup.
+The [CPU training repeatability experiment](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md)
+records two clean environments, a hash-locked wheelhouse and the real-request runs.
+The [GB10 environment record](../../docs/lfg/SPARK-LOCKED-ENVIRONMENT.md)
+documents a separate ARM64 wheel lock, pinned model snapshot and runtime probe.
 For the first below-gate run using real conversation requests and its negative
 diagnostic result, see the [development experiment](../../docs/lfg/REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
@@ -34,6 +50,8 @@ The promotion order is fixed:
 
 Training requires `requirements.txt`. Validation uses only the Python standard
 library and does not download a model.
+Reviewed training also requires an operator-selected wheel lock, matching
+wheelhouse and local model snapshot manifest. See the [bound training inputs](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md#bound-training-inputs).
 
 ## Starting a reproducible classifier experiment
 
@@ -116,6 +134,16 @@ evidence for reproducing an experiment, not a guarantee of bitwise-identical
 GPU results. The manifest and split contain IDs and family names: protect them
 as project data and do not put sensitive information in those fields.
 
+The `device` setting accepts `auto`, `cpu`, or `cuda`; `--device` overrides it.
+For a Spark run use `--device cuda` to require CUDA instead of silently falling
+back to the CPU. `cpu` forces CPU execution even when a GPU is visible. The
+trainer checks the selected device and the model's device, and records the
+requested device, selected device and CUDA availability in the run manifest.
+`auto` retains the library's automatic selection and can select CPU. Device
+selection does not prove the selected batch size fits memory or that training
+will succeed. Existing runs whose trainer code or manifest differs remain
+subject to the existing resume check; do not bypass it to resume across changes.
+
 Checkpoints are written every configured number of optimizer steps. To resume,
 use the exact same command and add `--resume`; it verifies the existing manifest
 and requires the latest checkpoint's trainer, optimizer, scheduler and RNG
@@ -179,13 +207,19 @@ only checks declared IDs and family names; it cannot establish independent
 projects, provenance, human review, unseen paraphrases, or absence of other
 leakage. Without a split, separation is `not_checked`. Every report is marked
 ineligible for promotion until those requirements and promotion gates exist.
+The separate [reviewed native comparison](../../docs/lfg/REVIEWED-NATIVE-EVALUATION.md)
+binds an audited test partition to its training run, ONNX artifact and binary;
+it likewise cannot qualify a model without the remaining evidence.
 
 The configurable taxonomy defines the label universe. Per-label counts include
 false positives for labels with no positive examples; macro F1 averages only
 labels with positive reference support, while micro F1 includes all declared
 labels. Empty denominators are `null`. Compare models using the same dataset
-and taxonomy hashes and inspect the support for each label. Predictions are
-binary: this workflow does not measure calibration, runtime CPU cycles, memory,
-quantization loss, or model quality on an independently reviewed final test.
+and taxonomy hashes and inspect the support for each label. The default
+predictions are binary; the reviewed native comparison can optionally measure
+empirical ECE and Brier score from uncalibrated native scores using explicitly
+configured bins. This does not fit a calibrator or establish quality. Runtime
+CPU cycles, memory, quantization loss, and independently reviewed final-test
+quality require separate evidence.
 See the [exploratory comparison](../../docs/lfg/EVALUATION-SMOKE.md) for a
 recorded same-data smoke test and its limits.

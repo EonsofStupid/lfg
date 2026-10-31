@@ -32,6 +32,18 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test Rust and embedded UI
         run: cargo test --locked --workspace --features lfg-server/embedded-ui
+      - name: Record the deterministic kernel golden
+        shell: bash
+        run: |
+          cargo run --locked -q -p lfg-server -- classify "logout doesn't clear the session" > target/kernel-logout.actual.json
+          cmp crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
+      - name: Keep the kernel golden output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-logout-golden
+          path: target/kernel-logout.actual.json
+          if-no-files-found: warn
       - name: Check optional native inference
         run: cargo check --locked --workspace --all-targets --features lfg-server/embedded-ui,lfg-server/onnx-shadow
       - name: Test dataset and evaluation tools

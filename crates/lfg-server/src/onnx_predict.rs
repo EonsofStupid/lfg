@@ -109,10 +109,22 @@ struct Prediction {
     intents: Vec<String>,
     capabilities: Vec<String>,
     risks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scores: Option<Scores>,
+}
+
+#[derive(Serialize)]
+struct Scores {
+    semantics: &'static str,
+    values: BTreeMap<String, f64>,
 }
 
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sigmoid(value: f32) -> f64 {
+    f64::from(1.0_f32 / (1.0_f32 + (-value).exp()))
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -188,18 +200,24 @@ fn parse_config(bytes: &[u8]) -> Result<(RuntimeConfig, String)> {
     Ok((config, hash(bytes)))
 }
 
-pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<()> {
+pub fn run(
+    root: &Path,
+    expected_manifest: &str,
+    config_path: &Path,
+    include_scores: bool,
+) -> Result<()> {
     let (config, config_hash) = load_config(config_path)?;
     run_source(
         ArtifactSource::Directory(root),
         expected_manifest,
         config,
         config_hash,
+        include_scores,
     )
 }
 
 #[cfg(feature = "embedded-onnx")]
-pub fn run_embedded(config_path: Option<&Path>) -> Result<()> {
+pub fn run_embedded(config_path: Option<&Path>, include_scores: bool) -> Result<()> {
     let (config, config_hash) = match config_path {
         Some(path) => load_config(path)?,
         None => parse_config(include_bytes!("../config/onnx-runtime.example.json"))?,
@@ -209,6 +227,7 @@ pub fn run_embedded(config_path: Option<&Path>) -> Result<()> {
         embedded::MANIFEST_SHA256,
         config,
         config_hash,
+        include_scores,
     )
 }
 
@@ -217,6 +236,7 @@ fn run_source(
     expected_manifest: &str,
     config: RuntimeConfig,
     config_hash: String,
+    include_scores: bool,
 ) -> Result<()> {
     if !valid_digest(expected_manifest) {
         return Err("expected manifest SHA-256 must be lowercase hexadecimal".into());
@@ -430,13 +450,12 @@ fn run_source(
             .iter()
             .zip(logits)
             .filter_map(|(label, value)| {
-                let probability = 1.0_f32 / (1.0_f32 + (-value).exp());
                 let threshold = prediction
                     .label_thresholds
                     .get(label)
                     .copied()
                     .unwrap_or(prediction.default_threshold);
-                (f64::from(probability) >= threshold).then_some(label.clone())
+                (sigmoid(*value) >= threshold).then_some(label.clone())
             })
             .collect();
         let result = Prediction {
@@ -448,6 +467,14 @@ fn run_source(
             intents: chosen.intersection(&intent).cloned().collect(),
             capabilities: chosen.intersection(&capability).cloned().collect(),
             risks: chosen.intersection(&risk).cloned().collect(),
+            scores: include_scores.then(|| Scores {
+                semantics: "sigmoid-uncalibrated-v1",
+                values: model_labels
+                    .iter()
+                    .cloned()
+                    .zip(logits.iter().copied().map(sigmoid))
+                    .collect(),
+            }),
         };
         serde_json::to_writer(&mut output, &result)?;
         writeln!(output)?;
@@ -472,7 +499,7 @@ mod tests {
         assert!(!valid_digest("bad"));
         std::fs::write(dir.path().join("manifest.json"), "{}").unwrap();
         assert!(
-            run(dir.path(), &"0".repeat(64), &config)
+            run(dir.path(), &"0".repeat(64), &config, false)
                 .unwrap_err()
                 .to_string()
                 .contains("manifest digest mismatch")
