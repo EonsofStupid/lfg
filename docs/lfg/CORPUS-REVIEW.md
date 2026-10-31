@@ -189,7 +189,12 @@ and coverage gates without more suitable data and an independent test source.
 For triage only, the existing rule baseline produced `build.software` on two of
 the 14 new excerpts with that proposed label, and `research.web` on the one
 with that proposed label. This is comparison with unreviewed guesses, not a
-verified accuracy measure. The baseline predictions and report remain private.
+verified accuracy measure. The earlier experimental LFG-trained model also
+emitted `build.software` on two of the 14, and did not emit `research.web` on
+the one research proposal; its output head does not include that label at all.
+This is not an independent test: the model's checkpoint was selected on other
+DevPulse excerpts, and the quoted requests may be related. Predictions and
+reports remain private.
 The candidate Makers Impulse holdout was not read for this new plan.
 
 ### Makers checkpoint inventory
