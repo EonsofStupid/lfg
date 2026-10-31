@@ -171,8 +171,8 @@ To avoid supplying the test workspace to development assembly, explicitly select
 
 ```powershell
 python ml/lfg-encoder/combine_reviewed_workspaces.py --scope development `
-  --workspace ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace `
-  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-ai-draft.v2/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-ai-draft.v1/workspace `
   --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
   --status
 ```
@@ -220,7 +220,7 @@ flags records too large to scan rather than treating them as clean.
 ```powershell
 python ml/lfg-encoder/triage_review_workspaces.py `
   --workspace ml/lfg-encoder/dataset/private/codex-session-ai-draft.v2/workspace `
-  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-ai-draft.v1/workspace `
   --config ml/lfg-encoder/review-triage.example.json --output NEW_PRIVATE_REPORT.json
 ```
 
@@ -237,7 +237,9 @@ transformation preserves the request and is appropriate for the data-use terms.
 On this machine the example configuration flagged 83 of 520 pending training
 candidates: 52 ambient browser blocks, 26 tool-reply wrappers, four short
 acknowledgements and one work-duration marker. Counts are nonexclusive in
-general. The private report is `dataset/private/training-triage.v1.json`.
+general. The current private report for these two draft workspaces is
+`dataset/private/training-triage.v2.json`; the earlier v1 report refers to the
+original additional-training workspace.
 These 520 records remain unapproved. If all 83 flagged records were rejected,
 at most 437 candidates would remain before reviewing the others; some flagged
 records may instead be appropriately transformed. The existing 500-record
@@ -287,6 +289,17 @@ training candidates: six AI drafts, 220 still unlabeled, 226 pending and zero
 approved. The earlier `.v1` draft did not retain previous review notes; use
 `.v2`. A local read-only API check showed one suggestion and its AI warning
 without changing the ledger. These are not reviewed training examples.
+
+A second private proposal file, `dataset/private/additional-ai-label-proposals.v1.json`,
+adds 12 assistant-drafted labels across six declared projects and six recorded
+session families. The source-prefix and original-text check matched each of the
+12 in the resulting `dataset/private/additional-training-ai-draft.v1/workspace`;
+it does not establish authorship, rights, privacy, independence or label
+correctness. That workspace retains 294 pending records: 12 drafts and 282
+unlabeled, with zero verified or approved. Each draft includes a visible warning
+and a caveat for the reviewer. Use it instead of its original
+`additional-training-review-draft.v1/workspace`, never alongside it. The two
+draft workspaces together contain 18 AI drafts, not 18 human-reviewed examples.
 
 ### Local browser review
 
