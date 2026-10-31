@@ -112,14 +112,95 @@ fn embed_onnx() {
     std::fs::write(out, source).expect("write embedded ONNX artifact index");
 }
 
+fn embed_node() {
+    let artifact = PathBuf::from(
+        std::env::var_os("LFG_EMBEDDED_NODE_DIR")
+            .expect("embedded-node requires LFG_EMBEDDED_NODE_DIR"),
+    );
+    let manifest_sha = std::env::var("LFG_EMBEDDED_NODE_MANIFEST_SHA256")
+        .expect("embedded-node requires a manifest digest");
+    let pack_sha = std::env::var("LFG_EMBEDDED_NODE_PACK_SHA256")
+        .expect("embedded-node requires a pack digest");
+    for hash in [&manifest_sha, &pack_sha] {
+        assert!(
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "embedded node digests must be lowercase SHA-256"
+        );
+    }
+    let selected = |name: &str| {
+        PathBuf::from(
+            std::env::var_os(name).unwrap_or_else(|| panic!("embedded-node requires {name}")),
+        )
+    };
+    let files = [
+        ("manifest.json", artifact.join("manifest.json")),
+        ("tokenizer.json", artifact.join("tokenizer.json")),
+        ("model.onnx", artifact.join("model.onnx")),
+        ("pack.json", selected("LFG_EMBEDDED_NODE_PACK")),
+        ("snapshot.json", selected("LFG_EMBEDDED_NODE_SNAPSHOT")),
+        ("runtime.json", selected("LFG_EMBEDDED_NODE_RUNTIME")),
+        ("exemplar-config.json", selected("LFG_EMBEDDED_NODE_CONFIG")),
+    ];
+    let mut source = format!(
+        "pub const MANIFEST_SHA256: &str = {manifest_sha:?};\npub const PACK_SHA256: &str = {pack_sha:?};\npub static FILES: &[(&str, &[u8])] = &[\n"
+    );
+    for (name, path) in files {
+        let metadata =
+            std::fs::symlink_metadata(&path).expect("embedded node artifact file missing");
+        assert!(
+            metadata.file_type().is_file(),
+            "embedded node inputs must be regular files"
+        );
+        let path = path.canonicalize().expect("resolve embedded node input");
+        println!("cargo:rerun-if-changed={}", path.display());
+        if name == "manifest.json" || name == "pack.json" {
+            let bytes = std::fs::read(&path).expect("read pinned embedded node input");
+            let expected = if name == "manifest.json" {
+                &manifest_sha
+            } else {
+                &pack_sha
+            };
+            assert_eq!(
+                &format!("{:x}", Sha256::digest(bytes)),
+                expected,
+                "embedded node input digest mismatch"
+            );
+        }
+        source.push_str(&format!(
+            "({name:?}, include_bytes!({:?}) as &[u8]),\n",
+            path.to_string_lossy()
+        ));
+    }
+    source.push_str("];\n");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("embedded_node.rs");
+    std::fs::write(out, source).expect("write embedded node index");
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=LFG_UI_DIST");
     println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_ONNX_DIR");
     println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_ONNX_SHA256");
+    for name in [
+        "LFG_EMBEDDED_NODE_DIR",
+        "LFG_EMBEDDED_NODE_MANIFEST_SHA256",
+        "LFG_EMBEDDED_NODE_PACK",
+        "LFG_EMBEDDED_NODE_PACK_SHA256",
+        "LFG_EMBEDDED_NODE_SNAPSHOT",
+        "LFG_EMBEDDED_NODE_RUNTIME",
+        "LFG_EMBEDDED_NODE_CONFIG",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
     if std::env::var_os("CARGO_FEATURE_EMBEDDED_UI").is_some() {
         embed_ui();
     }
     if std::env::var_os("CARGO_FEATURE_EMBEDDED_ONNX").is_some() {
         embed_onnx();
+    }
+    if std::env::var_os("CARGO_FEATURE_EMBEDDED_NODE").is_some() {
+        embed_node();
     }
 }

@@ -9,6 +9,7 @@ rust-version.workspace = true
 embedded-ui = []
 onnx-shadow = ["dep:tract", "dep:tokenizers"]
 embedded-onnx = ["onnx-shadow"]
+embedded-node = ["onnx-shadow"]
 
 [[bin]]
 name = "lfg-server"
