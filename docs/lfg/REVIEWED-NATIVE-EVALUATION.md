@@ -61,12 +61,15 @@ latency, memory, quantization and release checks remain necessary. Low or absent
 support makes any metric correspondingly weak; no support threshold is
 automatically treated as sufficient.
 
-The current audit reads the declared test records before training to verify the
+The legacy complete-plan audit reads the declared test records before training to verify the
 plan. The training code does not feed them to the model, but this process does
 not enforce a blinded test or prevent an operator from inspecting them. Project
 and family separation are declarations and normalized exact-text checks; they
 cannot detect every related conversation or paraphrase. Independent holdout
 selection and access control remain necessary.
+The newer development-only plan avoids selecting a test workspace during
+training, but this evaluator rejects it until a separately controlled final
+holdout evaluator is implemented. See [development-only assembly](CORPUS-REVIEW.md#development-only-assembly).
 
 On 2026-10-31 the tool rejected the actual local review workspace before
 inference because its training records have no current approvals. No report was

@@ -17,6 +17,7 @@ import evaluate
 import train
 
 PLAN_SCHEMA = "lfg.encoder-corpus-plan.v1"
+DEVELOPMENT_PLAN_SCHEMA = "lfg.encoder-development-corpus-plan.v2"
 REVIEW_SCHEMA = "lfg.encoder-review.v1"
 SPLITS = ("train", "validation", "test")
 
@@ -79,11 +80,15 @@ def approved(item: dict[str, Any] | None, digest: str) -> bool:
 def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     raw_plan = plan_path.read_bytes()
     plan = json.loads(raw_plan)
-    if not isinstance(plan, dict) or plan.get("schema_version") != PLAN_SCHEMA:
+    if not isinstance(plan, dict) or plan.get("schema_version") not in (PLAN_SCHEMA, DEVELOPMENT_PLAN_SCHEMA):
         raise ValueError("unsupported corpus plan")
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("corpus plan requires sources")
+    development = plan["schema_version"] == DEVELOPMENT_PLAN_SCHEMA
+    if development and any(not isinstance(source, dict) or source.get("split") not in ("train", "validation")
+                           for source in sources):
+        raise ValueError("development plans permit only train and validation sources")
     taxonomy, taxonomy_hash = evaluate.load_taxonomy(resolve(plan_path.parent, plan.get("taxonomy")))
     ledger_path = None if plan.get("review_ledger") is None else resolve(plan_path.parent, plan["review_ledger"])
     ledger, ledger_hash = read_ledger(ledger_path)
@@ -165,6 +170,9 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
               "duplicate_within_split": duplicate_within_split,
               "project_separation": "declared_projects_and_groups_disjoint", "approval_is_attestation": True,
               "promotion_eligible": False}
+    if development:
+        report.update(schema_version="lfg.encoder-development-corpus-audit.v2",
+                      scope="development", holdout_assessment="not_performed")
     return report, queue
 
 
@@ -175,7 +183,8 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
         raise ValueError("audited training requires a review ledger")
     if report["duplicate_within_split"]:
         raise ValueError("audited training rejects duplicate normalized text within a split")
-    for split in SPLITS:
+    required_splits = ("train", "validation") if report.get("scope") == "development" else SPLITS
+    for split in required_splits:
         counts = report["counts"][split]
         if counts.get("examples", 0) == 0:
             raise ValueError(f"audited training requires a nonempty {split} partition")

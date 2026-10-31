@@ -3,9 +3,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import combine_reviewed_workspaces as combine
 import corpus_audit
+import evaluate_reviewed_native
 import review_corpus
 import train
 
@@ -114,6 +116,26 @@ class CombineReviewedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'each split needs'):
             combine.run(self.workspaces, self.root / 'combined')
         self.assertFalse((self.root / 'combined').exists())
+
+    def test_development_assembly_excludes_test_and_does_not_open_a_test_workspace(self):
+        for workspace in self.workspaces[:2]:
+            self.approve(workspace)
+        with patch.object(review_corpus, 'load_workspace', side_effect=AssertionError('source opened')):
+            with self.assertRaisesRegex(ValueError, 'only train and validation'):
+                combine.run(self.workspaces, None, scope='development')
+        output = self.root / 'development'
+        result = combine.run(self.workspaces[:2], output, scope='development')
+        self.assertEqual(result['scope'], 'development')
+        self.assertEqual(result['holdout_assessment'], 'not_performed')
+        plan = json.loads((output / 'plan.json').read_bytes())
+        self.assertEqual(plan['schema_version'], corpus_audit.DEVELOPMENT_PLAN_SCHEMA)
+        self.assertEqual({source['split'] for source in plan['sources']}, {'train', 'validation'})
+        records, _ = train.load_dataset(output / 'training.jsonl')
+        report, validation = corpus_audit.load_reviewed_validation(records, output / 'plan.json')
+        self.assertEqual(report['scope'], 'development')
+        self.assertEqual([row['id'] for row in validation], ['id-1'])
+        with self.assertRaisesRegex(ValueError, 'separate controlled holdout evaluator'):
+            evaluate_reviewed_native.audited_test(output / 'plan.json', output / 'training.jsonl', {})
 
 
 if __name__ == '__main__':
