@@ -103,7 +103,7 @@ def load_ledger(queue: Path, snapshot: Path, ledger: Path) -> tuple[list[dict], 
     raw = ledger.read_bytes()
     value = json.loads(raw)
     if (not isinstance(value, dict) or set(value) != {'schemaVersion', 'queueSha256', 'snapshotSha256', 'records'}
-            or value['schemaVersion'] != 'lfg.node-review-ledger.v1' or value['queueSha256'] != queue_sha
+            or value['schemaVersion'] not in ('lfg.node-review-ledger.v1', 'lfg.node-review-ledger.v2') or value['queueSha256'] != queue_sha
             or value['snapshotSha256'] != snapshot_sha or not isinstance(value['records'], list)):
         raise ValueError('ledger is invalid or queue/snapshot changed')
     by_id = {identity(item): item for item in items}
@@ -117,7 +117,11 @@ def load_ledger(queue: Path, snapshot: Path, ledger: Path) -> tuple[list[dict], 
                 raise ValueError('pending records cannot contain decisions')
         elif row.get('decision') == 'approved':
             fields = {'itemSha256', 'decision', 'reviewer', 'reviewedAt', 'choice', 'project', 'projectGroup', 'family', 'split', 'attested'}
-            if (set(row) != fields or row['attested'] is not True or row['choice'] not in by_id[row['itemSha256']]['options']
+            guide = row.get('guideSha256')
+            if (set(row) not in (fields, fields | {'guideSha256'})
+                    or ('guideSha256' in row and value['schemaVersion'] != 'lfg.node-review-ledger.v2')
+                    or ('guideSha256' in row and (not isinstance(guide, str) or not HEX.fullmatch(guide)))
+                    or row['attested'] is not True or row['choice'] not in by_id[row['itemSha256']]['options']
                     or row['split'] not in SPLITS or not all(nonempty(row[k]) for k in ('reviewer', 'project', 'projectGroup', 'family'))):
                 raise ValueError('invalid approved review')
         elif row.get('decision') == 'rejected':
@@ -147,6 +151,9 @@ def decide(args: argparse.Namespace) -> dict:
         raise ValueError('reviewer is required')
     if args.decision == 'approved' and (not all(nonempty(getattr(args, key)) for key in ('project', 'project_group', 'family', 'choice')) or args.split not in SPLITS):
         raise ValueError('approval requires choice, project, project group, family and split')
+    guide_sha = getattr(args, 'guide_sha256', None)
+    if guide_sha is not None and (args.decision != 'approved' or not isinstance(guide_sha, str) or not HEX.fullmatch(guide_sha)):
+        raise ValueError('guide digest is valid only for an approval and must be a SHA-256')
     if args.decision == 'rejected' and any(getattr(args, key) is not None for key in ('project', 'project_group', 'family', 'choice', 'split')):
         raise ValueError('rejection must not assign a choice or split')
     lock = args.ledger.with_name(args.ledger.name + '.lock')
@@ -163,6 +170,9 @@ def decide(args: argparse.Namespace) -> dict:
         row.update(decision=args.decision, reviewer=args.reviewer, reviewedAt=dt.datetime.now(dt.timezone.utc).isoformat(), attested=True)
         if args.decision == 'approved':
             row.update(choice=args.choice, project=args.project, projectGroup=args.project_group, family=args.family, split=args.split)
+            if guide_sha is not None:
+                ledger['schemaVersion'] = 'lfg.node-review-ledger.v2'
+                row['guideSha256'] = guide_sha
         if args.ledger.read_bytes() != original:
             raise ValueError('ledger changed during review')
         load_queue(args.queue, args.snapshot)
@@ -308,6 +318,7 @@ def main() -> None:
             for flag in ('reviewer', 'choice', 'project', 'project-group', 'family'):
                 command.add_argument('--' + flag, required=(flag == 'reviewer'))
             command.add_argument('--split', choices=SPLITS)
+            command.add_argument('--guide-sha256')
             command.add_argument('--attest', action='store_true')
     for name in ('audit', 'export'):
         command = sub.add_parser(name)

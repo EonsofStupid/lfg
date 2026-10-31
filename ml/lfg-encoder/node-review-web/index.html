@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LFG · Node review</title>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/node.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">LFG / LOCAL NODE REVIEW</p><h1>Review the choice</h1>
+        <p>Check the request, source, choice definitions and project separation before recording a decision.</p></div>
+      <div class="status" id="summary" aria-live="polite">Connecting…</div>
+    </header>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="review" hidden>
+      <div class="meta"><span id="position"></span><span id="node"></span><span id="record-id"></span></div>
+      <div class="grid">
+        <article class="panel">
+          <h2>Request</h2><textarea id="request" aria-label="Request to review" readonly spellcheck="false"></textarea>
+          <h3>Source and provenance</h3><pre id="source" class="source"></pre>
+          <p class="hint">A matching file and text do not prove authorship, permission, completeness or privacy. Check the original context separately.</p>
+        </article>
+        <article class="panel">
+          <h2 id="question">Choice</h2><p id="guide-notice" class="hint"></p>
+          <div id="choices"></div>
+          <div class="fields">
+            <label>Project <input id="project" type="text" maxlength="500"></label>
+            <label>Related project group <input id="group" type="text" maxlength="500"></label>
+            <label>Related request family <input id="family" type="text" maxlength="500"></label>
+            <label>Predetermined split <select id="split"><option value="">Select a split</option>
+              <option value="train">Train</option><option value="validation">Validation</option><option value="test">Test</option></select></label>
+          </div>
+          <p class="hint">Project and family may be populated from a matching source; verify them. The group and split are never guessed. Use the predetermined separation plan.</p>
+          <label class="attest"><input type="checkbox" id="attest"> I checked the source, context, privacy and choice, or I am rejecting this item.</label>
+          <div class="actions"><button id="skip" type="button" class="secondary">Skip</button>
+            <button id="reject" type="button" class="danger">Reject</button>
+            <button id="approve" type="button" class="primary">Approve</button></div>
+        </article>
+      </div>
+    </section>
+    <section id="empty" class="panel" hidden><h2 id="empty-title">No more items at this position</h2>
+      <button type="button" id="restart" class="secondary">Start again</button>
+      <button type="button" id="skip-blocked" class="secondary" hidden>Skip this item</button></section>
+    <footer>Local review only · A guide and approval are declarations · No model is qualified by this screen</footer>
+  </main>
+</body>
+</html>
