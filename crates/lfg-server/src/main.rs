@@ -33,6 +33,13 @@ enum Command {
         #[arg(long)]
         runtime_config: PathBuf,
     },
+    /// Run the binary's pinned, unpromoted embedded ONNX artifact for offline comparison.
+    #[cfg(feature = "embedded-onnx")]
+    EmbeddedOnnxPredict {
+        /// Override the bundled runtime limits with a local configuration file.
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+    },
     LfgBench {
         #[arg(long)]
         iterations: Option<usize>,
@@ -55,6 +62,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             manifest_sha256,
             runtime_config,
         } => onnx_predict::run(&artifact, &manifest_sha256, &runtime_config)?,
+        #[cfg(feature = "embedded-onnx")]
+        Command::EmbeddedOnnxPredict { runtime_config } => {
+            onnx_predict::run_embedded(runtime_config.as_deref())?
+        }
         Command::LfgBench {
             iterations,
             prompt_file,

@@ -1,6 +1,7 @@
 //! Experimental offline inference only. This path cannot promote or route work.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
     io::{self, BufRead, Read, Write},
@@ -13,6 +14,37 @@ use sha2::{Digest, Sha256};
 use tract::prelude::*;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[cfg(feature = "embedded-onnx")]
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_onnx.rs"));
+}
+
+enum ArtifactSource<'a> {
+    Directory(&'a Path),
+    #[cfg(feature = "embedded-onnx")]
+    Embedded,
+}
+
+impl<'a> ArtifactSource<'a> {
+    fn read(&self, name: &str, limit: u64) -> Result<Cow<'a, [u8]>> {
+        match self {
+            Self::Directory(root) => Ok(Cow::Owned(bounded_file(&root.join(name), limit)?)),
+            #[cfg(feature = "embedded-onnx")]
+            Self::Embedded => {
+                let bytes = embedded::FILES
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, bytes)| *bytes)
+                    .ok_or("embedded artifact file missing")?;
+                if bytes.len() as u64 > limit {
+                    return Err("embedded artifact exceeds configured limit".into());
+                }
+                Ok(Cow::Borrowed(bytes))
+            }
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -105,7 +137,12 @@ fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn checked_file(root: &Path, name: &str, limit: u64, manifest: &Artifact) -> Result<Vec<u8>> {
+fn checked_file<'a>(
+    source: &ArtifactSource<'a>,
+    name: &str,
+    limit: u64,
+    manifest: &Artifact,
+) -> Result<Cow<'a, [u8]>> {
     let expected = manifest
         .files_sha256
         .get(name)
@@ -113,7 +150,7 @@ fn checked_file(root: &Path, name: &str, limit: u64, manifest: &Artifact) -> Res
     if !valid_digest(expected) {
         return Err("invalid artifact digest".into());
     }
-    let bytes = bounded_file(&root.join(name), limit)?;
+    let bytes = source.read(name, limit)?;
     if hash(&bytes) != *expected {
         return Err("artifact digest mismatch".into());
     }
@@ -130,7 +167,11 @@ fn labels(values: &[String]) -> Result<BTreeSet<String>> {
 
 fn load_config(path: &Path) -> Result<(RuntimeConfig, String)> {
     let bytes = std::fs::read(path)?;
-    let config: RuntimeConfig = serde_json::from_slice(&bytes)?;
+    parse_config(&bytes)
+}
+
+fn parse_config(bytes: &[u8]) -> Result<(RuntimeConfig, String)> {
+    let config: RuntimeConfig = serde_json::from_slice(bytes)?;
     if config.schema_version != "lfg.onnx-runtime.v1"
         || config.revision.trim().is_empty()
         || config.cpu_threads != 1
@@ -144,15 +185,43 @@ fn load_config(path: &Path) -> Result<(RuntimeConfig, String)> {
     {
         return Err("invalid or unsupported ONNX runtime configuration".into());
     }
-    Ok((config, hash(&bytes)))
+    Ok((config, hash(bytes)))
 }
 
 pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<()> {
+    let (config, config_hash) = load_config(config_path)?;
+    run_source(
+        ArtifactSource::Directory(root),
+        expected_manifest,
+        config,
+        config_hash,
+    )
+}
+
+#[cfg(feature = "embedded-onnx")]
+pub fn run_embedded(config_path: Option<&Path>) -> Result<()> {
+    let (config, config_hash) = match config_path {
+        Some(path) => load_config(path)?,
+        None => parse_config(include_bytes!("../config/onnx-runtime.example.json"))?,
+    };
+    run_source(
+        ArtifactSource::Embedded,
+        embedded::MANIFEST_SHA256,
+        config,
+        config_hash,
+    )
+}
+
+fn run_source(
+    source: ArtifactSource<'_>,
+    expected_manifest: &str,
+    config: RuntimeConfig,
+    config_hash: String,
+) -> Result<()> {
     if !valid_digest(expected_manifest) {
         return Err("expected manifest SHA-256 must be lowercase hexadecimal".into());
     }
-    let (config, config_hash) = load_config(config_path)?;
-    let manifest_bytes = bounded_file(&root.join("manifest.json"), config.max_manifest_bytes)?;
+    let manifest_bytes = source.read("manifest.json", config.max_manifest_bytes)?;
     if hash(&manifest_bytes) != expected_manifest {
         return Err("manifest digest mismatch".into());
     }
@@ -176,8 +245,12 @@ pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<(
     {
         return Err("unsupported ONNX inputs".into());
     }
-    let tokenizer_bytes =
-        checked_file(root, "tokenizer.json", config.max_metadata_bytes, &artifact)?;
+    let tokenizer_bytes = checked_file(
+        &source,
+        "tokenizer.json",
+        config.max_metadata_bytes,
+        &artifact,
+    )?;
     let tokenizer_json: Value = serde_json::from_slice(&tokenizer_bytes)?;
     let truncation = &tokenizer_json["truncation"];
     let padding = &tokenizer_json["padding"];
@@ -202,7 +275,7 @@ pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<(
     let tokenizer =
         tokenizers::Tokenizer::from_bytes(&tokenizer_bytes).map_err(|e| e.to_string())?;
     let model_labels: Vec<String> = serde_json::from_slice(&checked_file(
-        root,
+        &source,
         "labels.json",
         config.max_metadata_bytes,
         &artifact,
@@ -212,7 +285,7 @@ pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<(
         return Err("model label count is invalid".into());
     }
     let prediction_bytes = checked_file(
-        root,
+        &source,
         "prediction-config.json",
         config.max_metadata_bytes,
         &artifact,
@@ -234,7 +307,12 @@ pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<(
     {
         return Err("invalid prediction configuration".into());
     }
-    let taxonomy_bytes = checked_file(root, "taxonomy.json", config.max_metadata_bytes, &artifact)?;
+    let taxonomy_bytes = checked_file(
+        &source,
+        "taxonomy.json",
+        config.max_metadata_bytes,
+        &artifact,
+    )?;
     if hash(&taxonomy_bytes) != artifact.taxonomy_sha256 {
         return Err("taxonomy identity differs from manifest".into());
     }
@@ -262,7 +340,7 @@ pub fn run(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<(
     {
         return Err("invalid or incompatible taxonomy".into());
     }
-    let model_bytes = checked_file(root, "model.onnx", config.max_model_bytes, &artifact)?;
+    let model_bytes = checked_file(&source, "model.onnx", config.max_model_bytes, &artifact)?;
     // Loading from a buffer provides no model directory; tract rejects external tensor references.
     let mut model = tract::onnx()?.load_buffer(&model_bytes)?;
     if model.input_count()? != artifact.inputs.len() || model.output_count()? != 1 {
@@ -423,7 +501,15 @@ mod tests {
             taxonomy_sha256: String::new(),
             files_sha256: BTreeMap::from([("tokenizer.json".into(), hash(b"original"))]),
         };
-        assert!(checked_file(dir.path(), "tokenizer.json", 100, &artifact).is_err());
+        assert!(
+            checked_file(
+                &ArtifactSource::Directory(dir.path()),
+                "tokenizer.json",
+                100,
+                &artifact
+            )
+            .is_err()
+        );
         assert!(bounded_file(&file, 1).is_err());
     }
 }
