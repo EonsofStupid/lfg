@@ -88,6 +88,8 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     ledger_path = None if plan.get("review_ledger") is None else resolve(plan_path.parent, plan["review_ledger"])
     ledger, ledger_hash = read_ledger(ledger_path)
     partitions: dict[str, str] = {}
+    groups: dict[str, str] = {}
+    group_partitions: dict[str, str] = {}
     ids: set[str] = set()
     families: dict[str, str] = {}
     texts: dict[str, str] = {}
@@ -104,11 +106,20 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             raise ValueError("source requires a project and valid split")
         if project in partitions and partitions[project] != split:
             raise ValueError("a project appears in more than one split")
+        group = source.get("project_group", project)
+        if not isinstance(group, str) or not group.strip():
+            raise ValueError("project_group must be a nonempty string")
+        if project in groups and groups[project] != group:
+            raise ValueError("a project has inconsistent project groups")
+        if group in group_partitions and group_partitions[group] != split:
+            raise ValueError("a project group appears in more than one split")
+        groups[project] = group
+        group_partitions[group] = split
         partitions[project] = split
         rows, digest = train.load_dataset(resolve(plan_path.parent, source.get("path")))
         if not rows:
             raise ValueError("source dataset is empty")
-        source_digests.append({"project": project, "split": split, "sha256": digest, "records": len(rows)})
+        source_digests.append({"project": project, "project_group": group, "split": split, "sha256": digest, "records": len(rows)})
         for row in rows:
             identifier = row["id"]
             if not isinstance(identifier, str) or not identifier.strip() or identifier in ids:
@@ -151,7 +162,7 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
               "label_support": {split: {field: dict(sorted(values.items())) for field, values in fields.items()}
                                 for split, fields in coverage.items()},
               "duplicate_within_split": duplicate_within_split,
-              "project_separation": "declared_projects_disjoint", "approval_is_attestation": True,
+              "project_separation": "declared_projects_and_groups_disjoint", "approval_is_attestation": True,
               "promotion_eligible": False}
     return report, queue
 
