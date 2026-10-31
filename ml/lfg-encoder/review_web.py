@@ -156,7 +156,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
-            if not isinstance(value, dict) or set(value) != {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}:
+            required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
+            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions'}):
                 raise ValueError('invalid decision')
             decision = value['decision']
             if decision not in ('approved', 'rejected') or value['confirmation'] != ('APPROVE' if decision == 'approved' else 'REJECT'):
@@ -167,7 +168,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if decision == 'approved' and not isinstance(labels, dict):
                 raise ValueError('label groups are required')
             review_corpus.record_decision(self.server.workspace, value['id'], self.server.reviewer,
-                                          decision, value['annotation_sha256'], labels)
+                                          decision, value['annotation_sha256'], labels,
+                                          value.get('redactions'), self.server.config['max_prompt_bytes'])
             self.json_reply(200, {'saved': True, 'decision': decision})
         except (OSError, ValueError, KeyError, TypeError, UnicodeError, socket.timeout) as error:
             self.json_reply(400, {'error': str(error)})

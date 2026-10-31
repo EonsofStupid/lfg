@@ -105,6 +105,18 @@ class ReviewWebTests(unittest.TestCase):
         self.assertIsNone(json.loads(data)['item'])
         self.assertNotIn(b'fixture</script>', data)
 
+    def test_redaction_is_applied_only_after_explicit_approval(self):
+        _, _, data = self.request('GET', '/api/item?offset=0')
+        item = json.loads(data)['item']
+        decision = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                    'decision': 'approved', 'confirmation': 'APPROVE',
+                    'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                    'redactions': [{'start': 8, 'end': 15, 'replacement': '[removed]'}]}
+        self.assertEqual(self.request('POST', '/api/decision', body=decision, origin=self.server.origin)[0], 200)
+        row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(row['text'], '<script>[removed]</script>')
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['approved'], 1)
+
     def test_changed_pending_record_is_flagged_and_cannot_be_approved(self):
         source = self.workspace / 'source-0000.jsonl'
         row = json.loads(source.read_text(encoding='utf-8'))

@@ -133,8 +133,29 @@ def find_row(workspace: Path, plan: dict[str, Any], identifier: str) -> tuple[Pa
     raise ValueError('review record not found')
 
 
+def apply_redactions(text: str, operations: list[dict[str, Any]]) -> str:
+    """Apply reviewer-supplied replacements to ranges in the evolving text."""
+    if not isinstance(operations, list):
+        raise ValueError('redactions must be a list')
+    for operation in operations:
+        if (not isinstance(operation, dict) or set(operation) != {'start', 'end', 'replacement'}
+                or type(operation['start']) is not int or type(operation['end']) is not int
+                or not isinstance(operation['replacement'], str)
+                or not 0 <= operation['start'] < operation['end'] <= len(text)):
+            raise ValueError('invalid redaction range')
+        start, end = operation['start'], operation['end']
+        if text[start:end] == operation['replacement']:
+            raise ValueError('redaction must change the selected text')
+        text = text[:start] + operation['replacement'] + text[end:]
+    if not text.strip():
+        raise ValueError('redacted request must not be empty')
+    return text
+
+
 def record_decision(workspace: Path, identifier: str, reviewer: str, decision: str,
-                    expected_digest: str, proposed: dict[str, list[str]] | None = None) -> None:
+                    expected_digest: str, proposed: dict[str, list[str]] | None = None,
+                    redactions: list[dict[str, Any]] | None = None,
+                    max_result_bytes: int | None = None) -> None:
     if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
         raise ValueError('reviewer must be a nonempty single-line identifier')
     if decision not in ('approved', 'rejected'):
@@ -152,6 +173,28 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
     if not row['verified'] and item['annotation_sha256'] != current_digest:
         raise ValueError('pending record changed; reinitialize review')
     changed = dict(row)
+    if redactions is not None and (decision != 'approved' or not isinstance(redactions, list)):
+        raise ValueError('redactions require an approved record')
+    if redactions:
+        result = apply_redactions(row['text'], redactions)
+        if max_result_bytes is not None and len(result.encode('utf-8')) > max_result_bytes:
+            raise ValueError('redacted request exceeds configured display limit')
+        result_key = audit.text_key(result)
+        for candidate_source in plan['sources']:
+            candidate_rows, _ = train.load_dataset(private_path(workspace, candidate_source['path']), allow_unlabeled_review=True)
+            if any(candidate['id'] != identifier and audit.text_key(candidate['text']) == result_key
+                   for candidate in candidate_rows):
+                raise ValueError('redacted request duplicates another workspace record')
+        previous = row.get('review_transforms', [])
+        if not isinstance(previous, list):
+            raise ValueError('invalid prior review transformations')
+        changed['text'] = result
+        changed['review_transforms'] = [*previous, {
+            'schema_version': 'lfg.review-redaction.v1',
+            'before_sha256': hashlib.sha256(row['text'].encode('utf-8')).hexdigest(),
+            'after_sha256': hashlib.sha256(result.encode('utf-8')).hexdigest(),
+            'operations': redactions,
+        }]
     if decision == 'approved' and row.get('labels_pending') and proposed is None:
         raise ValueError('unlabeled records require explicitly supplied labels')
     if proposed is not None:
