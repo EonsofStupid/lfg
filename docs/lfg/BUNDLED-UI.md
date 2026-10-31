@@ -73,3 +73,36 @@ dependencies, supported builds for every platform, or learned-model CPU
 inference. Those remain release qualification work. Without `/Brepro`, two
 otherwise matching local builds differed in a debug identifier, so ordinary
 builds should not be assumed byte-reproducible.
+
+For a repeatable same-machine Windows baseline build, choose a full committed
+revision and a **new** output directory, then run:
+
+```powershell
+.\scripts\build-windows-baseline.ps1 -Commit FULL_COMMIT_SHA -OutputDir NEW_DIRECTORY -Jobs 2
+```
+
+The command archives that exact commit, extracts it into two separate source
+directories, performs offline `npm ci` and UI builds, and builds two locked
+release executables in separate target directories. It uses static CRT,
+`/Brepro`, and path remapping, then compares the UI file hashes and executable
+hashes. It writes `build-report.json` and retains both builds; it refuses an
+existing output directory. It requires the selected Node, npm, Rust and MSVC
+toolchain and complete dependency caches. It records tool versions but does not
+attest the compiler, operating system, caches or upstream package publishers;
+package-manager offline mode is not a network sandbox for build scripts.
+It builds the deterministic baseline with the UI, not a trained model.
+The command was also run end to end with an output path containing spaces; its
+two executables matched each other and the digest reported below. npm warned
+that one package's install script was not approved; the offline UI builds
+still completed, but that warning is part of the observed environment.
+
+On 2026-10-31, two offline builds of commit
+`3e2c8fb294f20cfb17aeacddc9b1bc45053ae56f` in separate source and target paths
+produced identical five-file UI outputs and 8,305,152-byte executables with
+SHA-256 `0e66479251ad7a14b8fcce304f891e31a572b542bc30c71ee7e049f715be341a`.
+The machine used rustc 1.98.1, Node 24.21.0 and npm 11.19.0. A copied binary
+matched the LFG kernel golden and served the embedded index, JavaScript and
+developer statistics endpoint from a separate local working directory with a
+restricted environment. Its inspected import table listed Windows system DLLs,
+not an MSVC runtime or ONNX Runtime DLL. This is not a clean-machine test,
+an independent toolchain build, a signed release, or evidence of model quality.
