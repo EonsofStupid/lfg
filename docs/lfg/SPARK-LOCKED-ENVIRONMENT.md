@@ -82,6 +82,16 @@ optional `test_training_collation_runtime.py` check also passed on that locked
 environment. This establishes batch mechanics for these inputs, not model
 accuracy, training repeatability or capacity at production sequence lengths.
 
+In the same locked Transformers environment, an isolated CPU fixture test
+showed that the former schedule could finish before the first evaluation
+interval: a one-step run with a 100-step interval saved a checkpoint but had
+no evaluation event or selected best checkpoint. With the final-evaluation
+callback, the checked-in runtime test exercised a one-step run, a final step
+between intervals and a final step on an interval. Each evaluated the final
+checkpoint and selected it when its fixture validation loss was best. The test
+used a tiny fixture model and labels, not project data; it does not establish
+accuracy or reproduce a real GPU training run.
+
 Re-run the probe with the copied scripts and selected files in the isolated
 directory, changing paths and settings as appropriate:
 

@@ -220,10 +220,31 @@ class DatasetGateTests(unittest.TestCase):
             return kwargs
         expected_tokenizer = tokenizer
         trainer = train.make_trainer(object(), object(), train_data, validation_data,
-                                     tokenizer, make_trainer, make_collator)
+                                     tokenizer, make_trainer, make_collator, object)
         self.assertIs(trainer["data_collator"], collator)
         self.assertIs(trainer["train_dataset"], train_data)
         self.assertIs(trainer["eval_dataset"], validation_data)
+
+    def test_final_step_requests_evaluation_and_checkpoint(self):
+        callback = train.make_final_evaluation_callback(object)
+        control = SimpleNamespace(should_evaluate=False, should_save=False)
+        state = SimpleNamespace(global_step=2, max_steps=3)
+        callback.on_step_end(None, state, control)
+        self.assertFalse(control.should_evaluate)
+        self.assertFalse(control.should_save)
+        state.global_step = 3
+        callback.on_step_end(None, state, control)
+        self.assertTrue(control.should_evaluate)
+        self.assertTrue(control.should_save)
+
+    def test_training_result_requires_finite_selected_validation_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = SimpleNamespace(best_model_checkpoint=directory, best_metric=0.5)
+            train.validate_selected_checkpoint(state)
+            for checkpoint, metric in ((None, 0.5), (str(Path(directory) / "missing"), 0.5),
+                                       (directory, None), (directory, float("nan")), (directory, float("inf"))):
+                with self.subTest(checkpoint=checkpoint, metric=metric), self.assertRaisesRegex(ValueError, "validation loss"):
+                    train.validate_selected_checkpoint(SimpleNamespace(best_model_checkpoint=checkpoint, best_metric=metric))
 
     def test_reviewed_training_requires_both_environment_and_model_inputs(self):
         train.validate_input_options(True, None, None, None, [])
