@@ -6,10 +6,11 @@ an optional developer UI, connect to supported AI tools, and integrate with
 cloud services when the user configures them. Running locally must not require
 an account, cloud connectivity, RRFlow, SWAG, a GPU, or a model download.
 
-This is the target, not a statement that a distributable self-contained bundle,
-hosted authentication, cloud integration, or model editor exists today. The
-current server and UI are built separately; the server serves UI assets from a
-filesystem directory. The classifier is rule-based. Training is experimental.
+This is the target, not a statement that a fully qualified self-contained
+distribution, hosted authentication, cloud integration, or model editor exists
+today. An optional build feature embeds the separately built UI into the server;
+see [bundled UI builds](BUNDLED-UI.md) for evidence and limits. The classifier
+is rule-based. Training is experimental.
 
 ## Developer UI
 

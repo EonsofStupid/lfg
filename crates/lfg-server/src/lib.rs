@@ -26,6 +26,8 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 mod dev_stats;
+#[cfg(feature = "embedded-ui")]
+mod embedded_ui;
 use dev_stats::{DevStats, Operation};
 
 #[derive(Clone)]
@@ -281,6 +283,11 @@ pub fn router_with_ui(state: AppState, ui_directory: impl AsRef<std::path::Path>
                 ui_directory.join("index.html"),
             )),
     )
+}
+
+#[cfg(feature = "embedded-ui")]
+pub fn router_with_embedded_ui(state: AppState) -> Router {
+    router(state).fallback(embedded_ui::serve)
 }
 
 async fn health() -> Json<HealthResponse> {

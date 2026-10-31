@@ -1,0 +1,6 @@
+{
+  "schema_version": "lfg.encoder-evaluation-taxonomy.v1",
+  "intents": ["respond.general", "build.software", "verify.outcome", "research.web", "create.image", "evaluate.semantic"],
+  "capabilities": ["text.generate", "filesystem.write", "test.execute", "web.access", "image.generate", "evaluation.grade"],
+  "risks": ["sensitive-data"]
+}

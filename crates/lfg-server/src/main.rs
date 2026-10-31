@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
+mod baseline_predict;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "lfg-server",
@@ -17,6 +19,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
+    BaselinePredict,
     LfgBench {
         #[arg(long)]
         iterations: Option<usize>,
@@ -32,6 +36,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::BaselinePredict => baseline_predict::run()?,
         Command::LfgBench {
             iterations,
             prompt_file,
@@ -117,14 +122,21 @@ async fn serve(bind: Option<SocketAddr>) -> Result<(), Box<dyn std::error::Error
     let state_root = env::var_os("LFG_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir().join("lfg"));
-    let ui_directory = env::var_os("MASTER_CLYFFY_UI_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/master-clyffy-web/dist")
-        });
     let state = AppState::persistent(state_root.join("signals.jsonl"))?;
     let bind = bind.unwrap_or_else(|| state.operations().default_listen_address());
-    let app: Router = router_with_ui(state, ui_directory);
+    let external_ui = env::var_os("MASTER_CLYFFY_UI_DIR").map(PathBuf::from);
+    #[cfg(feature = "embedded-ui")]
+    let app: Router = match external_ui {
+        Some(directory) => router_with_ui(state, directory),
+        None => lfg_server::router_with_embedded_ui(state),
+    };
+    #[cfg(not(feature = "embedded-ui"))]
+    let app: Router = router_with_ui(
+        state,
+        external_ui.unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/master-clyffy-web/dist")
+        }),
+    );
     let listener = TcpListener::bind(bind).await?;
     println!("lfg-server listening on http://{bind}");
     axum::serve(listener, app).await?;
