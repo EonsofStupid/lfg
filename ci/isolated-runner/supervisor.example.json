@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.isolated-runner-supervisor.v1",
+  "repository": "OWNER/REPOSITORY",
+  "runner_label": "lfg-checked-merge",
+  "runner_group_id": 1,
+  "image": "lfg-isolated-actions-runner:local",
+  "cpus": 4,
+  "memory_mib": 8192,
+  "pids_limit": 512,
+  "cargo_jobs": 2,
+  "retry_seconds": 15
+}
