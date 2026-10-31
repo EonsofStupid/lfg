@@ -1,0 +1,6 @@
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.fields label { display: grid; gap: 6px; color: #b1c0b7; font-size: .85rem; }
+.fields input, .fields select { width: 100%; border: 1px solid #465760; border-radius: 8px; background: #10191c; color: #ecf1eb; padding: 10px; font: inherit; }
+.fields input:focus-visible, .fields select:focus-visible { outline: 3px solid #d3f5a7; outline-offset: 3px; }
+button:disabled { opacity: .42; cursor: not-allowed; }
+@media (max-width: 600px) { .fields { grid-template-columns: 1fr; } }

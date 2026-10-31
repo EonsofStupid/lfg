@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "lfg.node-review-web-config.v1",
+  "maxRequestBytes": 65536,
+  "maxPromptBytes": 65536,
+  "maxQueueBytes": 16777216,
+  "maxLedgerBytes": 16777216,
+  "maxGuideBytes": 1048576,
+  "maxSourceBytes": 16777216,
+  "requestTimeoutSeconds": 10
+}

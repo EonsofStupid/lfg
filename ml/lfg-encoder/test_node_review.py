@@ -110,6 +110,21 @@ class NodeReviewTests(unittest.TestCase):
         self.assertIn('projectGroup', report['conflicts'])
         self.assertFalse(report['admissionEligible'])
 
+    def test_guide_bound_decision_upgrades_ledger_without_losing_older_decisions(self):
+        self.decision(0, 'chat', 'train')
+        self.run_cli('decide', *self.paths(), '--item-sha256', self.items[1]['itemSha256'],
+                     '--decision', 'approved', '--reviewer', 'fixture-reviewer', '--choice', 'tool_call',
+                     '--project', 'train', '--project-group', 'train', '--family', 'family-1',
+                     '--split', 'train', '--guide-sha256', 'a' * 64, '--attest')
+        value = json.loads(self.ledger.read_bytes())
+        self.assertEqual(value['schemaVersion'], 'lfg.node-review-ledger.v2')
+        self.assertNotIn('guideSha256', value['records'][0])
+        self.assertEqual(value['records'][1]['guideSha256'], 'a' * 64)
+        self.assertEqual(len(self.run_cli('list', *self.paths())), 7)
+        value['schemaVersion'] = 'lfg.node-review-ledger.v1'
+        self.ledger.write_text(json.dumps(value), encoding='utf-8')
+        self.run_cli('list', *self.paths(), success=False)
+
     def test_development_policy_admits_only_train_and_validation(self):
         for i, split in enumerate(('train', 'validation')):
             self.decision(i * 2, 'chat', split)
