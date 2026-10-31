@@ -81,6 +81,12 @@ struct PreparedQuestion {
 }
 
 impl Catalog {
+    pub(crate) fn has_binding(&self, binding: &str) -> bool {
+        self.banks
+            .iter()
+            .flat_map(|bank| &bank.questions)
+            .any(|question| question.binding.as_deref() == Some(binding))
+    }
     pub fn parse(text: &str) -> Result<Self, String> {
         let catalog: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
         let mut bank_ids = BTreeSet::new();

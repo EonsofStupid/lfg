@@ -24,6 +24,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Collect configured local project evidence and prepare authored boundary questions.
+    BoundaryProject {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Classify with the experimental deterministic LFG kernel.
     Classify {
         prompt: String,
@@ -159,6 +166,10 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::BoundaryProject { root, config } => {
+            let text = std::fs::read_to_string(config)?;
+            println!("{}", lfg_server::attune_local_project(&root, &text)?);
+        }
         Command::Classify {
             prompt,
             snapshot,
