@@ -69,6 +69,28 @@ class CorpusAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "normalized text"):
             corpus_audit.audit(self.root / "plan.json")
 
+    def test_related_projects_must_stay_in_the_same_split(self):
+        for source in self.plan["sources"]:
+            source["project_group"] = "shared-product"
+        self.write()
+        with self.assertRaisesRegex(ValueError, "project group appears in more than one split"):
+            corpus_audit.audit(self.root / "plan.json")
+        self.plan["sources"][1]["split"] = "train"
+        self.write()
+        report, _ = corpus_audit.audit(self.root / "plan.json")
+        self.assertEqual([source["project_group"] for source in report["sources"]], ["shared-product", "shared-product"])
+        self.plan["sources"][1]["project"] = "alpha"
+        self.plan["sources"][1]["project_group"] = "different-group"
+        self.write()
+        with self.assertRaisesRegex(ValueError, "inconsistent project groups"):
+            corpus_audit.audit(self.root / "plan.json")
+
+    def test_project_group_rejects_empty_value(self):
+        self.plan["sources"][0]["project_group"] = " "
+        self.write()
+        with self.assertRaisesRegex(ValueError, "project_group must be"):
+            corpus_audit.audit(self.root / "plan.json")
+
     def test_rejects_provenance_and_taxonomy_mismatch(self):
         self.rows[1]["source"]["project"] = "wrong"
         self.write()

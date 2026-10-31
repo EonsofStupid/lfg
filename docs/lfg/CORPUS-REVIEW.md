@@ -14,6 +14,13 @@ starts with no sources. When copying it elsewhere, update the taxonomy path as
 well. Use an ignored, access-controlled location for plans, datasets, review
 queues and training snapshots that refer to private project material.
 
+Sources can declare a `project_group` to keep related repositories or versions
+of the same product in one split. It defaults to the declared project name;
+every source for one project must use the same group. The audit rejects a group
+that appears in multiple splits and records the effective group for each source.
+Groups are declarations: omitted or incorrect relationships are not discovered
+automatically and cannot establish independence.
+
 The audit checks unique example IDs, source-project declarations, taxonomy
 membership, project and family separation, and normalized exact-text overlap
 across splits. It reports within-split exact duplicates and draft label support.
@@ -155,6 +162,16 @@ the holdout and relationships before inspecting or labeling the remaining
 records, then have a human review authorized examples under the labeling guide.
 The four skipped messages need separate format inspection. A separate diverse,
 reviewed training corpus is still required.
+
+A second local checkout, `D:/dev/dev-and-sort/makers (2)/makers`, at commit
+`ee9831d27407258865ff3676ed8f702e2770e6ff`, contains 19 strictly extracted
+checkpoint prompts in one recorded session, with one exact repetition. Its
+Git-ignored private inventory is `dataset/private/makers-secondary-inventory.ee9831d2.jsonl`.
+The two inventories have no shared prompt commit, exact prompt hash, or session
+hash, and their reachable histories have no shared commit. Both package files
+nevertheless identify the same Makers Impulse product. Treat them as related
+and use the same project group until their lineage and data relationships are
+reviewed; different repository names or hashes are not proof of independence.
 
 Run the inventory without writing prompt text:
 
