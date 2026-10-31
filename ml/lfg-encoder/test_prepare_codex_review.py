@@ -1,5 +1,7 @@
 import json
 import http.client
+import hashlib
+import os
 import secrets
 import tempfile
 import threading
@@ -132,6 +134,40 @@ class PrepareSessionReviewTests(unittest.TestCase):
         self.assignments.write_text(json.dumps(assignments), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'duplicate crosses'):
             self.run_prepare()
+        self.assertFalse((self.root / 'prepared').exists())
+
+    def make_reference(self, name, text, *, project='other', group='other-group', family='other-family', split='test'):
+        row = {'id': name, 'text': text, 'family': family, 'verified': False, 'intents': ['build'],
+               'capabilities': [], 'risks': [], 'source': {'project': project}}
+        (self.root / f'{name}.jsonl').write_text(json.dumps(row) + '\n', encoding='utf-8')
+        path = self.root / f'{name}-plan.json'
+        path.write_text(json.dumps({'schema_version': corpus_audit.PLAN_SCHEMA, 'taxonomy': 'taxonomy.json',
+                                    'review_ledger': None, 'sources': [{'path': f'{name}.jsonl',
+                                    'project': project, 'project_group': group, 'split': split}]}), encoding='utf-8')
+        return path
+
+    def test_reference_plans_exclude_overlap_and_bind_output_manifest(self):
+        first = self.make_reference('first', 'FIXTURE  A')
+        second = self.make_reference('second', 'unrelated fixture')
+        output = self.root / 'prepared'
+        result = prepare.prepare(self.inventory, self.assignments, self.taxonomy, output, 100000, 100000, [first, second])
+        self.assertEqual(result['reference_overlap_excluded'], 2)
+        self.assertEqual(result['pending_review'], 1)
+        self.assertEqual(result['reference_plan_count'], 2)
+        manifest = json.loads((output / 'preparation-manifest.json').read_text())
+        self.assertEqual(len(manifest['reference_audit_sha256']), 2)
+        self.assertEqual(manifest['workspace_sha256']['source-0000.jsonl'],
+                         hashlib.sha256((output / 'workspace' / 'source-0000.jsonl').read_bytes()).hexdigest())
+        self.assertEqual(review.status(output / 'workspace')['decisions']['approved'], 0)
+
+    def test_reference_plan_rejects_cross_split_group_and_session(self):
+        reference = self.make_reference('reference', 'unrelated fixture', group='related')
+        with self.assertRaisesRegex(ValueError, 'group crosses'):
+            prepare.prepare(self.inventory, self.assignments, self.taxonomy, self.root / 'prepared', 100000, 100000, [reference])
+        family = 'codex-session-' + hashlib.sha256(os.fsencode(str(self.session))).hexdigest()
+        reference = self.make_reference('reference', 'unrelated fixture', family=family)
+        with self.assertRaisesRegex(ValueError, 'session crosses'):
+            prepare.prepare(self.inventory, self.assignments, self.taxonomy, self.root / 'prepared', 100000, 100000, [reference])
         self.assertFalse((self.root / 'prepared').exists())
 
 

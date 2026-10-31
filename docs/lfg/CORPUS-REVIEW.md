@@ -273,7 +273,14 @@ Preparation verifies the selected source prefixes in batches, excludes
 normalized exact-text duplicates within a split, and refuses duplicate text or
 a declared project group across splits. It conservatively groups messages from
 the same session into a family; relationships across sessions still require
-human investigation. The output includes raw, potentially sensitive text and
+human investigation. Supply `--reference-plan PLAN` once per existing plan to
+exclude normalized text already present there and reject project, group or
+session assignments that cross a reference split. The reference plans and the
+new workspace must use the same taxonomy. Only supplied reference material is
+checked; this cannot detect paraphrases, related sessions, undisclosed prior
+exposure or an incorrectly declared group. A private preparation manifest binds
+the inventory, assignments, reference audits, source verifier, preparation code,
+limits and generated workspace file digests. The output includes raw, potentially sensitive text and
 source paths in both the draft files and the review workspace; keep the whole
 directory private. If output creation is interrupted, inspect the partial
 directory and choose a new path. Missing labels are represented as
@@ -312,6 +319,28 @@ material overlaps earlier exploratory use. It is review material, not evidence
 of a trained or qualified model. A loopback server smoke check displayed the
 unlabeled state for one record from each project without recording a decision;
 the training loader rejected the pending-label file.
+
+An additional metadata-only session inventory across selected local projects
+found 170 candidate messages in 11 sessions. OneManWho had 36 messages from
+one session; Shippin/Vaultix directories contain related product histories and
+must not be assumed independent merely because their paths differ. Using the
+current Codex training draft, Makers test draft and earlier LFG/DevPulse
+development plan as references, one normalized duplicate was excluded and a
+private OneManWho validation candidate workspace was created at
+`dataset/private/onemanwho-validation-review-draft.v1/workspace`. Its 35
+records have no labels or approvals. Two preparations with the same inputs on
+this machine yielded identical manifests and workspace files.
+
+A temporary combined audit of the three separate workspaces found 226 train,
+35 validation and 785 test records, no normalized exact-text overlap or
+within-split duplicates, and zero approvals. These assignments remain
+provisional. In particular, the entire validation candidate comes from one
+session and cannot demonstrate broad or statistically reliable validation;
+shared context, source rights, sensitive information, label support and true
+project independence still need review. The combined audit does not create a
+training plan or qualify a model. The metadata-only inventory is stored at
+`dataset/private/additional-project-session-inventory.v1.jsonl` and its explicit
+candidate assignment at `dataset/private/onemanwho-validation-assignments.v1.json`.
 
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
