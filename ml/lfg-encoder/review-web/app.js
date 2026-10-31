@@ -1,5 +1,8 @@
 (() => {
-  const token = location.hash.slice(1);
+  const [token, ...fragmentParts] = location.hash.slice(1).split('&');
+  const fragment = new URLSearchParams(fragmentParts.join('&'));
+  const requested = fragment.getAll('record');
+  const initialRecord = requested.length === 1 && requested[0].trim() ? requested[0] : null;
   history.replaceState(null, '', location.pathname);
   const el = id => document.getElementById(id);
   let offset = 0;
@@ -239,5 +242,8 @@
   el('approve').addEventListener('click', () => handle(decide('approved')));
   el('reject').addEventListener('click', () => handle(decide('rejected')));
   if (!token) el('notice').textContent = 'Open the complete local URL printed by the review server.';
-  else handle(refresh());
+  else {
+    if (initialRecord) el('find-id').value = initialRecord;
+    handle(refresh(initialRecord));
+  }
 })();

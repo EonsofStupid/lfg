@@ -320,6 +320,11 @@ access to the local workspace for that server session; do not share it. The
 page removes the token from the address bar after loading and uses no external
 resources. The server rejects non-loopback host headers, requests without the
 token, and cross-origin decisions. Responses are marked `no-store`.
+To open a particular pending record, append `&record=URL_ENCODED_RECORD_ID` to
+the printed URL's fragment. The page removes both the token and record ID from
+the address bar after reading them. This is a local bearer link: anyone who
+obtains it while the server is running can access the review workspace. The
+reviewer name is a local assertion, not authenticated identity.
 
 The browser displays one pending request, source and proposed labels at a time.
 It displays the application rule and boundary for each label from the
