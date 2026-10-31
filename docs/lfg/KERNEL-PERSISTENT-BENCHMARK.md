@@ -59,3 +59,37 @@ aggregate reports remain under the Git-ignored private dataset directory as
 `kernel-persistent-real-local.v2.run1.json` through `run3.json`. Earlier v1
 reports used Windows-converted benchmark source files; the v2 run uses the
 LF-pinned source bytes committed with the benchmark.
+
+## Expanded real-request diagnostic, 2026-10-31
+
+The newer deterministic-only Windows binary described in
+[Bundled UI builds](BUNDLED-UI.md) was measured on the 422 unreviewed training
+requests prepared for [node review](NODE-REVIEW-AND-ADMISSION.md). The requests
+span 12 declared projects and 17 session families; 189 are from RRFlow. The
+selection defers the 83 triage-flagged and four oversize records, and omits the
+11 requests already in the earlier node queue. It is a convenience development
+sample, not a representative or independently reviewed quality corpus. The
+reserved holdout was not used.
+
+Three sequential runs each used one warmup and ten measured repetitions of
+the same 422 requests (4,220 measurements per run). At the selected
+`operation` node, 31 distinct requests selected an option and 391 escalated;
+those are runtime states, not verified classifications.
+
+| Measurement | Range across three runs |
+| --- | ---: |
+| Median request latency | 0.0356–0.0485 ms |
+| p95 request latency | 0.0719–0.0917 ms |
+| p99 request latency | 0.0989–0.1266 ms |
+| Process cycles, total for 4,220 measured requests | 152.3–211.7 million |
+| Working set after measurement | 7.75–8.27 MiB |
+| Time to first response | 26.7–214.7 ms |
+
+The timings include local stdio, scheduling and serialization. The machine was
+not isolated, the first-response range was large, and repeated requests are not
+independent samples. Windows CPU-time counters were coarse (31.25–62.5 ms
+total per run). These observations do not establish quality, concurrent
+throughput, learned-model performance or a release threshold. Aggregate
+reports are kept under the private node-review directory as
+`baseline-422-run-1.json` through `baseline-422-run-3.json`; no request text
+or per-request results are included in those reports.
