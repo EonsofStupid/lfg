@@ -108,6 +108,27 @@ files and local machine must be trusted: the path checks are not a sandbox
 against concurrent filesystem changes. No automatic stack detection or
 judgment of question answers is performed.
 
+The LFG UI's **Inspector → Boundary questions** panel displays the authored
+catalog, grouped by bank. To inspect a project preview there, save the output
+from the configured command to a private JSON file, for example:
+
+```powershell
+lfg-server boundary-project --root D:\localdev\devlabs\rrflow --config crates/lfg-server/config/project-attunement.rrflow.example.json |
+  Set-Content -Encoding utf8 target/rrflow-question-preview-private.json
+```
+
+Choose that file in the panel. The browser reads it locally and checks that it
+names the currently served catalog and known question IDs; it displays question
+text from the catalog, not from the imported file. The panel distinguishes
+supplied artifacts, missing artifacts, and questions omitted from the preview.
+Source paths and hashes shown are claims in the imported file, not independently
+verified evidence. The file can contain complete selected texts and project
+paths, and remains the operator's responsibility to store privately. Import is
+limited by the server's configured `maxHttpBodyBytes` value, even though the
+file is not sent to the server. Rerun and reimport to reflect project changes.
+This manual preview workflow does not connect RRFlow or another app directly,
+persist review decisions, answer the questions, or create training examples.
+
 On 2026-10-31, the example ran against the local LFG checkout: it collected
 12 Rust source paths for `module inventory` and 45 paths for `file tree`,
 supplying those bindings to three of the 120 selected core and Rust questions.

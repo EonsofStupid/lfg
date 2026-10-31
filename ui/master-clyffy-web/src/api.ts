@@ -1,4 +1,4 @@
-import type { AppContext, ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
+import type { AppContext, BoundaryCatalog, ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -49,6 +49,8 @@ export const getGraph = (workflowId: string, throughSequence?: number) =>
 export const getDevStats = () => requestJSON<DevStats>('/api/lfg/dev-stats')
 
 export const getAppContext = () => requestJSON<AppContext>('/api/lfg/intake/app-context')
+
+export const getBoundaryCatalog = () => requestJSON<BoundaryCatalog>('/api/lfg/boundaries/questions')
 
 export const previewIntake = (facts: Record<string, unknown>) =>
   requestJSON<IntakePreview>('/api/lfg/intake/preview', {
