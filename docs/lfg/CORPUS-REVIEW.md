@@ -192,11 +192,11 @@ The audit and training scripts are identity-bound inputs to these runs; changing
 their bytes changes the recorded code identities and can prevent resuming or
 evaluating an earlier run. Preserve the exact scripts for existing experiments.
 
-The reviewed trainer accepts the v2 development plan and records its scope;
-the existing final evaluator deliberately rejects it. A separate controlled
-final evaluator that binds a frozen development run to an independently
-committed test set, checks cross-split leakage and runs the native comparison is
-still required. The v1 complete-plan workflow remains available and still reads
+The reviewed trainer accepts the v2 development plan and records its scope.
+The existing complete-plan evaluator rejects it; the separate experimental
+[controlled classifier holdout workflow](REVIEWED-NATIVE-EVALUATION.md#controlled-classifier-holdout)
+can bind it to a separately committed test set after the candidate is frozen.
+The v1 complete-plan workflow remains available and still reads
 test data in its audit, so it does not enforce a blinded holdout.
 
 A read-only status check of the three local development workspaces returned 520

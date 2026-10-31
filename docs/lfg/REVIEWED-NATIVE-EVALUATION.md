@@ -68,8 +68,67 @@ and family separation are declarations and normalized exact-text checks; they
 cannot detect every related conversation or paraphrase. Independent holdout
 selection and access control remain necessary.
 The newer development-only plan avoids selecting a test workspace during
-training, but this evaluator rejects it until a separately controlled final
-holdout evaluator is implemented. See [development-only assembly](CORPUS-REVIEW.md#development-only-assembly).
+training, but this evaluator rejects it. See [development-only assembly](CORPUS-REVIEW.md#development-only-assembly)
+and the separate experimental workflow below.
+
+## Controlled classifier holdout
+
+`evaluate_classifier_holdout.py` separates the custodian's test commitment,
+development candidate freeze, and final test. It uses the same reviewed native
+comparison and model, environment, binary and artifact identity checks as the
+complete-plan evaluator. Reports remain unqualified and contain aggregate
+metrics, not request text or individual predictions. Hashes, counts, project
+names and group names can be sensitive metadata; keep reports private.
+
+1. A holdout custodian exports a genuinely reviewed, **test-only** workspace to a
+   new private directory using `review_corpus.py export`, then commits its plan:
+
+```powershell
+python ml/lfg-encoder/evaluate_classifier_holdout.py commit-holdout `
+  --holdout-plan PRIVATE_TEST_EXPORT/plan.json --output NEW_PRIVATE_COMMITMENT.json
+```
+
+The commitment checks current review attestations, verified flags, duplicate
+normalized text within test, and source identities. Record the resulting
+`output_sha256` independently, and keep test files away from the candidate
+operator. Export includes current approvals only: deciding which records to
+include must be done independently of candidate performance.
+
+2. After a reviewed development run has produced its model and ONNX artifact,
+   freeze it using only its development plan, reviewed training dataset and the
+   commitment. The same native binary compares baseline and candidate on
+   validation examples; the freeze accepts no holdout-plan argument.
+
+```powershell
+python ml/lfg-encoder/evaluate_classifier_holdout.py freeze `
+  --plan PRIVATE_DEVELOPMENT/plan.json --training-dataset PRIVATE_DEVELOPMENT/training.jsonl `
+  --model TRAINED_MODEL_DIR --artifact ONNX_ARTIFACT_DIR --binary LFG_BINARY `
+  --runtime-config NATIVE_RUNTIME_CONFIG.json --config ml/lfg-encoder/benchmark-persistent.v1.json `
+  --mode embedded --commitment NEW_PRIVATE_COMMITMENT.json --commitment-sha256 TRUSTED_COMMITMENT_SHA256 `
+  --output NEW_PRIVATE_FREEZE.json
+```
+
+Use `--mode external` if the binary loads the ONNX artifact from disk. Record
+the resulting freeze digest independently. An optional `--calibration-config`
+is a frozen input and must be identical for test.
+
+3. The final evaluator repeats the same arguments with command `test`, a new
+   output, and `--freeze NEW_PRIVATE_FREEZE.json --freeze-sha256 TRUSTED_FREEZE_SHA256
+   --holdout-plan PRIVATE_TEST_EXPORT/plan.json`. It first reruns and checks the
+   frozen validation comparison before opening the test plan. It then checks
+   committed bytes, identical taxonomy, distinct source files and ledgers,
+   current approvals, and declared project, group, family, ID and normalized
+   exact-text separation across all splits. It rechecks inputs after inference.
+
+These checks do not establish that sources are independent, that a reviewer is
+who they claim, that rights permit use, or that someone could not inspect the
+holdout, change the commitment, or repeat a favorable test. They cannot find all
+related conversations or paraphrases. Keep roles and access separate and record
+digests outside the machine. The code accepts trusted local files and binaries;
+temporary audit files include paths and review metadata. It does not set a
+statistical adequacy threshold, qualify latency or memory, or authorize release.
+The workflow has been exercised with test fixtures and simulated approvals; no
+real reviewed model or holdout has yet completed it.
 
 On 2026-10-31 the tool rejected the actual local review workspace before
 inference because its training records have no current approvals. No report was
