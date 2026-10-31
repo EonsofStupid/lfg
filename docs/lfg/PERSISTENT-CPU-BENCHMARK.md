@@ -137,3 +137,24 @@ measured model responses included 812 complete and 32 truncated tokenizations,
 representing the same 16 over-limit inputs repeated twice. These are local
 resource observations, not quality or release evidence. Build evidence and
 aggregate reports remain in the local private output directories.
+
+## Configurable overflow abstention
+
+Three paired, alternating, sequential runs compared `report` and `abstain`
+policies on the same 422 real, unreviewed training-source requests, with one
+warmup and two measured passes each. Both processes used the same experimental
+embedded model and binary; the configuration digest differs by policy. Each
+run measured 844 requests: `report` predicted all 844, including 32 truncated
+inputs, while `abstain` predicted 812 and abstained on those 32. The 32 are
+16 distinct requests repeated twice. These policies do different work and their
+outputs are not equivalent.
+
+Across the three runs, median latency was 9.51–9.60 ms for `report` and
+8.75–8.95 ms for `abstain`; p95 was 55.52–60.07 ms and 41.01–42.80 ms,
+respectively. Process cycles per measured request were 46.88–48.34 million
+and 38.82–39.96 million. This local measurement includes IPC and tokenization,
+was not isolated, and another Rust test build overlapped the first run. It is
+not a quality comparison or a claim about other workloads. The binary still
+loads the model at startup, and abstention does not analyze the full input.
+The model remains unreviewed and the private-derived binary must not be
+distributed. Aggregate reports and runtime configurations remain private.

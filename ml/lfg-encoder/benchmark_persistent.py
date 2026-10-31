@@ -165,11 +165,11 @@ class Predictor:
         return elapsed, value
 
     def validate_response(self, value: Any, identifier: str, text: str) -> None:
-        if not isinstance(value, dict) or value.get('schema_version') != 'lfg.evaluation-prediction.v1' or \
+        if not isinstance(value, dict) or value.get('schema_version') not in ('lfg.evaluation-prediction.v1', 'lfg.evaluation-abstention.v1') or \
                 value.get('id') != identifier or value.get('input_sha256') != digest(text.encode('utf-8')) or \
                 not isinstance(value.get('model'), dict) or not isinstance(value.get('producer_sha256'), str):
             raise ValueError('prediction response does not match its request')
-        tokenization_status(value)
+        coverage = tokenization_status(value)
         model = value['model']
         if any(not isinstance(model.get(key), str) or not model[key].strip() for key in ('id', 'version')) or \
                 not isinstance(model.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', model['sha256']) or \
@@ -180,6 +180,13 @@ class Predictor:
                len(set(value[field])) != len(value[field])
                for field in ('intents', 'capabilities', 'risks')):
             raise ValueError('prediction response has invalid labels')
+        if value['schema_version'] == 'lfg.evaluation-abstention.v1':
+            if (coverage != 'truncated' or value.get('abstention_reason') != 'token_limit_exceeded'
+                    or any(value[field] for field in ('intents', 'capabilities', 'risks'))
+                    or 'scores' in value):
+                raise ValueError('invalid abstention response')
+        elif 'abstention_reason' in value:
+            raise ValueError('prediction cannot contain an abstention reason')
         if self.model is not None and (value['model'] != self.model or value['producer_sha256'] != self.producer):
             raise ValueError('prediction identity changed during measurement')
         self.model, self.producer = value['model'], value['producer_sha256']
@@ -234,11 +241,13 @@ def run(binary: Path, dataset: Path, config_path: Path, baseline_args: list[str]
         before = {name: benchmark_process.windows_counters(p.process) for name, p in processes.items()}
         samples: dict[str, list[int]] = {'baseline': [], 'candidate': []}
         tokenization = {name: {'complete': 0, 'truncated': 0, 'unknown': 0} for name in processes}
+        outcomes = {name: {'predicted': 0, 'abstained': 0} for name in processes}
         for n in range(config['measured_rounds'] * len(rows)):
             for name in (('baseline', 'candidate') if n % 2 == 0 else ('candidate', 'baseline')):
                 elapsed, value = processes[name].request_prediction(f'measured-{n}', rows[n % len(rows)]['text'])
                 samples[name].append(elapsed)
                 tokenization[name][tokenization_status(value)] += 1
+                outcomes[name]['abstained' if value['schema_version'] == 'lfg.evaluation-abstention.v1' else 'predicted'] += 1
         after = {name: benchmark_process.windows_counters(p.process) for name, p in processes.items()}
         memory_after = {name: memory(p.process) for name, p in processes.items()}
         if any(p.process.poll() is not None for p in processes.values()):
@@ -257,7 +266,8 @@ def run(binary: Path, dataset: Path, config_path: Path, baseline_args: list[str]
                 raise ValueError('process counters moved backwards during measurement')
             results[name] = {'model': predictor.model, 'time_to_first_response_ns': cold[name],
                              'latency': summary(samples[name]), 'measured_counter_delta': delta,
-                             'memory_after': memory_after[name], 'tokenization': tokenization[name]}
+                             'memory_after': memory_after[name], 'tokenization': tokenization[name],
+                             'outcomes': outcomes[name]}
         return {'schema_version': 'lfg.persistent-benchmark.v1', 'promotion_eligible': False,
                 'binary_sha256': binary_hash, 'dataset_sha256': dataset_hash, 'config_sha256': config_hash,
                 'benchmark_sha256': benchmark_hash, 'counter_reader_sha256': counter_reader_hash,

@@ -158,3 +158,19 @@ invented fixture data, and the runs were not interleaved or isolated. This is
 not evidence of model quality, a reliable performance comparison, or a release
 threshold. The private report is stored at
 `ml/lfg-encoder/dataset/private/onnx-shadow-process-comparison.v2.json`.
+
+## Over-limit input policy
+
+The runtime configuration accepts `overflowPolicy`: `report` preserves the
+previous behavior, running inference on the truncated input and reporting its
+coverage; `abstain` skips inference for an input with overflow. Omitted values
+default to `report` for existing configurations. The example configuration
+shows the setting explicitly. The policy is selected per runtime configuration;
+it does not change the model's token limit or provide full-input analysis.
+
+An abstention uses `lfg.evaluation-abstention.v1`, has reason
+`token_limit_exceeded`, empty label arrays and no scores. Clients must validate
+the schema and treat it as an abstention, not as a prediction with no labels.
+The process continues to accept subsequent requests. Reviewed native evaluation
+rejects incomplete input and abstentions; persistent benchmarking counts both
+outcomes separately. Loading and preparing the model still happens at startup.
