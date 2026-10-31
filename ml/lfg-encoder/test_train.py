@@ -160,40 +160,54 @@ class DatasetGateTests(unittest.TestCase):
         train.validate_training_config(config)
         for field, invalid in (("batch_size", 0), ("checkpoint_steps", -1),
                                ("epochs", float("nan")), ("base_model", ""),
-                               ("allow_mismatched_sizes", "true"), ("device", "gpu")):
+                               ("allow_mismatched_sizes", "true"), ("device", "gpu"), ("device", "cpu")):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):
                     train.validate_training_config({**config, field: invalid})
 
     def test_explicit_compute_target_rejects_fallback(self):
-        train.verify_training_device("cpu", "cpu", False)
         train.verify_training_device("cuda", "cuda", True)
-        train.verify_training_device("auto", "cpu", False)
+        train.verify_training_device("auto", "cuda", True)
         with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
             train.verify_training_device("cuda", "cpu", False)
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.verify_training_device("auto", "cpu", False)
         with self.assertRaisesRegex(ValueError, "device mismatch"):
             train.verify_training_device("cuda", "cpu", True)
         with self.assertRaisesRegex(ValueError, "device mismatch"):
-            train.verify_training_device("cpu", "cuda", True)
+            train.verify_training_device("auto", "cpu", True)
+        with self.assertRaisesRegex(ValueError, "invalid requested"):
+            train.verify_training_device("cpu", "cpu", True)
 
     def test_legacy_config_defaults_to_auto_device(self):
         config = train.load_training_config(train.TRAINING_CONFIG)
         del config["device"]
         self.assertEqual(train.parse_training_config(json.dumps(config).encode())["device"], "auto")
 
-    def test_training_arguments_pass_cpu_selection_and_reject_unavailable_cuda(self):
-        args = argparse.Namespace(device="cpu", output=Path("unused"), seed=1, epochs=1,
+    def test_training_arguments_require_cuda_and_never_select_cpu(self):
+        args = argparse.Namespace(device="cuda", output=Path("unused"), seed=1, epochs=1,
                                   batch_size=1, checkpoint_steps=1)
-        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
         captured = {}
         def arguments(**kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(device=SimpleNamespace(type="cpu"))
+            return SimpleNamespace(device=SimpleNamespace(type="cuda"))
         train.make_training_arguments(args, torch, arguments)
-        self.assertIs(captured["use_cpu"], True)
-        args.device = "cuda"
+        self.assertIs(captured["use_cpu"], False)
+        torch.cuda.is_available = lambda: False
         with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
             train.make_training_arguments(args, torch, arguments)
+        args.device = "auto"
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.make_training_arguments(args, torch, arguments)
+        args.device = "cpu"
+        with self.assertRaisesRegex(ValueError, "invalid requested"):
+            train.make_training_arguments(args, torch, arguments)
+        torch.cuda.is_available = lambda: True
+        args.device = "auto"
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.make_training_arguments(
+                args, torch, lambda **kwargs: SimpleNamespace(device=SimpleNamespace(type="cpu")))
 
     def test_reviewed_training_requires_both_environment_and_model_inputs(self):
         train.validate_input_options(True, None, None, None, [])

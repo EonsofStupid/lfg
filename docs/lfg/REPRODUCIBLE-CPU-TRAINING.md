@@ -3,6 +3,8 @@
 This experiment checks repeatability of the existing below-gate run on one
 Windows machine. It does not qualify the model, its unreviewed labels, or a
 release. It does not use or modify the 226 pending review records.
+It describes an earlier trainer revision; the current trainer is GPU-only and
+does not reproduce these CPU runs without restoring that historical revision.
 
 ## Locked training environment
 

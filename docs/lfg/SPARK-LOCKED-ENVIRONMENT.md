@@ -53,11 +53,22 @@ measurement, and the untrained head cannot make qualified predictions.
 
 On 2026-10-31, the trainer's explicit device selection was also checked in the
 locked Spark environment without loading training examples or starting a run.
-With the GB10 visible, `cuda` selected `cuda:0` and `cpu` selected `cpu`; with
-CUDA hidden, an explicit `cuda` request failed before creating its output
-directory. This checks target selection, not a completed training job or GPU
+In the helper version used for that historical check, `cuda` selected `cuda:0`
+and `cpu` selected `cpu`; with CUDA hidden, an explicit `cuda` request failed
+before creating its output directory. That helper check did not establish that
+the full trainer permitted CPU execution. The current trainer is GPU-only and
+rejects CPU configuration for both GPU-present and GPU-absent hosts. This checks
+target selection, not a completed training job or GPU
 memory capacity. The selected target is a configurable run input documented in
 the [trainer instructions](../../ml/lfg-encoder/README.md#checkpointing-and-restart).
+
+A subsequent check on the same Spark exercised the current trainer's device
+selection with the real Transformers `TrainingArguments` in the locked
+environment. With the GB10 visible, both `auto` and `cuda` selected CUDA; with
+`CUDA_VISIBLE_DEVICES=-1`, both were rejected. `cpu` was rejected in both cases.
+The copied trainer had SHA-256
+`da8c06f34e9e83a578072ee75176dfba7e31ffe8f36b4ea76f4f7765ce392ac4`.
+No project examples were transferred and no model training took place.
 
 Re-run the probe with the copied scripts and selected files in the isolated
 directory, changing paths and settings as appropriate:

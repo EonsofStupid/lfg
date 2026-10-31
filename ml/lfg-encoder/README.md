@@ -7,10 +7,10 @@ not write the final CoSTAR packet. Runtime prompts are not collected here. The
 checked-in corpus is intentionally authored synthetic data.
 
 Training is GPU-only. CPU is reserved for the exported ONNX/Rust proof; the
-trainer refuses to fall back to CPU. Unsloth is the default engine, using its
-current `FastModel` sequence-classification path with full fine-tuning. The
-plain Transformers engine is available only as an explicit compatibility
-diagnostic.
+trainer refuses to fall back to CPU. The active reviewed training path uses the
+Transformers `Trainer`. A separately authored GPU prototype remains in the
+source but is not integrated with this path; Unsloth is not currently the
+active training engine.
 
 These experiments support the assessment and routing objective in the root
 [README](../../README.md). The classifier and CPU LLM paths are exploratory;
@@ -106,14 +106,15 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe ml/lfg-encoder/train.py train --model-revision MODEL_COMMIT --output ml/lfg-encoder/artifacts/smoke --allow-below-gate --checkpoint-steps 1
 ```
 
-Training downloads the selected pinned model and can be slow on CPU. The
+Training requires an available CUDA GPU and may download the selected pinned model. The
 six-example run tests plumbing only; its output is ineligible for promotion and
 is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
 The `--allow-below-gate` flag is for development only and allows unverified rows
 into the experiment. Without it, training requires the policy's minimum number
 of verified records and an audited project-separated plan with current review
-attestations for every train, validation, and test example. The input must
+attestations for every included example. A development-only plan includes train
+and validation; the legacy complete plan also includes test. The input must
 exactly match its reviewed train partition and contain no unverified rows. See
 [corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run writes
 the seed, dataset hash, row IDs and family assignments to `split-manifest.json`
@@ -142,12 +143,11 @@ evidence for reproducing an experiment, not a guarantee of bitwise-identical
 GPU results. The manifest and split contain IDs and family names: protect them
 as project data and do not put sensitive information in those fields.
 
-The `device` setting accepts `auto`, `cpu`, or `cuda`; `--device` overrides it.
-For a Spark run use `--device cuda` to require CUDA instead of silently falling
-back to the CPU. `cpu` forces CPU execution even when a GPU is visible. The
-trainer checks the selected device and the model's device, and records the
-requested device, selected device and CUDA availability in the run manifest.
-`auto` retains the library's automatic selection and can select CPU. Device
+The `device` setting accepts `auto` or `cuda`; `--device` overrides it. Both
+require an available CUDA GPU and reject a CPU selection, including when a GPU
+is visible. The trainer checks the selected device and the model's device, and
+records the requested device, selected device and CUDA availability in the run
+manifest. Older configurations selecting `cpu` are rejected. Device
 selection does not prove the selected batch size fits memory or that training
 will succeed. Existing runs whose trainer code or manifest differs remain
 subject to the existing resume check; do not bypass it to resume across changes.
