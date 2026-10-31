@@ -39,17 +39,19 @@ jobs:
       - name: Validate Python scripts syntax
         run: python -m py_compile ml/lfg-encoder/train.py ml/lfg-encoder/distill.py
 
+      - name: Run Python tests
+        run: python -m unittest discover -s ml/lfg-encoder -p 'test_*.py'
+
       - name: Validate classifier dataset
         run: python ml/lfg-encoder/train.py validate
 
       - name: Validate distill CLI
         run: python ml/lfg-encoder/distill.py --help
 
-      - name: Build distill datasets from template
+      - name: Validate a temporary distill template
         run: |
-          python ml/lfg-encoder/distill.py init-template --force
-          python ml/lfg-encoder/distill.py validate-traces --traces ml/lfg-encoder/dataset/teacher-traces.v1.jsonl
-          python ml/lfg-encoder/distill.py build-sft --traces ml/lfg-encoder/dataset/teacher-traces.v1.jsonl
+          python ml/lfg-encoder/distill.py init-template --output "$RUNNER_TEMP/lfg-trace-template.jsonl"
+          python ml/lfg-encoder/distill.py validate-traces --traces "$RUNNER_TEMP/lfg-trace-template.jsonl"
 
   ui:
     runs-on: ubuntu-latest

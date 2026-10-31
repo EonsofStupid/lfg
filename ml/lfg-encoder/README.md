@@ -57,9 +57,17 @@ wheelhouse and local model snapshot manifest. See the [bound training inputs](..
 
 Start with this classifier, which predicts the existing intent, capability, and
 risk labels. The current six synthetic examples are a plumbing check, not a
-representative evaluation set. The `verified` field is an attestation that a
+representative evaluation set; all are marked unverified because no human
+review evidence is recorded for them. The `verified` field is an attestation that a
 human checked the text and all labels; the script counts it but cannot verify
 the review happened. The sample gate alone does not make a model promotion-ready.
+
+The separate `distill.py` utility can validate trace syntax and create a clearly
+marked placeholder template. A `checksPassed` value is a supplied claim, not an
+executed or verified check; the v2 validation report calls it
+`declaredChecksPassed`. `build-sft` is disabled until trace provenance, data-use
+authorization, review evidence and independent split admission are implemented.
+Neither the placeholder nor the classifier fixture is an approved training set.
 
 1. Agree on a versioned label guide: define each label, positive and negative
    examples, and how to handle multiple intents and uncertain cases. Record who
