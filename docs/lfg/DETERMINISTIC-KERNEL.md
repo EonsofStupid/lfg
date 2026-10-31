@@ -25,6 +25,8 @@ constructs the engine once for the batch, rejects duplicate IDs and stops at the
 explicit limit. A nonzero exit means the batch did not complete, even if some
 rows were already emitted. The bundled rules do not echo prompt text, but other
 snapshots can extract text into results; protect input and output accordingly.
+An optional [local journal](KERNEL-CORRECTION-JOURNAL.md) can record observations
+and operator-attested choice corrections; it is not a reviewed training corpus.
 
 Choice combines matching rule weights with integer fixed-point noisy-OR and
 normalizes the resulting option scores. It escalates when nothing matches, the
@@ -80,8 +82,8 @@ was 7,607,808 bytes with SHA-256
 `b252a483ecca5aa834fbae77010a8b9fa2e667fbb667cd6b2f995a4209dd6752`.
 It is a local build smoke check, not a qualified or reproducible release.
 
-The binary snapshot format and compiler, atomic swap, overlays, persistent
-correction journal, trained per-node or embedding extension, model promotion,
+The binary snapshot format and compiler, atomic swap, overlays, integrated
+correction review, trained per-node or embedding extension, model promotion,
 full app/HTTP integration, MCP/RRFlow/SWAG integration, and qualified release
 remain to be built and evaluated. The existing legacy classifier endpoints are
 not backed by this kernel. No project review decisions are created by it.

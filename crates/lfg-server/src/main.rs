@@ -6,7 +6,9 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 mod baseline_predict;
+mod kernel_journal;
 mod kernel_predict;
+use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
 mod onnx_predict;
 
@@ -37,6 +39,66 @@ enum Command {
         snapshot: Option<PathBuf>,
         #[arg(long)]
         max_examples: usize,
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        #[arg(long)]
+        journal_max_bytes: Option<u64>,
+        /// Explicitly retain input text in the local journal for later review.
+        #[arg(long)]
+        capture_text: bool,
+    },
+    /// Verify a local kernel journal and show aggregate counts.
+    KernelJournalStatus {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+    },
+    /// Display one observation and valid snapshot choices for review.
+    KernelJournalShow {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        observation: u64,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Display retained input text if it was explicitly captured.
+        #[arg(long)]
+        include_text: bool,
+    },
+    /// Export captured, corrected observations as pending per-node review candidates.
+    KernelJournalExport {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        output_max_bytes: u64,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
+    /// Append an explicitly attested correction to a prior kernel observation.
+    KernelCorrect {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        observation: u64,
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        choice: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long)]
+        attest: bool,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
     },
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
@@ -86,7 +148,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::KernelPredict {
             snapshot,
             max_examples,
-        } => kernel_predict::run(snapshot, max_examples)?,
+            journal,
+            journal_max_bytes,
+            capture_text,
+        } => kernel_predict::run(
+            snapshot,
+            max_examples,
+            journal,
+            journal_max_bytes,
+            capture_text,
+        )?,
+        Command::KernelJournalStatus {
+            journal,
+            journal_max_bytes,
+        } => {
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            println!("{}", store.status());
+        }
+        Command::KernelJournalShow {
+            journal,
+            journal_max_bytes,
+            observation,
+            snapshot,
+            include_text,
+        } => {
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            println!("{}", store.show(&engine, observation, include_text)?);
+        }
+        Command::KernelJournalExport {
+            journal,
+            journal_max_bytes,
+            output,
+            output_max_bytes,
+            snapshot,
+        } => {
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            println!(
+                "{}",
+                store.export_candidates(&engine, &output, output_max_bytes)?
+            );
+        }
+        Command::KernelCorrect {
+            journal,
+            journal_max_bytes,
+            observation,
+            node,
+            choice,
+            reviewer,
+            attest,
+            snapshot,
+        } => {
+            if !attest {
+                return Err("correction requires explicit --attest".into());
+            }
+            let engine = load_kernel(snapshot)?;
+            let mut store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let sequence = store.correct(&engine, observation, &node, &choice, &reviewer)?;
+            println!(
+                "{}",
+                serde_json::json!({"correctionSequence":sequence,"observationSequence":observation})
+            );
+        }
         Command::BaselinePredict => baseline_predict::run()?,
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxPredict {
