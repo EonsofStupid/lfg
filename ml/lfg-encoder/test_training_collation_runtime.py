@@ -14,7 +14,7 @@ class TrainingCollationRuntimeTests(unittest.TestCase):
     def test_variable_lengths_work_in_training_and_validation_loaders(self):
         import torch
         from datasets import Dataset
-        from transformers import AutoTokenizer, DataCollatorWithPadding, Trainer, TrainingArguments
+        from transformers import AutoTokenizer, DataCollatorWithPadding, Trainer, TrainerCallback, TrainingArguments
 
         tokenizer = AutoTokenizer.from_pretrained(os.environ["LFG_TEST_LOCAL_TOKENIZER"],
                                                   local_files_only=True)
@@ -43,7 +43,7 @@ class TrainingCollationRuntimeTests(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 next(iter(unpadded.get_train_dataloader()))
             padded = train.make_trainer(FixtureModel, args, data, data, tokenizer,
-                                        Trainer, DataCollatorWithPadding)
+                                        Trainer, DataCollatorWithPadding, TrainerCallback)
             for loader in (padded.get_train_dataloader(), padded.get_eval_dataloader()):
                 batch = next(iter(loader))
                 self.assertEqual(list(batch["input_ids"].shape), [2, max(lengths)])

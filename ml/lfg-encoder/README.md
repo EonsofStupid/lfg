@@ -162,7 +162,18 @@ selection does not prove the selected batch size fits memory or that training
 will succeed. Existing runs whose trainer code or manifest differs remain
 subject to the existing resume check; do not bypass it to resume across changes.
 
-Checkpoints are written every configured number of optimizer steps. To resume,
+Checkpoints are evaluated and written every configured number of optimizer
+steps and also at the final step, even when it falls between intervals. The
+active trainer selects among these checkpoints using validation loss; loss is
+not a quality or promotion result. It refuses to export the final model if no
+checkpoint was selected with a finite validation loss. The root
+`trainer_state.json` records the selected checkpoint and evaluation history;
+protect it as experiment metadata. An optional locked-runtime test can be run
+with `LFG_TEST_TRANSFORMERS_RUNTIME=1` and
+`python -m unittest discover -s ml/lfg-encoder -p test_training_schedule_runtime.py`.
+That test uses a fixture model and labels, not project training data.
+
+To resume,
 use the exact same command and add `--resume`; it verifies the existing manifest
 and requires the latest checkpoint's trainer, optimizer, scheduler and RNG
 state. The dataset, code, policy, configuration and recorded environment must be

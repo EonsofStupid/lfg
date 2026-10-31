@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import random
@@ -92,11 +93,28 @@ def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_clas
     return result, cuda_available
 
 
+def make_final_evaluation_callback(callback_base: Any) -> Any:
+    class FinalEvaluationCallback(callback_base):
+        def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+            if state.max_steps > 0 and state.global_step >= state.max_steps:
+                control.should_evaluate = True
+                control.should_save = True
+            return control
+    return FinalEvaluationCallback()
+
+
 def make_trainer(model_init: Any, arguments: Any, train_data: Any, validation_data: Any,
-                 tokenizer: Any, trainer_class: Any, collator_class: Any) -> Any:
-    """Pad each batch to its longest tokenized request, for training and evaluation."""
+                 tokenizer: Any, trainer_class: Any, collator_class: Any, callback_base: Any) -> Any:
+    """Pad both datasets and evaluate the final checkpoint even between intervals."""
     return trainer_class(model_init=model_init, args=arguments, train_dataset=train_data,
-                         eval_dataset=validation_data, data_collator=collator_class(tokenizer=tokenizer))
+                         eval_dataset=validation_data, data_collator=collator_class(tokenizer=tokenizer),
+                         callbacks=[make_final_evaluation_callback(callback_base)])
+
+
+def validate_selected_checkpoint(state: Any) -> None:
+    if (state.best_model_checkpoint is None or not Path(state.best_model_checkpoint).is_dir()
+            or state.best_metric is None or not math.isfinite(state.best_metric)):
+        raise ValueError("training ended without a checkpoint selected by a finite validation loss")
 
 
 def prepare_run(output: Path, manifest: dict[str, Any], resume: bool) -> None:
@@ -356,7 +374,7 @@ def train(args: argparse.Namespace) -> None:
         from sklearn.metrics import f1_score, recall_score
         from sklearn.preprocessing import MultiLabelBinarizer
         from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
-                                  Trainer, TrainingArguments)
+                                  Trainer, TrainerCallback, TrainingArguments)
         from transformers.trainer_utils import get_last_checkpoint
     except ImportError as error:
         raise SystemExit(
@@ -454,10 +472,11 @@ def train(args: argparse.Namespace) -> None:
             problem_type="multi_label_classification", ignore_mismatched_sizes=args.allow_mismatched_sizes,
             local_files_only=bool(model_manifest))
     trainer = make_trainer(model_init, training_arguments, train_data, validation_data,
-                           tokenizer, Trainer, DataCollatorWithPadding)
+                           tokenizer, Trainer, DataCollatorWithPadding, TrainerCallback)
     verify_training_device(args.device, trainer.args.device.type, torch.cuda.is_available())
     verify_training_device(args.device, next(trainer.model.parameters()).device.type, torch.cuda.is_available())
     trainer.train(resume_from_checkpoint=checkpoint)
+    validate_selected_checkpoint(trainer.state)
     check_model_snapshot()
     if verify_payload and training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra,
                                                               verify_payload=True) != environment_evidence:
@@ -465,6 +484,7 @@ def train(args: argparse.Namespace) -> None:
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
     (args.output / "labels.json").write_text(json.dumps(binarizer.classes_.tolist(), indent=2), encoding="utf-8")
+    trainer.save_state()
     print(f"trained experimental model at {args.output}; ONNX export and promotion remain separate gates")
     # The separately authored GPU prototype below has not been integrated with
     # this reviewed training path and must not run after it.
