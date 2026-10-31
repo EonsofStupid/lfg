@@ -98,3 +98,44 @@ Repository history contains more material, but commit counts are not counts of
 valid prompts or independent labeled examples. Representative positive and
 negative security cases, human review, independently held-out projects, and
 assessment of reuse and privacy remain necessary before a serious training run.
+
+### Makers checkpoint inventory
+
+`inventory_checkpoint_prompts.py` scans a pinned local Git commit for Replit
+checkpoint messages with a strictly delimited `User prompt` section. It prints
+aggregate metadata by default. With an explicit `--output`, it exclusively
+creates a JSONL file containing the extracted text, source commit and time,
+text hash, and hashed session identifier. It assigns no labels, approval, or
+split. The output is a source inventory, not the training JSONL schema or a
+claim of verified authorship or outcome. Exact duplicates are flagged, not
+deleted; sessions and related follow-ups can still overlap in ways the scanner
+does not identify. Unrecognized message formats are skipped and their commit
+IDs are listed for review.
+
+On 2026-10-30 the scanner read Makers Impulse at commit
+`f92162507e421c2c9a4cb971329a35c0e095b5c0`: 1,608 reachable commits, 945
+with a prompt marker, 941 strictly extracted, four skipped for format review,
+33 exact repeated texts, and 63 recorded sessions. A new Git-ignored local
+file, `dataset/private/makers-checkpoint-inventory.f9216250.jsonl`, contains
+the unreviewed extracts. Its contents may contain private data or secrets and
+have not been sanitized. Git ignore is not encryption or access control. Do not
+publish or send the file to a remote trainer without reviewing the material and
+its intended use. The 941 records are not independent labeled samples; the
+previous five were already inspected, and the rest have not been reviewed.
+
+The whole Makers project remains a candidate external-project evaluation source;
+do not train or tune against it merely because more text is available. Establish
+the holdout and relationships before inspecting or labeling the remaining
+records, then have a human review authorized examples under the labeling guide.
+The four skipped messages need separate format inspection. A separate diverse,
+reviewed training corpus is still required.
+
+Run the inventory without writing prompt text:
+
+```powershell
+python ml/lfg-encoder/inventory_checkpoint_prompts.py --repo REPO_PATH --revision FULL_COMMIT_SHA --project PROJECT_NAME
+```
+
+Add `--output PRIVATE_NEW_FILE.jsonl` only when a private review copy is needed.
+The destination must not already exist. The scanner reports source and code
+hashes, but those hashes and session identifiers are also sensitive metadata.
