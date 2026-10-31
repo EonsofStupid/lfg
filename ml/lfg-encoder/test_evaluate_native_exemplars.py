@@ -53,6 +53,36 @@ class NativeEvaluationBoundaryTests(unittest.TestCase):
 
 @unittest.skipUnless(ARTIFACT and PACK and BINARY, 'set explicit test-only native artifact, pack and binary paths')
 class NativeEvaluationFixtureTests(unittest.TestCase):
+    def test_native_process_accepts_development_admission_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = Path(ARTIFACT)
+            pack_value = json.loads(Path(PACK).read_bytes())
+            audit = pack_value['admission']
+            audit.update(schemaVersion='lfg.node-admission-report.v2', scope='development',
+                         holdoutAssessment='not_performed')
+            audit['counts'].pop('test', None)
+            audit.get('projectGroups', {}).pop('test', None)
+            pack = root / 'test-only-development-pack.json'
+            pack.write_text(json.dumps(pack_value), encoding='utf-8')
+            texts = ['run command', 'fixture unknown']
+            choices = ['tool_call', 'chat']
+            records = [{'review': {'itemSha256': str(i + 1) * 64, 'split': 'validation', 'choice': choices[i]},
+                        'item': {'text': text, 'inputSha256': sha(text.encode())}}
+                       for i, text in enumerate(texts)]
+            for exemplar in pack_value['exemplars']:
+                records.append({'review': {'itemSha256': exemplar['itemSha256'], 'split': 'train',
+                                           'choice': exemplar['choice']}, 'item': {'text': 'test-only'}})
+            args = argparse.Namespace(input=[], snapshot=SNAPSHOT, policy=POLICY, node='operation',
+                binary=Path(BINARY), artifact=artifact, manifest_sha256=sha((artifact / 'manifest.json').read_bytes()),
+                runtime_config=RUNTIME, pack=pack, pack_sha256=sha(pack.read_bytes()), exemplar_config=CONFIG,
+                max_items=10, max_input_bytes=10000, timeout_seconds=180)
+            with mock.patch.object(evaluate_native_exemplars.node_review, 'audit', return_value=(audit, records)):
+                report = evaluate_native_exemplars.run(args)
+            self.assertTrue(report['candidateProcessObserved'])
+            self.assertEqual(report['admission']['holdoutAssessment'], 'not_performed')
+            self.assertFalse(report['qualificationEstablished'])
+
     def test_actual_native_process_on_simulated_review_records(self):
         snapshot_sha = sha(SNAPSHOT.read_bytes())
         texts = ['run command', 'fixture unknown']

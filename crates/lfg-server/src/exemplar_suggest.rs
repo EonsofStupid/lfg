@@ -136,7 +136,10 @@ impl Pack {
             || pack.encoder_config_sha256 != source.manifest.encoder_config_sha256
             || pack.model["manifest_sha256"].as_str()
                 != Some(source.manifest.source_model_manifest_sha256.as_str())
-            || admission["schemaVersion"] != "lfg.node-admission-report.v1"
+            || !(admission["schemaVersion"] == "lfg.node-admission-report.v1"
+                || (admission["schemaVersion"] == "lfg.node-admission-report.v2"
+                    && admission["scope"] == "development"
+                    && admission["holdoutAssessment"] == "not_performed"))
             || admission["admissionEligible"] != true
             || admission["qualificationEstablished"] != false
             || admission["node"] != pack.node
@@ -600,6 +603,19 @@ mod tests {
         assert!(Pack::parse(&raw, &onnx_embedding::hash(&raw), &config, &source, &engine).is_err());
         value["admission"]["pending"] = json!(0);
         value["admission"]["counts"]["train"]["chat"] = json!(2);
+        let raw = serde_json::to_vec(&value).unwrap();
+        assert!(Pack::parse(&raw, &onnx_embedding::hash(&raw), &config, &source, &engine).is_err());
+    }
+
+    #[test]
+    fn development_admission_requires_explicit_holdout_status() {
+        let (_dir, config, source, engine, mut value) = fixture();
+        value["admission"]["schemaVersion"] = json!("lfg.node-admission-report.v2");
+        value["admission"]["scope"] = json!("development");
+        value["admission"]["holdoutAssessment"] = json!("not_performed");
+        let raw = serde_json::to_vec(&value).unwrap();
+        assert!(Pack::parse(&raw, &onnx_embedding::hash(&raw), &config, &source, &engine).is_ok());
+        value["admission"]["holdoutAssessment"] = json!("passed");
         let raw = serde_json::to_vec(&value).unwrap();
         assert!(Pack::parse(&raw, &onnx_embedding::hash(&raw), &config, &source, &engine).is_err());
     }

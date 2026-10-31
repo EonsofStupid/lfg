@@ -191,31 +191,48 @@ def load_policy(path: Path) -> tuple[dict, str]:
     raw = path.read_bytes()
     policy = json.loads(raw)
     if (not isinstance(policy, dict) or set(policy) != {'schemaVersion', 'minimumPerChoice', 'minimumProjectGroups'}
-            or policy['schemaVersion'] != 'lfg.node-admission-policy.v1'):
+            or policy['schemaVersion'] not in ('lfg.node-admission-policy.v1', 'lfg.node-admission-policy.v2')):
         raise ValueError('invalid node admission policy')
+    required_splits = SPLITS if policy['schemaVersion'].endswith('.v1') else ('train', 'validation')
     for key in ('minimumPerChoice', 'minimumProjectGroups'):
-        if not isinstance(policy[key], dict) or set(policy[key]) != set(SPLITS) or any(type(policy[key][s]) is not int or policy[key][s] < 1 for s in SPLITS):
+        if not isinstance(policy[key], dict) or set(policy[key]) != set(required_splits) or any(type(policy[key][s]) is not int or policy[key][s] < 1 for s in required_splits):
             raise ValueError('policy requires positive thresholds for each split')
     return policy, digest(raw)
 
 
 def audit(inputs: list[list[Path]], snapshot: Path, policy_path: Path, node: str) -> tuple[dict, list[dict]]:
     policy, policy_sha = load_policy(policy_path)
+    development = policy['schemaVersion'] == 'lfg.node-admission-policy.v2'
+    required_splits = ('train', 'validation') if development else SPLITS
+    preflight = []
+    if development:
+        # Check every supplied ledger before reading any queue; a test assignment
+        # indicates a mixed input and must not enter the development audit.
+        for _, ledger_path in inputs:
+            raw = ledger_path.read_bytes()
+            ledger = json.loads(raw)
+            if not isinstance(ledger, dict) or not isinstance(ledger.get('records'), list):
+                raise ValueError('invalid development ledger')
+            if any(isinstance(row, dict) and row.get('split') == 'test' for row in ledger['records']):
+                raise ValueError('development audit cannot accept test-assigned records')
+            preflight.append(digest(raw))
     snapshot_raw = snapshot.read_bytes()
     spec = json.loads(snapshot_raw)
     node_spec = spec.get('nodes', {}).get(node, {})
     if node_spec.get('kind') != 'choice' or not isinstance(node_spec.get('options'), dict) or not node_spec['options']:
         raise ValueError('target node must be a snapshot choice')
     choices = sorted(node_spec['options'])
-    counts = {s: {choice: 0 for choice in choices} for s in SPLITS}
-    groups = {s: set() for s in SPLITS}
+    counts = {s: {choice: 0 for choice in choices} for s in required_splits}
+    groups = {s: set() for s in required_splits}
     relations = {key: {} for key in ('project', 'projectGroup', 'family', 'text', 'request')}
     project_groups, identities = {}, set()
     conflicts = set()
     approved, pending, rejected, records, sources = 0, 0, 0, [], []
-    seen_split_text = {s: set() for s in SPLITS}
-    for queue, ledger_path in inputs:
+    seen_split_text = {s: set() for s in required_splits}
+    for index, (queue, ledger_path) in enumerate(inputs):
         items, ledger, raw_ledger = load_ledger(queue, snapshot, ledger_path)
+        if development and digest(raw_ledger) != preflight[index]:
+            raise ValueError('ledger changed after development preflight')
         by_id = {identity(item): item for item in items}
         sources.append({'queueSha256': ledger['queueSha256'], 'ledgerSha256': digest(raw_ledger)})
         for decision in ledger['records']:
@@ -230,6 +247,8 @@ def audit(inputs: list[list[Path]], snapshot: Path, policy_path: Path, node: str
                 rejected += int(item['node'] == node)
                 continue
             split = decision['split']
+            if split not in required_splits:
+                raise ValueError('development audit cannot accept test-assigned records')
             project_groups.setdefault(decision['project'], set()).add(decision['projectGroup'])
             keys = {'project': decision['project'], 'projectGroup': decision['projectGroup'],
                     'family': decision['family'], 'text': digest(normalized_text(item['text']).encode('utf-8')),
@@ -250,17 +269,19 @@ def audit(inputs: list[list[Path]], snapshot: Path, policy_path: Path, node: str
             conflicts.add(kind)
     if any(len(value) > 1 for value in project_groups.values()):
         conflicts.add('projectGroupAssignment')
-    support_ok = all(counts[s][choice] >= policy['minimumPerChoice'][s] for s in SPLITS for choice in choices)
-    groups_ok = all(len(groups[s]) >= policy['minimumProjectGroups'][s] for s in SPLITS)
+    support_ok = all(counts[s][choice] >= policy['minimumPerChoice'][s] for s in required_splits for choice in choices)
+    groups_ok = all(len(groups[s]) >= policy['minimumProjectGroups'][s] for s in required_splits)
     ready = approved > 0 and pending == 0 and not conflicts and support_ok and groups_ok
-    report = {'schemaVersion': 'lfg.node-admission-report.v1', 'node': node,
+    report = {'schemaVersion': 'lfg.node-admission-report.v2' if development else 'lfg.node-admission-report.v1', 'node': node,
               'snapshotSha256': digest(snapshot_raw), 'policySha256': policy_sha,
               'toolSha256': digest(Path(__file__).read_bytes()), 'pythonVersion': sys.version,
               'unicodeVersion': unicodedata.unidata_version, 'sources': sources,
               'pending': pending, 'approved': approved, 'rejected': rejected, 'counts': counts,
-              'projectGroups': {s: len(groups[s]) for s in SPLITS}, 'conflicts': sorted(conflicts),
+              'projectGroups': {s: len(groups[s]) for s in required_splits}, 'conflicts': sorted(conflicts),
               'supportGatePassed': support_ok, 'projectGroupGatePassed': groups_ok,
               'admissionEligible': ready, 'qualificationEstablished': False}
+    if development:
+        report.update(scope='development', holdoutAssessment='not_performed')
     if snapshot.read_bytes() != snapshot_raw or digest(policy_path.read_bytes()) != policy_sha:
         raise ValueError('snapshot or policy changed during audit')
     for (queue, ledger_path), source in zip(inputs, sources, strict=True):

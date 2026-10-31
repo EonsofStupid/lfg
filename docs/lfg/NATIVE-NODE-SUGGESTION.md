@@ -78,8 +78,9 @@ python ml/lfg-encoder/evaluate_native_exemplars.py `
 Repeat `--input` for all relevant queue/ledger pairs. The runner checks file
 hashes and outputs aggregate per-node metrics without request text or vectors.
 It observes that the selected process ran; it does not authenticate the binary,
-reviewer, source rights or data independence. The current admission audit reads
-test records to check support, so this is not a blinded final evaluation.
+reviewer, source rights or data independence. The v1 audit reads supplied test
+records; the v2 development audit can omit them but does not establish a blinded
+or independent holdout. This is not a final evaluation.
 Performance, calibration and an independent holdout still require separate
 qualification.
 

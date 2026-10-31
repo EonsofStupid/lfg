@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent
 SCRIPT = ROOT / 'node_review.py'
 SNAPSHOT = ROOT.parent.parent / 'crates/lfg-core/config/kernel-core.v1.json'
 POLICY = ROOT / 'node-admission-policy.example.json'
+DEVELOPMENT_POLICY = ROOT / 'node-development-policy.example.json'
 
 
 def sha(data):
@@ -108,6 +109,37 @@ class NodeReviewTests(unittest.TestCase):
         report = self.audit()
         self.assertIn('projectGroup', report['conflicts'])
         self.assertFalse(report['admissionEligible'])
+
+    def test_development_policy_admits_only_train_and_validation(self):
+        for i, split in enumerate(('train', 'validation')):
+            self.decision(i * 2, 'chat', split)
+            self.decision(i * 2 + 1, 'tool_call', split)
+        for index in range(4, 7):
+            self.run_cli('decide', *self.paths(), '--item-sha256', self.items[index]['itemSha256'],
+                         '--decision', 'rejected', '--reviewer', 'fixture-reviewer', '--attest')
+        args = ['--input', str(self.queue), str(self.ledger), '--snapshot', str(SNAPSHOT),
+                '--policy', str(DEVELOPMENT_POLICY), '--node', 'operation']
+        report = self.run_cli('audit', *args)
+        self.assertTrue(report['admissionEligible'])
+        self.assertFalse(report['qualificationEstablished'])
+        self.assertEqual(report['schemaVersion'], 'lfg.node-admission-report.v2')
+        self.assertEqual(report['holdoutAssessment'], 'not_performed')
+        self.assertEqual(set(report['counts']), {'train', 'validation'})
+        output = self.root / 'development.json'
+        self.run_cli('export', *args, '--output', str(output))
+        exported = json.loads(output.read_text(encoding='utf-8'))
+        self.assertEqual((len(exported['train']), len(exported['validation'])), (2, 2))
+
+    def test_development_preflight_rejects_test_assignment_before_opening_queue(self):
+        self.decision(0, 'chat', 'test')
+        missing_queue = self.root / 'must-not-be-opened.jsonl'
+        empty_ledger = self.root / 'first-ledger.json'
+        empty_ledger.write_text(json.dumps({'records': []}), encoding='utf-8')
+        error = self.run_cli('audit', '--input', str(missing_queue), str(empty_ledger),
+                             '--input', str(self.queue), str(self.ledger),
+                             '--snapshot', str(SNAPSHOT), '--policy', str(DEVELOPMENT_POLICY),
+                             '--node', 'operation', success=False)
+        self.assertIn('cannot accept test-assigned records', error)
 
     def test_cross_node_split_leakage_is_rejected(self):
         lines = self.queue.read_text(encoding='utf-8').splitlines()

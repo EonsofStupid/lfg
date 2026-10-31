@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 SNAPSHOT = REPO / 'crates/lfg-core/config/kernel-core.v1.json'
 POLICY = ROOT / 'node-admission-policy.example.json'
+DEVELOPMENT_POLICY = ROOT / 'node-development-policy.example.json'
 CONFIG = ROOT / 'node-exemplar-config.example.json'
 
 
@@ -146,6 +147,31 @@ class ExemplarWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'byte limit'):
                 node_exemplars.build(self.args)
         self.assertFalse(self.pack.exists())
+
+    def test_development_pack_and_validation_do_not_require_test_records(self):
+        rows = self.rows[:4]
+        self.queue.write_bytes(b''.join(node_review.encode(row) + b'\n' for row in rows))
+        self.ledger.unlink()
+        node_review.init(self.queue, SNAPSHOT, self.ledger)
+        for i, row in enumerate(rows):
+            split = 'train' if i < 2 else 'validation'
+            node_review.decide(argparse.Namespace(attest=True, reviewer='test-only', decision='approved',
+                choice='chat' if i % 2 == 0 else 'tool_call', project=split, project_group=split,
+                family=f'fixture-{i}', split=split, queue=self.queue, snapshot=SNAPSHOT, ledger=self.ledger,
+                item_sha256=node_review.identity(row)))
+        self.args.policy = DEVELOPMENT_POLICY
+        with mock.patch.object(node_exemplars, 'Encoder', FakeEncoder), \
+             mock.patch.object(node_exemplars, 'model_proof', return_value={'fixture': 'model'}), \
+             mock.patch.object(node_exemplars, 'environment', return_value={'fixture': 'environment'}):
+            built = node_exemplars.build(self.args)
+            pack = json.loads(self.pack.read_bytes())
+            self.assertEqual(pack['admission']['schemaVersion'], 'lfg.node-admission-report.v2')
+            self.assertEqual(pack['admission']['holdoutAssessment'], 'not_performed')
+            self.assertNotIn('test', pack['admission']['counts'])
+            self.args.pack = self.pack
+            self.args.pack_sha256 = built['packSha256']
+            self.args.output = self.root / 'development-predictions.jsonl'
+            self.assertEqual(node_exemplars.predict(self.args)['items'], 2)
 
 
 if __name__ == '__main__':
