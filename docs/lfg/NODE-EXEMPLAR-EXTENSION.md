@@ -13,6 +13,10 @@ configuration also bounds batch size, CPU threads, embedding dimensions, item
 counts, pack bytes and prediction bytes. The selected model must be suitable for
 this pooling method; the tool does not determine that automatically.
 
+An experimental [native encoder probe](NODE-ENCODER-NATIVE-PROBE.md) can run
+the frozen encoder in the Rust binary and compare its vectors with Python. It
+does not yet load this exemplar pack or make node suggestions.
+
 After the [review and admission gate](NODE-REVIEW-AND-ADMISSION.md) passes,
 `build` encodes only approved **training** records into a new private exemplar
 pack. It stores item digests, labels and vectors, not raw requests. Vectors and
