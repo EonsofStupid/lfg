@@ -25,11 +25,13 @@ use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
+mod boundary_questions;
 mod dev_stats;
 mod devpulse_context;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 mod intake;
+mod project_attunement;
 use dev_stats::{DevStats, Operation};
 
 #[derive(Clone)]
@@ -41,6 +43,7 @@ pub struct AppState {
     operations: OperationsConfig,
     dev_stats: Arc<DevStats>,
     intake: Arc<intake::Template>,
+    boundary_questions: Arc<boundary_questions::Catalog>,
     devpulse_context: Option<Arc<devpulse_context::Source>>,
 }
 
@@ -63,6 +66,7 @@ impl AppState {
             operations,
             dev_stats,
             intake: Arc::new(intake::Template::bundled()),
+            boundary_questions: Arc::new(boundary_questions::Catalog::bundled()),
             devpulse_context: None,
         }
     }
@@ -86,6 +90,9 @@ impl AppState {
         })?;
         let intake = configured_intake().map_err(|error| {
             RuntimeError::InvalidRequest(format!("intake configuration: {error}"))
+        })?;
+        let boundary_questions = configured_boundary_questions().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("boundary question configuration: {error}"))
         })?;
         let devpulse_context = std::env::var_os("LFG_DEVPULSE_CONTEXT_CONFIG")
             .map(|path| devpulse_context::Source::from_path(std::path::Path::new(&path)))
@@ -113,6 +120,7 @@ impl AppState {
             operations,
             dev_stats,
             intake: Arc::new(intake),
+            boundary_questions: Arc::new(boundary_questions),
             devpulse_context,
         })
     }
@@ -125,6 +133,25 @@ fn configured_intake() -> Result<intake::Template, String> {
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
     intake::Template::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn configured_boundary_questions() -> Result<boundary_questions::Catalog, String> {
+    let Some(path) = std::env::var_os("LFG_BOUNDARY_QUESTION_BANK") else {
+        return Ok(boundary_questions::Catalog::bundled());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    boundary_questions::Catalog::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+/// Prepare the authored boundary questions from explicitly configured local project evidence.
+pub fn attune_local_project(root: &std::path::Path, config: &str) -> Result<Value, String> {
+    project_attunement::run(
+        root,
+        config,
+        &configured_boundary_questions()?,
+        &configured_intake()?,
+    )
 }
 
 fn make_dev_stats(operations: &OperationsConfig) -> Arc<DevStats> {
@@ -258,8 +285,44 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lfg/intake/template", get(lfg_intake_template))
         .route("/api/lfg/intake/preview", post(lfg_intake_preview))
         .route("/api/lfg/intake/app-context", get(lfg_app_context))
+        .route("/api/lfg/boundaries/questions", get(lfg_boundary_questions))
+        .route("/api/lfg/boundaries/attune", post(lfg_boundary_attune))
         .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
+}
+
+async fn lfg_boundary_questions(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<Value>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(
+            serde_json::json!({"catalog": &*state.boundary_questions, "digest": state.boundary_questions.digest()}),
+        ),
+    )
+}
+
+async fn lfg_boundary_attune(
+    State(state): State<AppState>,
+    Json(request): Json<boundary_questions::Attunement>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<boundary_questions::Preview>,
+    ),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let preview = state
+        .boundary_questions
+        .attune(request, &state.intake)
+        .map_err(|error| error_response(StatusCode::BAD_REQUEST, "invalid_attunement", &error))?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(preview),
+    ))
 }
 
 async fn lfg_app_context(
@@ -872,6 +935,77 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn authored_questions_attune_only_from_supplied_project_artifacts() {
+        let state = AppState::new();
+        let (status, catalog) = json_response(
+            router(state.clone()),
+            Request::builder()
+                .uri("/api/lfg/boundaries/questions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let banks = catalog["catalog"]["banks"].as_array().unwrap();
+        assert_eq!(
+            banks
+                .iter()
+                .map(|bank| bank["questions"].as_array().unwrap().len())
+                .sum::<usize>(),
+            425
+        );
+        let request = |artifacts: Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/lfg/boundaries/attune")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"schemaVersion":"lfg.boundary-attunement.v1",
+                "sourceApp":"test-app", "selections":[{"bankId":"core","sections":["A"]}],
+                "artifacts":artifacts})
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (status, missing) = json_response(router(state.clone()), request(json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = missing["questions"].as_array().unwrap();
+        assert_eq!(rows.len(), 9);
+        let reuse = rows
+            .iter()
+            .find(|row| row["question"]["id"] == "core.a.8")
+            .unwrap();
+        assert_eq!(
+            reuse["question"]["question"],
+            "Does this reinvent something the codebase already provides?"
+        );
+        assert_eq!(reuse["bindingStatus"], "missing");
+        assert!(reuse["artifact"].is_null());
+        assert_eq!(missing["missingBindings"], json!(["module inventory"]));
+        let (status, bound) = json_response(
+            router(state.clone()),
+            request(json!({"module inventory":["module-a"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let reuse = bound["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["question"]["id"] == "core.a.8")
+            .unwrap();
+        assert_eq!(reuse["bindingStatus"], "supplied");
+        assert_eq!(reuse["artifact"], json!(["module-a"]));
+        assert_eq!(bound["missingBindings"], json!([]));
+        let (status, _) = json_response(
+            router(state),
+            request(json!({"module inventory":{"apiKey":"hidden"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

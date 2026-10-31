@@ -116,7 +116,7 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         groups[project] = group
         group_partitions[group] = split
         partitions[project] = split
-        rows, digest = train.load_dataset(resolve(plan_path.parent, source.get("path")))
+        rows, digest = train.load_dataset(resolve(plan_path.parent, source.get("path")), allow_unlabeled_review=True)
         if not rows:
             raise ValueError("source dataset is empty")
         source_digests.append({"project": project, "project_group": group, "split": split, "sha256": digest, "records": len(rows)})
@@ -147,6 +147,7 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             item = ledger.get(identifier)
             is_approved = approved(item, digest)
             counts[split]["examples"] += 1
+            counts[split]["labels_pending"] += int(row.get("labels_pending", False))
             counts[split]["verified_flag"] += int(row["verified"])
             counts[split]["approved_attestation"] += int(is_approved)
             counts[split]["ready_for_reviewed_subset"] += int(is_approved and row["verified"])

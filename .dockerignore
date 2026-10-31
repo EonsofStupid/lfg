@@ -1,0 +1,10 @@
+.git
+.github
+target
+**/target
+node_modules
+ui/master-clyffy-web/node_modules
+output
+.playwright-cli
+ml/lfg-encoder/__pycache__
+**/*.pyc
