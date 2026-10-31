@@ -27,11 +27,14 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str, Any]) -> tuple[dict, list[dict], dict]:
+def audited_run(plan_path: Path, training_dataset: Path, run_manifest: dict[str, Any],
+                *, development: bool) -> tuple[dict, list[dict], dict, list[dict]]:
     training, dataset_hash = train.load_dataset(training_dataset)
     report, validation = corpus_audit.load_reviewed_validation(training, plan_path)
-    if report.get('scope') == 'development':
+    if not development and report.get('scope') == 'development':
         raise ValueError('development-only training requires a separate controlled holdout evaluator; this evaluator requires a complete v1 plan')
+    if development and (report.get('scope') != 'development' or report.get('holdout_assessment') != 'not_performed'):
+        raise ValueError('controlled evaluation requires a development-only audited plan')
     environment = run_manifest.get('environment_evidence')
     model_input = run_manifest.get('model_snapshot_evidence')
     digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
@@ -54,10 +57,13 @@ def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str
     split = run_manifest.get('split')
     fields = ('schema_version', 'plan_sha256', 'taxonomy_sha256', 'review_ledger_sha256',
               'auditor_sha256', 'taxonomy_loader_sha256', 'sources', 'counts', 'duplicate_within_split')
+    expected_audit = {key: report[key] for key in fields}
+    if development:
+        expected_audit.update(scope='development', holdout_assessment='not_performed')
     if (not isinstance(split, dict) or split.get('development_override') is not False
             or split.get('validation_source') != 'audited-validation-partition'
             or split.get('dataset_sha256') != dataset_hash
-            or split.get('corpus_audit') != {key: report[key] for key in fields}):
+            or split.get('corpus_audit') != expected_audit):
         raise ValueError('model run corpus audit differs from the reviewed plan')
     for field, rows, column in (('train_ids', training, 'id'), ('validation_ids', validation, 'id'),
                                 ('train_families', training, 'family'), ('validation_families', validation, 'family')):
@@ -66,6 +72,19 @@ def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str
         if (not isinstance(actual, list) or any(not isinstance(item, str) for item in actual)
                 or len(actual) != len(expected) or set(actual) != expected):
             raise ValueError('model run split differs from the reviewed plan')
+    raw_plan = plan_path.read_bytes()
+    if hashlib.sha256(raw_plan).hexdigest() != report['plan_sha256']:
+        raise ValueError('plan changed during loading')
+    plan = json.loads(raw_plan)
+    taxonomy_path = corpus_audit.resolve(plan_path.parent, plan['taxonomy'])
+    taxonomy, taxonomy_hash = evaluate.load_taxonomy(taxonomy_path)
+    if taxonomy_hash != report['taxonomy_sha256']:
+        raise ValueError('evaluation taxonomy changed')
+    return report, validation, taxonomy, training
+
+
+def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str, Any]) -> tuple[dict, list[dict], dict]:
+    report, _, taxonomy, training = audited_run(plan_path, training_dataset, run_manifest, development=False)
     raw_plan = plan_path.read_bytes()
     if hashlib.sha256(raw_plan).hexdigest() != report['plan_sha256']:
         raise ValueError('plan changed during test loading')
@@ -79,10 +98,6 @@ def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str
             test.extend(rows)
     if not test or corpus_audit.validate_training_corpus(training, plan_path) != report:
         raise ValueError('reviewed test partition is empty or audit changed')
-    taxonomy_path = corpus_audit.resolve(plan_path.parent, plan['taxonomy'])
-    taxonomy, taxonomy_hash = evaluate.load_taxonomy(taxonomy_path)
-    if taxonomy_hash != report['taxonomy_sha256']:
-        raise ValueError('evaluation taxonomy changed')
     return report, test, taxonomy
 
 
@@ -114,7 +129,7 @@ def checked_artifact(directory: Path, source_digest: str, taxonomy_digest: str) 
 
 def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_dir: Path,
             binary: Path, runtime_config: Path, benchmark_config: Path, mode: str,
-            calibration_config: Path | None = None) -> dict:
+            calibration_config: Path | None = None, *, loader=None) -> dict:
     if mode not in ('embedded', 'external'):
         raise ValueError('unsupported native artifact mode')
     config, config_hash = benchmark_persistent.load_config(benchmark_config)
@@ -123,7 +138,8 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
     code_hashes = {path.name: file_hash(path) for path in code_paths}
     model_hash = predict_model.artifact_digest(model_dir)
     manifest = json.loads((model_dir / 'run-manifest.json').read_bytes())
-    audit_report, rows, taxonomy = audited_test(plan_path, training_dataset, manifest)
+    load = loader or audited_test
+    audit_report, rows, taxonomy = load(plan_path, training_dataset, manifest)
     if len(rows) > config['max_records'] or sum(len(row['text'].encode('utf-8')) for row in rows) > config['max_dataset_bytes']:
         raise ValueError('reviewed test exceeds configured benchmark input limits')
     label_file = json.loads((model_dir / 'labels.json').read_bytes())
@@ -184,7 +200,7 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
                 or {key: file_hash(path) for key, path in overrides.items()} != override_hashes
                 or {path.name: file_hash(path) for path in code_paths} != code_hashes
                 or (calibration_config is not None and file_hash(calibration_config) != calibration_hash)
-                or audited_test(plan_path, training_dataset, manifest)[0] != audit_report):
+                or load(plan_path, training_dataset, manifest)[0] != audit_report):
             raise ValueError('evaluation inputs changed during inference')
         return {'schema_version': 'lfg.reviewed-native-evaluation.v1', 'promotion_eligible': False,
                 'reason': 'promotion policy, performance qualification, and independent review remain separate',
