@@ -145,6 +145,16 @@ The browser displays one pending request, source and proposed labels at a time.
 Approving requires the attestation checkbox and typing `APPROVE`; rejection
 requires typing `REJECT`. The underlying workspace checks the displayed digest,
 taxonomy, project and split before saving. Skipped items remain pending.
+To remove sensitive text, select it in the request, enter a replacement and
+choose **Replace selection**. Repeat as needed and review the resulting request
+and its labels before approving. Replacements stay in browser memory until
+approval. The saved record binds sequential character ranges and replacement
+text to hashes of the request before and after the changes; its original
+source provenance stays attached. A redacted request that duplicates another
+workspace record is rejected. The tool does not decide whether redactions are
+complete or preserve meaning. Source files and draft copies still contain the
+original text, so approving a redaction does not erase private data. The
+terminal review path does not offer redaction.
 Decisions, export and subsequent training use the same rules as the terminal
 workflow above. The interface does not verify source authorship, user identity,
 data rights or secrets, and it does not create approvals on its own. Local
@@ -255,9 +265,10 @@ directory and choose a new path. Missing labels are represented as
 `labels_pending`, not negative examples. The normal dataset loader rejects
 these records even in development mode. Approval requires a reviewer to select
 at least one intent and attest to all labels, source context and privacy. An
-unresolved or sensitive message should be skipped or rejected; the review UI
-does not currently edit or sanitize message text. Nothing is approved by the
-preparation command.
+unresolved message should be skipped or rejected. The browser review tool can
+replace selected sensitive spans before approval; the reviewer must verify the
+result, its labels, and whether the redaction is sufficient. Nothing is approved
+by the preparation command.
 
 On 2026-10-31 a scan scoped to the local LFG, RRFlow and DevPulse directories
 created `dataset/private/codex-project-session-inventory.v4.jsonl`. It scanned

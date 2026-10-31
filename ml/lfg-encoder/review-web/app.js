@@ -4,6 +4,24 @@
   const el = id => document.getElementById(id);
   let offset = 0;
   let current = null;
+  let redactions = [];
+  let modelText = '';
+
+  function textareaMapping(text) {
+    const source = Array.from(text);
+    const offsets = [0];
+    let display = '';
+    for (let index = 0; index < source.length; index += 1) {
+      let character = source[index];
+      if (character === '\r') {
+        if (source[index + 1] === '\n') index += 1;
+        character = '\n';
+      }
+      display += character;
+      offsets.push(index + 1);
+    }
+    return {display, offsets};
+  }
 
   async function api(path, options = {}) {
     const headers = { Authorization: `Bearer ${token}`, ...(options.headers || {}) };
@@ -54,7 +72,9 @@
     el('project').textContent = current.project;
     el('split').textContent = current.split;
     el('record-id').textContent = current.id;
-    el('request').textContent = current.text;
+    modelText = current.text;
+    el('request').value = modelText;
+    redactions = [];
     el('source').textContent = JSON.stringify(current.source, null, 2);
     el('review-note').textContent = current.review_note || 'No review note recorded.';
     if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
@@ -74,13 +94,50 @@
     if (prompt(`Type ${confirmation} to ${decision === 'approved' ? 'approve' : 'reject'} this record.`) !== confirmation) return;
     const selected = { intents: [], capabilities: [], risks: [] };
     for (const box of document.querySelectorAll('#labels input:checked')) selected[box.dataset.field].push(box.value);
+    const data = { id: current.id, annotation_sha256: current.annotation_sha256, decision,
+      confirmation, labels: selected };
+    if (decision === 'approved' && redactions.length) data.redactions = redactions;
     await api('/api/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: current.id, annotation_sha256: current.annotation_sha256, decision,
-        confirmation, labels: selected }) });
+      body: JSON.stringify(data) });
     await refresh();
   }
 
   function handle(promise) { promise.catch(error => { el('notice').textContent = error.message; }); }
+  el('redact').addEventListener('click', () => {
+    const request = el('request');
+    const start = request.selectionStart;
+    const end = request.selectionEnd;
+    const points = Array.from(request.value);
+    const first = Array.from(request.value.slice(0, start)).length;
+    const last = Array.from(request.value.slice(0, end)).length;
+    const mapping = textareaMapping(modelText);
+    if (start === end || mapping.display !== request.value ||
+        points.slice(0, first).join('').length !== start || points.slice(0, last).join('').length !== end) {
+      el('notice').textContent = 'Select complete characters in the request first.';
+      return;
+    }
+    const replacement = el('redaction-replacement').value;
+    if (request.value.slice(start, end) === replacement) {
+      el('notice').textContent = 'The replacement must change the selected text.';
+      return;
+    }
+    const modelStart = mapping.offsets[first];
+    const modelEnd = mapping.offsets[last];
+    redactions.push({start: modelStart, end: modelEnd, replacement});
+    const modelPoints = Array.from(modelText);
+    modelText = modelPoints.slice(0, modelStart).join('') + replacement + modelPoints.slice(modelEnd).join('');
+    request.value = modelText;
+    request.focus();
+    request.setSelectionRange(start, start + replacement.length);
+    el('notice').textContent = 'Review the changed request and all labels before approving.';
+  });
+  el('reset-redactions').addEventListener('click', () => {
+    if (!current) return;
+    modelText = current.text;
+    el('request').value = modelText;
+    redactions = [];
+    el('notice').textContent = 'Request restored to its original review copy.';
+  });
   el('skip').addEventListener('click', () => { offset += 1; handle(refresh()); });
   el('skip-blocked').addEventListener('click', () => { offset += 1; handle(refresh()); });
   el('restart').addEventListener('click', () => { offset = 0; handle(refresh()); });

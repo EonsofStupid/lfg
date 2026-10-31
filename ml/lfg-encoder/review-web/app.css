@@ -20,12 +20,16 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .95rem/1.6 "Segoe UI
 fieldset { border: 0; border-top: 1px solid #344149; padding: 15px 0 0; margin: 15px 0; }
 legend { font-size: .78rem; font-weight: 700; color: #aebcb4; text-transform: uppercase; letter-spacing: .1em; padding-right: 10px; }
 .choice { display: flex; align-items: center; gap: 10px; padding: 7px 0; overflow-wrap: anywhere; }
-input { accent-color: #a8de6c; width: 17px; height: 17px; }
+input[type="checkbox"] { accent-color: #a8de6c; width: 17px; height: 17px; }
+textarea, .redaction-replacement { width: 100%; border: 1px solid #465760; border-radius: 8px; background: #10191c; color: #ecf1eb; padding: 10px; font: inherit; }
+textarea { min-height: 180px; resize: vertical; white-space: pre-wrap; line-height: 1.6; }
+.redaction-label { display: block; color: #b1c0b7; font-size: .85rem; margin: 12px 0 6px; }
+.redaction-actions { margin: 10px 0 15px; }
 .attest { display: flex; align-items: start; gap: 10px; border-top: 1px solid #344149; padding: 18px 0; color: #d6dfd8; line-height: 1.4; }
 .attest input { flex: none; }
 .actions { display: flex; gap: 9px; flex-wrap: wrap; }
 button { border: 1px solid transparent; border-radius: 8px; padding: 10px 16px; cursor: pointer; font-weight: 700; font-size: .88rem; }
-button:focus-visible, input:focus-visible { outline: 3px solid #d3f5a7; outline-offset: 3px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #d3f5a7; outline-offset: 3px; }
 .primary { background: #b5e77d; color: #14210e; margin-left: auto; }
 .secondary { background: #27343b; border-color: #465760; color: #e5eee8; }
 .danger { background: #4a2829; border-color: #855254; color: #ffd3cf; }
