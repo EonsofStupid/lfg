@@ -356,10 +356,22 @@ def validate_input_options(development: bool, environment_lock: Path | None, whe
         raise ValueError("reviewed training requires an environment lock, wheelhouse, and local model manifest")
 
 
+def effective_token_limit(tokenizer: Any, maximum: int) -> int:
+    if type(maximum) is not int or maximum < 1:
+        raise ValueError("token coverage requires a positive configured limit")
+    advertised = getattr(tokenizer, "model_max_length", None)
+    if advertised is None:
+        return maximum
+    if type(advertised) is not int or advertised < 1:
+        raise ValueError("invalid tokenizer model_max_length")
+    return min(maximum, advertised)
+
+
 def token_coverage(rows: list[dict[str, Any]], tokenizer: Any, maximum: int, split: str) -> dict[str, int]:
     """Measure complete inputs, including special tokens, without recording their text."""
-    if type(maximum) is not int or maximum < 1 or not rows:
-        raise ValueError("token coverage requires a positive limit and nonempty split")
+    limit = effective_token_limit(tokenizer, maximum)
+    if not rows:
+        raise ValueError("token coverage requires a nonempty split")
     lengths = []
     for row in rows:
         encoded = tokenizer(row["text"], add_special_tokens=True, truncation=False, padding=False)
@@ -367,21 +379,24 @@ def token_coverage(rows: list[dict[str, Any]], tokenizer: Any, maximum: int, spl
         if not isinstance(ids, list) or not ids or any(type(token) is not int for token in ids):
             raise ValueError(f"invalid tokenizer output for {split}")
         lengths.append(len(ids))
-    over = sum(length > maximum for length in lengths)
-    result = {"examples": len(lengths), "maximum_tokens": max(lengths), "over_limit": over}
+    over = sum(length > limit for length in lengths)
+    result = {"examples": len(lengths), "maximum_tokens": max(lengths), "over_limit": over,
+              "effective_limit": limit}
     if over:
         raise ValueError(f"{split} token coverage gate blocked: {over} of {len(lengths)} examples "
-                         f"exceed configured maximum {maximum}; longest has {max(lengths)} tokens")
+                         f"exceed effective maximum {limit} (configured maximum {maximum}); "
+                         f"longest has {max(lengths)} tokens")
     return result
 
 
 def tokenize_complete_batch(batch: dict[str, Any], tokenizer: Any, maximum: int) -> dict[str, Any]:
+    limit = effective_token_limit(tokenizer, maximum)
     encoded = tokenizer(batch["text"], add_special_tokens=True, truncation=False, padding=False)
     ids = encoded.get("input_ids")
     if (not isinstance(ids, list) or len(ids) != len(batch["text"])
-            or any(not isinstance(tokens, list) or not tokens or len(tokens) > maximum
+            or any(not isinstance(tokens, list) or not tokens or len(tokens) > limit
                    or any(type(token) is not int for token in tokens) for tokens in ids)):
-        raise ValueError("tokenizer batch is invalid or exceeds the configured maximum")
+        raise ValueError("tokenizer batch is invalid or exceeds the effective maximum")
     return encoded
 
 
