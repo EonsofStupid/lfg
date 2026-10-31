@@ -109,8 +109,25 @@ struct Prediction {
     intents: Vec<String>,
     capabilities: Vec<String>,
     risks: Vec<String>,
+    tokenization: Tokenization,
     #[serde(skip_serializing_if = "Option::is_none")]
     scores: Option<Scores>,
+}
+
+#[derive(Serialize)]
+struct Tokenization {
+    processed_tokens: usize,
+    overflow_chunks: usize,
+    truncated: bool,
+}
+
+fn tokenization(encoding: &tokenizers::Encoding) -> Tokenization {
+    let overflow_chunks = encoding.get_overflowing().len();
+    Tokenization {
+        processed_tokens: encoding.len(),
+        overflow_chunks,
+        truncated: overflow_chunks != 0,
+    }
 }
 
 #[derive(Serialize)]
@@ -467,6 +484,7 @@ fn run_source(
             intents: chosen.intersection(&intent).cloned().collect(),
             capabilities: chosen.intersection(&capability).cloned().collect(),
             risks: chosen.intersection(&risk).cloned().collect(),
+            tokenization: tokenization(&encoded),
             scores: include_scores.then(|| Scores {
                 semantics: "sigmoid-uncalibrated-v1",
                 values: model_labels
@@ -488,6 +506,24 @@ fn run_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_truncated_and_complete_tokenizations() {
+        use tokenizers::{Encoding, Token, TruncationDirection};
+        let tokens = (0..5)
+            .map(|i| Token::new(i, format!("t{i}"), (i as usize, i as usize + 1)))
+            .collect();
+        let mut encoding = Encoding::from_tokens(tokens, 0);
+        let complete = tokenization(&encoding);
+        assert_eq!(complete.processed_tokens, 5);
+        assert!(!complete.truncated);
+        assert_eq!(complete.overflow_chunks, 0);
+        encoding.truncate(2, 0, TruncationDirection::Right);
+        let truncated = tokenization(&encoding);
+        assert_eq!(truncated.processed_tokens, 2);
+        assert!(truncated.truncated);
+        assert_eq!(truncated.overflow_chunks, 2);
+    }
 
     #[test]
     fn requires_valid_config_and_pinned_manifest() {

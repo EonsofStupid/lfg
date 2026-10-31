@@ -71,3 +71,48 @@ normal LFG service still uses the deterministic encoder; this benchmark tests
 long-lived offline commands rather than live routing. Raw aggregate reports are
 stored under `ml/lfg-encoder/dataset/private/embedded-persistent-benchmark.v5.json`
 through `v7.json`.
+
+## Broader real-request diagnostic, 2026-10-31
+
+Three sequential runs compared the same Windows embedded experimental-model
+binary with its deterministic baseline on 422 unreviewed, real project
+requests from the private training candidate queue. Each run used one warmup
+and two measured passes: 844 measured requests per command, consisting of 422
+unique inputs repeated twice. The binary SHA-256 was
+`20673c099ad2f722ad686013218b1e579528af65413761a565c71f8a5315202c`.
+The requests stayed on the local machine; the reports contain aggregate
+timings and identities, not prompt text. The runs were not isolated from other
+machine activity and are not a production performance guarantee.
+
+| Observation | Deterministic baseline | Embedded experimental model |
+| --- | ---: | ---: |
+| Median response, range across runs | 0.127–0.129 ms | 10.04–10.35 ms |
+| p95 response, range across runs | 0.184–0.202 ms | 58.39–64.94 ms |
+| p99 response, range across runs | 0.255–0.320 ms | 77.10–84.00 ms |
+| Process cycles per measured request, range | 141,644–148,436 | 49.19–51.53 million |
+| Working set after measurement | 6.2 MiB | 203.1–204.1 MiB |
+| Peak process working set | 6.2 MiB | 279.9–280.0 MiB |
+
+The model tokenizer reported untruncated request lengths from 3 to 5,603
+tokens, median 25.5 and p95 151. Sixteen of the 422 requests exceeded the
+experimental artifact's 192-token maximum; the old binary silently truncated
+those requests. The latency comparison therefore covers full inputs for the
+baseline and partial inputs for those model requests. The model was trained on
+unreviewed development data, lacks the full current taxonomy, and has not
+passed accuracy or security evaluation. These measurements are neither quality
+evidence nor a release qualification. The three aggregate reports, benchmark
+config and token-length summary remain in `dataset/private`.
+
+New native ONNX predictions include processed token count, overflow chunk count
+and a truncation flag. The benchmark aggregates these statuses for measured
+requests and reports missing metadata as `unknown`. They identify tokenizer
+truncation; they do not prove that a model understood the complete request.
+The deterministic baseline does not emit tokenizer metadata, so its status is
+`unknown` in this tokenization-specific count.
+In a local functional check using the same experimental artifact, an updated
+debug binary reported a 53-token real request as complete and a 389-token real
+request as truncated to 192 processed tokens with two overflow chunks. The
+requests remained private and unreviewed. This confirms the flag for those two
+cases, not all tokenizer inputs or model quality. A separate two-request debug
+benchmark counted one complete and one truncated candidate response; the
+baseline's two tokenization statuses were unknown.

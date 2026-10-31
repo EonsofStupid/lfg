@@ -102,6 +102,8 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
             def request_prediction(self, identifier, text):
                 value = {'id': identifier, 'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
                          'intents': emitted, 'capabilities': [], 'risks': []}
+                if arguments[0] != 'baseline-predict':
+                    value['tokenization'] = {'processed_tokens': 4, 'overflow_chunks': 0, 'truncated': False}
                 if '--include-scores' in arguments:
                     value['scores'] = {'semantics': 'sigmoid-uncalibrated-v1',
                                        'values': {'build': 0.9, 'write': 0.1, 'sensitive': 0.1}}
@@ -120,6 +122,25 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         self.assertEqual(report['groups']['baseline']['intents']['labels']['build']['fn'], 1)
         self.assertEqual(report['test_label_support']['risks']['sensitive'], {'positive': 0, 'negative': 1})
         self.assertNotIn('private test', json.dumps(report))
+
+    def test_rejects_truncated_or_unknown_candidate_coverage(self):
+        for coverage in (None, {'processed_tokens': 4, 'overflow_chunks': 1, 'truncated': True}):
+            def predictor(binary, arguments, config):
+                instance = self.fake_predictor(binary, arguments, config)
+                original = instance.request_prediction
+                def request(identifier, text):
+                    elapsed, value = original(identifier, text)
+                    if arguments[0] != 'baseline-predict':
+                        if coverage is None:
+                            value.pop('tokenization', None)
+                        else:
+                            value['tokenization'] = coverage
+                    return elapsed, value
+                instance.request_prediction = request
+                return instance
+            with self.subTest(coverage=coverage), patch.object(benchmark_persistent, 'Predictor', side_effect=predictor):
+                with self.assertRaisesRegex(ValueError, 'truncated or coverage is unknown'):
+                    self.compare()
 
     def test_rejects_unreviewed_changed_or_development_inputs(self):
         row = self.rows[2]

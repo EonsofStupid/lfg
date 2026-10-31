@@ -44,6 +44,12 @@ and aggregate empirical calibration statistics. The score output is explicitly
 uncalibrated and is enabled only for that offline request; it is not a claim of
 confidence calibration or a live-routing change.
 
+The native candidate must report valid tokenization metadata and no truncated
+evaluation inputs. Older binaries that do not report this metadata, and
+predictions with tokenizer overflow, are rejected by this evaluator. Select or
+build a compatible artifact and binary for the intended input lengths; the
+check does not establish that the model understands every part of an input.
+
 The configuration supplies bin edges from zero to one. For every label, the
 evaluator computes empirical binary expected calibration error (ECE),
 `sum((bin_count / observations) * abs(mean_score - positive_rate))`, and the
