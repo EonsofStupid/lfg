@@ -164,6 +164,15 @@ def train(args: argparse.Namespace) -> None:
     records, dataset_digest = load_dataset(args.dataset)
     policy = json.loads(POLICY.read_text(encoding="utf-8"))
     records = select_training_records(records, policy["minimum_human_verified_examples"], args.allow_below_gate)
+    corpus_audit = None
+    if not args.allow_below_gate:
+        if args.audited_plan is None:
+            raise SystemExit("training gate blocked: --audited-plan is required for non-development training")
+        try:
+            import corpus_audit as audit_module
+            corpus_audit = audit_module.validate_training_corpus(records, args.audited_plan)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise SystemExit(f"training corpus gate blocked: {error}") from error
     try:
         train_rows, validation_rows = grouped_split(records, args.seed)
     except ValueError as error:
@@ -187,6 +196,7 @@ def train(args: argparse.Namespace) -> None:
         "dataset_sha256": dataset_digest,
         "seed": args.seed,
         "development_override": args.allow_below_gate,
+        "corpus_audit": corpus_audit,
         "train_ids": [row["id"] for row in train_rows],
         "validation_ids": [row["id"] for row in validation_rows],
         "train_families": sorted({row["family"] for row in train_rows}),
@@ -269,6 +279,7 @@ def main() -> None:
                         help="permit reinitialization of mismatched weights (review model loading warnings)")
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
     parser.add_argument("--allow-below-gate", action="store_true", help="development only; output remains ineligible")
+    parser.add_argument("--audited-plan", type=Path, help="reviewed and project-separated corpus plan")
     args = parser.parse_args()
     try:
         config = load_training_config(args.training_config)

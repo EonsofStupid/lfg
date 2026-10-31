@@ -154,6 +154,31 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return report, queue
 
 
+def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> dict[str, Any]:
+    """Require the input to be exactly the reviewed train partition of this plan."""
+    report, queue = audit(plan_path)
+    if not report["review_ledger_sha256"]:
+        raise ValueError("audited training requires a review ledger")
+    for split in SPLITS:
+        counts = report["counts"][split]
+        if counts.get("examples", 0) == 0:
+            raise ValueError(f"audited training requires a nonempty {split} partition")
+        if counts.get("ready_for_reviewed_subset", 0) != counts["examples"]:
+            raise ValueError(f"every {split} example requires a current approval and verified flag")
+    expected = {item["id"]: item["annotation_sha256"] for item in queue if item["split"] == "train"}
+    actual: dict[str, str] = {}
+    for row in records:
+        if not isinstance(row.get("source"), dict) or not isinstance(row["source"].get("project"), str):
+            raise ValueError("training example lacks project provenance")
+        identifier = row.get("id")
+        if not isinstance(identifier, str) or identifier in actual or not row.get("verified"):
+            raise ValueError("training examples must have unique IDs and verified flags")
+        actual[identifier] = annotation_digest(row, row["source"]["project"], "train", report["taxonomy_sha256"])
+    if actual != expected:
+        raise ValueError("training input does not exactly match the audited training partition")
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, type=Path)
