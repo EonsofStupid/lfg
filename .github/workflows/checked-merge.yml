@@ -22,6 +22,8 @@ jobs:
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Test and build UI
         working-directory: ui/master-clyffy-web
         run: |
