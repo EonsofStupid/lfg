@@ -129,3 +129,68 @@ session with:
 ```bash
 LFG_TEST_SYSTEMD_USER=1 python3 -m unittest discover -s ml/lfg-encoder -p test_systemd_training_lock.py
 ```
+
+## Bounded training-step capacity on a second Spark
+
+On 2026-10-31 `clyffy-03` was reachable with an NVIDIA GB10 and about 114 GiB
+available host memory. Its compute-process list showed the remote desktop
+service and no model-serving process immediately before and after these tests.
+The already busy `clyffy-01` workload was not stopped. This is a point-in-time
+observation, not a reservation or a guarantee that services were uninterrupted.
+
+An isolated directory on `clyffy-03` received the pinned public ModernBERT
+snapshot and the existing hash-locked wheelhouse. Offline installation passed
+`pip check` and the installed-wheel payload verifier: 27,325 files and
+5,107,746,248 bytes matched the locked payload, with 78 wheel records and three
+scripts excluded. The [aggregate environment evidence](evidence/gb10-03-locked-environment.v1.json)
+does not attest the interpreter, untracked files, external libraries or upstream
+publisher. No private project requests or labels were copied to the host.
+
+The runtime probe used repeated generated token IDs and generated zero labels,
+the same pinned 13-label model configuration, and one forward/backward plus
+AdamW step. The classification head was newly initialized; no weights were
+saved. Each reported shape ran once in a fresh process using the canonical source
+and taxonomy bytes; earlier checks used checkout bytes with different line endings.
+All three reported finite logits,
+loss and gradients before the step and initialized optimizer state:
+
+| Tokens | Batch | Peak CUDA allocated | Peak CUDA reserved | Step time |
+| --- | --- | --- | --- | --- |
+| 512 | 8 | 4.41 GiB | 5.13 GiB | 1.87 s |
+| 4,353 | 1 | 6.37 GiB | 7.21 GiB | 2.26 s |
+| 8,192 | 1 | 8.77 GiB | 9.01 GiB | 3.98 s |
+
+The [512-token](evidence/gb10-03-capacity-512-b8.v1.json),
+[4,353-token](evidence/gb10-03-capacity-4353-b1.v1.json) and
+[8,192-token](evidence/gb10-03-capacity-8192-b1.v1.json) reports bind the
+model, taxonomy, probe and helper hashes. Each process used two CPU threads,
+a 15% PyTorch CUDA allocator fraction, and a systemd scope with 28 GiB
+`MemoryMax`, 400% CPU quota and 256 tasks. The allocator fraction is not GPU
+isolation; cgroup limits do not by themselves establish a GPU memory limit.
+Step time includes finite-gradient checks and synchronization; the samples were
+not isolated or repeated under identical source identities and are not throughput
+or performance guarantees. The timing excludes model loading and preparation.
+The first attempted probe failed before model loading because the CUDA allocator
+needed an explicit device index; the probe was corrected before these runs.
+
+These tests do not exercise the full trainer, its data loader, checkpointing,
+long-running stability, mixed lengths, validation, or model accuracy. They do
+not train on project data or qualify a binary. Three pending real requests exceed
+the selected model's 8,192-position configuration; the probe does not make them
+fit or justify copying whole-request labels onto arbitrary segments. A reviewed
+corpus and independent validation remain required.
+
+To reproduce a bounded shape on a suitable idle host with the verified local
+snapshot and locked environment, select the resource limits and output path for
+that host and run the probe under the operator's scheduler, for example:
+
+```bash
+systemd-run --user --scope -p MemoryMax=28G -p CPUQuota=400% -p TasksMax=256 \
+  env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false \
+  timeout 300 venv/bin/python probe_model_runtime.py \
+  --model modernbert-base-v2 --model-manifest modernbert-base-v2.manifest.json \
+  --revision 8949b909ec900327062f0ebf497f51aef5e6f0c8 \
+  --taxonomy evaluation-taxonomy-v1-lf.json --device cuda --threads 2 \
+  --tokens 8192 --batch-size 1 --seed 731 --cuda-memory-fraction 0.15 \
+  --optimizer-learning-rate 0.00005 --optimizer-weight-decay 0 --output NEW_REPORT.json
+```
