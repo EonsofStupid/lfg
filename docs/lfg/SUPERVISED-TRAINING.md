@@ -9,9 +9,14 @@ It is not a trained model, an evaluation, or a production-qualified service.
 The launcher rejects `--allow-below-gate` and chooses `--resume` itself. The
 trainer still requires a reviewed corpus, audit, immutable model revision,
 model manifest and locked environment, and applies its existing eligibility
-checks. Use a [development-only corpus plan](CORPUS-REVIEW.md#development-only-assembly)
-and keep the final holdout separate: the trainer also accepts legacy plans that
-read test data. A training completion marker is not a quality or release gate.
+checks. The supervisor always requests a
+[development-only corpus plan](CORPUS-REVIEW.md#development-only-assembly).
+The trainer rejects a legacy complete plan before the audit opens its sources,
+and development plans reject declared test sources. Keep final holdout data
+physically separate: source split labels are assertions and this does not detect
+a test file mislabeled as training or validation. The direct trainer can still
+accept legacy plans unless `--development-plan-only` is supplied; their audits
+read test data. A completion marker is not a quality or release gate.
 
 ## Configure an instance
 

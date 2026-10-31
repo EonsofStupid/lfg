@@ -208,6 +208,8 @@ def execute(config_path: Path) -> int:
         print("supervised run already completed; output identities match", flush=True)
         return 0
     command = [config["python"], str(TRAINER), "train", *config["trainer_arguments"]]
+    if not parsed.development_plan_only:
+        command.append("--development-plan-only")
     if mode == "resume":
         command.append("--resume")
     print(f"starting reviewed training ({mode}); trainer enforces corpus and environment gates", flush=True)

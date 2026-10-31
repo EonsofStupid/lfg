@@ -372,7 +372,8 @@ def train(args: argparse.Namespace) -> None:
             raise SystemExit("training gate blocked: --audited-plan is required for non-development training")
         try:
             import corpus_audit as audit_module
-            audit_report, validation_rows = audit_module.load_reviewed_validation(records, args.audited_plan)
+            audit_report, validation_rows = audit_module.load_reviewed_validation(
+                records, args.audited_plan, development_only=getattr(args, "development_plan_only", False))
             train_rows = records
             plan_raw = args.audited_plan.read_bytes()
             if hashlib.sha256(plan_raw).hexdigest() != audit_report["plan_sha256"]:
@@ -1014,6 +1015,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
     parser.add_argument("--allow-below-gate", action="store_true", help="development only; output remains ineligible")
     parser.add_argument("--audited-plan", type=Path, help="reviewed and project-separated corpus plan")
+    parser.add_argument("--development-plan-only", action="store_true",
+                        help="reject complete or test-containing plans before opening corpus sources")
     return parser
 
 

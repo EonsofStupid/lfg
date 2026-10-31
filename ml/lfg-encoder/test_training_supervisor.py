@@ -113,6 +113,7 @@ class TrainingSupervisorTests(unittest.TestCase):
         child = SimpleNamespace(wait=lambda: -9, poll=lambda: -9)
         with patch.object(supervisor, "verify_cgroup_limits", return_value={}), patch.object(subprocess, "Popen", return_value=child) as launch:
             self.assertEqual(supervisor.execute(self.config_path), 1)
+        self.assertIn("--development-plan-only", launch.call_args.args[0])
         self.assertEqual(launch.call_args.args[0][-1], "--resume")
         self.assertFalse((self.output / supervisor.COMPLETE).exists())
 
