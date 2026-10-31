@@ -23,18 +23,19 @@ def normalize(path: str) -> str:
     return os.path.normcase(os.path.abspath(path)).rstrip(os.sep)
 
 
-def project_for(cwd: str, roots: dict[str, str]) -> str | None:
+def project_for(cwd: str, roots: dict[str, str], exact_cwd: bool = False) -> str | None:
     if not isinstance(cwd, str) or not cwd or not os.path.isabs(cwd):
         return None
     value = normalize(cwd)
     matches = [name for name, root in roots.items()
-               if value == root or value.startswith(root + os.sep)]
+               if value == root or (not exact_cwd and value.startswith(root + os.sep))]
     if len(matches) > 1:
         raise ValueError("project roots overlap")
     return matches[0] if matches else None
 
 
-def scan_file(path: Path, roots: dict[str, str], max_bytes: int, max_line_bytes: int) -> tuple[str, list[dict]]:
+def scan_file(path: Path, roots: dict[str, str], max_bytes: int, max_line_bytes: int,
+              exact_cwd: bool = False) -> tuple[str, list[dict]]:
     """Read the header before examining any messages in an unmatched session."""
     before = path.stat()
     with path.open('rb') as source:
@@ -45,7 +46,7 @@ def scan_file(path: Path, roots: dict[str, str], max_bytes: int, max_line_bytes:
             first = json.loads(header)
             if first.get('type') != 'session_meta':
                 return 'invalid_header', []
-            project = project_for(first.get('payload', {}).get('cwd', ''), roots)
+            project = project_for(first.get('payload', {}).get('cwd', ''), roots, exact_cwd)
         except (ValueError, TypeError, AttributeError):
             return 'invalid_header', []
         if project is None:
@@ -102,7 +103,8 @@ def scan_file(path: Path, roots: dict[str, str], max_bytes: int, max_line_bytes:
     return 'scanned', candidates
 
 
-def inventory(root: Path, roots: dict[str, str], max_bytes: int, max_line_bytes: int = 16 * 1024 * 1024) -> tuple[dict, list[dict]]:
+def inventory(root: Path, roots: dict[str, str], max_bytes: int, max_line_bytes: int = 16 * 1024 * 1024,
+              exact_cwd: bool = False) -> tuple[dict, list[dict]]:
     root = root.resolve(strict=True)
     status: Counter[str] = Counter()
     projects: Counter[str] = Counter()
@@ -113,7 +115,7 @@ def inventory(root: Path, roots: dict[str, str], max_bytes: int, max_line_bytes:
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 status['outside_source_root'] += 1
                 continue
-            state, rows = scan_file(resolved, roots, max_bytes, max_line_bytes)
+            state, rows = scan_file(resolved, roots, max_bytes, max_line_bytes, exact_cwd)
         except OSError:
             state, rows = 'read_error', []
         status[state] += 1
@@ -132,6 +134,8 @@ def main() -> None:
     parser.add_argument('--project-root', action='append', required=True, metavar='NAME=PATH')
     parser.add_argument('--max-session-bytes', type=int, default=512 * 1024 * 1024)
     parser.add_argument('--max-line-bytes', type=int, default=16 * 1024 * 1024)
+    parser.add_argument('--exact-cwd', action='store_true',
+                        help='include only sessions whose working directory exactly matches a project root')
     parser.add_argument('--output', type=Path, help='new private inventory file; source paths and hashes are sensitive')
     args = parser.parse_args()
     try:
@@ -147,7 +151,7 @@ def main() -> None:
         if any(a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
                for i, a in enumerate(values) for b in values[i + 1:]):
             raise ValueError('project roots overlap')
-        summary, candidates = inventory(args.sessions_root, roots, args.max_session_bytes, args.max_line_bytes)
+        summary, candidates = inventory(args.sessions_root, roots, args.max_session_bytes, args.max_line_bytes, args.exact_cwd)
         if args.output:
             with args.output.open('x', encoding='utf-8', newline='\n') as output:
                 for row in candidates:
