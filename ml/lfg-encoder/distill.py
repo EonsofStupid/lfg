@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,16 +109,16 @@ def load_traces(path: Path) -> list[TeacherTrace]:
 
 def command_validate(args: argparse.Namespace) -> None:
     traces = load_traces(args.traces)
-    verified = [trace for trace in traces if trace.checks_passed]
+    declared_passed = [trace for trace in traces if trace.checks_passed]
     difficulty = {"easy": 0, "medium": 0, "hard": 0}
     langs: dict[str, int] = {}
     for trace in traces:
         difficulty[trace.difficulty] += 1
         langs[trace.language] = langs.get(trace.language, 0) + 1
     report = {
-        "schemaVersion": "lfg.distill-trace-report.v1",
+        "schemaVersion": "lfg.distill-trace-report.v2",
         "traces": len(traces),
-        "verifiedChecksPassed": len(verified),
+        "declaredChecksPassed": len(declared_passed),
         "coverageByDifficulty": difficulty,
         "coverageByLanguage": dict(sorted(langs.items())),
         "sourceSha256": hashlib.sha256(args.traces.read_bytes()).hexdigest(),
@@ -154,33 +153,10 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def command_build_sft(args: argparse.Namespace) -> None:
-    traces = load_traces(args.traces)
-    selected = [trace for trace in traces if trace.checks_passed or args.include_failed]
-    if not selected:
-        raise SystemExit("no traces selected; pass --include-failed if needed")
-
-    random.Random(args.seed).shuffle(selected)
-    split_index = int(len(selected) * args.train_ratio)
-    if split_index <= 0 or split_index >= len(selected):
-        raise SystemExit(f"train_ratio {args.train_ratio} yields empty split; keep between 0 and 1 with enough samples")
-
-    train_rows = [_to_sft_row(trace) for trace in selected[:split_index]]
-    eval_rows = [_to_sft_row(trace) for trace in selected[split_index:]]
-
-    _write_jsonl(args.train_output, train_rows)
-    _write_jsonl(args.eval_output, eval_rows)
-
-    summary = {
-        "schemaVersion": "lfg.distill-sft-build.v1",
-        "sourceTraces": len(traces),
-        "selectedTraces": len(selected),
-        "includeFailed": bool(args.include_failed),
-        "trainRows": len(train_rows),
-        "evalRows": len(eval_rows),
-        "trainOutput": str(args.train_output),
-        "evalOutput": str(args.eval_output),
-    }
-    print(json.dumps(summary, indent=2))
+    raise SystemExit(
+        "SFT dataset generation is unavailable: trace provenance, authorization, "
+        "review evidence and independent split admission are not implemented"
+    )
 
 
 def command_init_template(args: argparse.Namespace) -> None:
@@ -193,8 +169,8 @@ def command_init_template(args: argparse.Namespace) -> None:
             "response": "```rust\npub fn sum_even(values: &[i64]) -> i64 {\n    values.iter().copied().filter(|n| n % 2 == 0).sum()\n}\n```",
             "language": "rust",
             "difficulty": "easy",
-            "checksPassed": True,
-            "sourceModel": "teacher-7b",
+            "checksPassed": False,
+            "sourceModel": "example-placeholder-not-a-teacher",
             "tags": ["implementation", "rust", "pure-function"],
         }
     ]
@@ -210,7 +186,7 @@ def main() -> None:
     validate.add_argument("--traces", type=Path, default=DEFAULT_TRACES)
     validate.set_defaults(func=command_validate)
 
-    build = sub.add_parser("build-sft", help="build train/eval SFT JSONL datasets")
+    build = sub.add_parser("build-sft", help="unavailable until reviewed trace admission is implemented")
     build.add_argument("--traces", type=Path, default=DEFAULT_TRACES)
     build.add_argument("--train-output", type=Path, default=DEFAULT_OUTPUT)
     build.add_argument("--eval-output", type=Path, default=ROOT / "dataset" / "sft-eval.v1.jsonl")
