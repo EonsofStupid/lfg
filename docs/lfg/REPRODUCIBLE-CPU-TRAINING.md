@@ -1,0 +1,79 @@
+# Reproducing the real-request CPU development run
+
+This experiment checks repeatability of the existing below-gate run on one
+Windows machine. It does not qualify the model, its unreviewed labels, or a
+release. It does not use or modify the 226 pending review records.
+
+## Locked training environment
+
+The [Windows CPU Python 3.11 lock](../../ml/lfg-encoder/locks/windows-cpu-py311-experimental.requirements.txt)
+binds 54 resolved wheels to exact versions and SHA-256 hashes. It is specific to
+Windows x86-64 and this experimental CPU training environment; it is not a
+Linux/ARM64 Spark lock or an ONNX export environment. The optional
+`lock_wheelhouse.py` generates a new lock from operator-selected wheel files;
+it rejects duplicate packages and creates the output exclusively. The lock
+hashes the bytes it is given; it does not attest their publisher or provenance.
+
+To acquire and use these exact wheels on a compatible machine, select an
+appropriate package index, Python 3.11, an empty wheelhouse and a new virtual
+environment. The initial acquisition can use a network; the installation
+below uses only local files:
+
+```powershell
+py -3.11 -m pip download --only-binary=:all: --require-hashes `
+  --dest WHEELHOUSE -r ml/lfg-encoder/locks/windows-cpu-py311-experimental.requirements.txt
+py -3.11 -m venv VENV
+VENV/Scripts/python.exe -m pip install --no-index --find-links WHEELHOUSE --require-hashes `
+  -r ml/lfg-encoder/locks/windows-cpu-py311-experimental.requirements.txt
+VENV/Scripts/python.exe -m pip check
+```
+
+The lock is not automatically enforced by `train.py` or included in its run
+manifest; preserve the lock and installation evidence with each run. The
+interpreter, pip bootstrap, native libraries, OS and processor are also outside
+this wheel lock. Installations and runs on other machines still need to be
+verified. A changed wheel must fail the hash check: this was tested locally by
+appending a byte to a copy of the `six` wheel, and pip rejected it.
+
+## Observed local runs, 2026-10-31
+
+Two independently created virtual environments installed the same 54 wheels
+offline with `--require-hashes`; each passed `pip check`, and their installed
+package lists matched. Both used Python 3.11.9, CPU-only PyTorch 2.14.1,
+Transformers 4.57.6, and an Intel Core Ultra 9 275HX. The local wheelhouse held
+252,324,852 bytes. The lock SHA-256 is
+`a13aa8074c1ac0137d6b837967b72c80610deae61c0877eb0ce8701a22d9a69d`.
+
+Both training runs used the exact private input and experimental settings in
+the [real-request experiment](REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md), including
+the below-gate override. The input SHA-256 was
+`6a5e0fbdd5caee3162f85524d1aaf29f24cfd7af39c9673cb79e068c71cbfe2a`.
+They used trainer SHA-256
+`2eefb42b8e9cfe285631e939ed8b1f30d5ad773f924a825c3941fa651fdbfe00`,
+seed 730, three epochs, batch size two, maximum length 192, two CPU threads,
+`PYTHONHASHSEED=730`, and Hugging Face offline mode. The base model was the
+same locally cached revision described in the earlier experiment. The six
+files below had the same hashes before, between and after the two runs:
+
+| Cached base file | SHA-256 |
+| --- | --- |
+| `config.json` | `953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41` |
+| `model.safetensors` | `53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db` |
+| `special_tokens_map.json` | `303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3` |
+| `tokenizer.json` | `be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037` |
+| `tokenizer_config.json` | `acb92769e8195aabd29b7b2137a9e6d6e25c476a4f15aa4355c233426c61576b` |
+| `vocab.txt` | `07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3` |
+
+The two runs produced byte-identical `model.safetensors`, model configuration,
+tokenizer files, labels, split manifest and run manifest. The weights' SHA-256,
+`21dd690709aa19a96265456c279674ecce14351e547e91c2c78aaa85e00ce5e8`,
+also matched the earlier run on this machine. Other run files, such as trainer
+state containing timings, were not claimed to match. The outputs and data remain
+private under `target` and `dataset/private`.
+
+The base files were manually checked, not enforced by the trainer, and the
+run manifest records selected package versions rather than every installed
+file. These two runs share the same physical machine, Python installation and
+model cache. They establish a useful local repeatability result for a tiny,
+unreviewed experiment, not cross-machine determinism, representative quality,
+security recall, Spark support, or a self-contained release.
