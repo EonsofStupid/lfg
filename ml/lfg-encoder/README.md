@@ -20,6 +20,8 @@ For a bounded real-corpus measurement of the baseline process, including
 Windows CPU-time and cycle counters, see the [process benchmark](../../docs/lfg/CPU-PROCESS-BENCHMARK.md).
 The [persistent comparison](../../docs/lfg/PERSISTENT-CPU-BENCHMARK.md) measures
 repeated local requests after process warmup.
+The [CPU training repeatability experiment](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md)
+records two clean environments, a hash-locked wheelhouse and the real-request runs.
 For the first below-gate run using real conversation requests and its negative
 diagnostic result, see the [development experiment](../../docs/lfg/REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
