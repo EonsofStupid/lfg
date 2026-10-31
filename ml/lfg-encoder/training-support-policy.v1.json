@@ -1,0 +1,8 @@
+{
+  "schema_version": "lfg.encoder-training-support.v1",
+  "defaults": {
+    "train": {"minimum_positive": 1, "minimum_negative": 1},
+    "validation": {"minimum_positive": 1, "minimum_negative": 1}
+  },
+  "overrides": {}
+}

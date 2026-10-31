@@ -95,7 +95,12 @@ With `--allow-below-gate`, the family split is for development only and is not
 stratified. Without that override, the complete audited train partition trains
 the model and the separate audited validation partition selects checkpoints. The
 trainer rejects validation labels absent from the training partition instead of
-silently discarding them. A separate reviewed test project remains reserved for
+silently discarding them. For every configured taxonomy label, it also requires
+positive and negative examples in both partitions, using configurable minimums
+from `training-support-policy.v1.json` or `--support-policy`. A threshold of
+one only establishes basic coverage; it does not qualify model quality. The
+policy digest and counts are included in the run manifest. A separate reviewed
+test project remains reserved for
 final evaluation and is not fed to the trainer. The audit still reads the test
 file; genuinely blinded evaluation needs independent access controls.
 

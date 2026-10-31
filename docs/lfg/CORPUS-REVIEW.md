@@ -55,8 +55,16 @@ For a review workflow:
    `--audited-plan PLAN`; the input must exactly match the audited train rows.
    Audited training loads the separate validation partition and verifies its
    source hashes and audit again. It rejects validation labels missing from the
-   training partition; test rows are not supplied to the trainer. This does not
-   establish adequate positive or negative support for every label.
+   training partition; test rows are not supplied to the trainer. Before loading
+   a model, it also checks positive and negative counts for every taxonomy label
+   in both training and validation. The default requirements are in
+   `ml/lfg-encoder/training-support-policy.v1.json`; select a different file
+   with `--support-policy` to raise defaults or set per-label thresholds. Every
+   threshold must be a positive integer. A minimum of one is a basic coverage
+   check, not adequate statistical support or evidence of quality.
+   The full taxonomy is included in the trained model, and the policy digest
+   and support counts are bound to the run manifest. The test partition is not
+   consulted for these support checks.
    Its run manifest records audit, plan, taxonomy, ledger, source and code
    digests. Changing them prevents an ordinary resume.
 
@@ -86,6 +94,9 @@ different-sized classification head may require the explicit
 `--allow-mismatched-sizes` option; inspect all model-loading warnings. The
 simulated approvals and fixture policy are stored with the test artifact so
 they cannot be confused with the actual project review ledger.
+The current fixture deliberately assigns artificial labels to exercise both
+positive and negative support for all taxonomy labels in its two training and
+two validation records; those labels make no semantic claims.
 
 On 2026-10-30, this smoke command completed offline on the Windows development
 machine using the cached tiny random BERT revision recorded in the
@@ -131,6 +142,13 @@ inspected Makers test examples. None of the 46 is approved or verified, all 16
 validation rows have the same provisional intent and capability labels, and
 none of the three splits has a positive `sensitive-data` label. These counts
 are not evidence of adequate variety, independence, or a blinded test.
+
+The later 11-message LFG / 12-excerpt DevPulse development run also fails the
+default label-support requirements: its training group has no positive
+`sensitive-data` examples, and its validation group contains only positive
+`build.software` and `filesystem.write` proposals. The labels are unverified,
+so running this count on them is a diagnostic, not reviewed support. See the
+[experiment](REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
 ### Makers checkpoint inventory
 

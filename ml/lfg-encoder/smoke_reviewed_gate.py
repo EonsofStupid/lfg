@@ -26,17 +26,23 @@ import corpus_audit
 work = args.output.resolve()
 work.mkdir()
 taxonomy = root / "ml/lfg-encoder/evaluation-taxonomy.v1.json"
+fixture_labels = json.loads(taxonomy.read_text(encoding="utf-8"))
+fixture_a = {"intents": [label for label in fixture_labels["intents"] if label != "build.software"],
+             "capabilities": fixture_labels["capabilities"], "risks": fixture_labels["risks"]}
+fixture_b = {"intents": ["build.software"], "capabilities": [], "risks": []}
 rows = [
     {"id": "fixture-1", "text": "Explain the fixture architecture", "family": "fixture-a", "verified": False,
-     "intents": ["respond.general"], "capabilities": ["text.generate"], "risks": [], "source": {"project": "fixture-train"}},
+     **fixture_a, "source": {"project": "fixture-train"}},
     {"id": "fixture-2", "text": "Implement the fixture component", "family": "fixture-b", "verified": False,
-     "intents": ["build.software"], "capabilities": ["filesystem.write"], "risks": [], "source": {"project": "fixture-train"}},
+     **fixture_b, "source": {"project": "fixture-train"}},
     {"id": "fixture-3", "text": "Explain the validation fixture", "family": "fixture-c", "verified": False,
-     "intents": ["respond.general"], "capabilities": ["text.generate"], "risks": [], "source": {"project": "fixture-validation"}},
-    {"id": "fixture-4", "text": "Implement the test fixture", "family": "fixture-d", "verified": False,
-     "intents": ["build.software"], "capabilities": ["filesystem.write"], "risks": [], "source": {"project": "fixture-test"}},
+     **fixture_a, "source": {"project": "fixture-validation"}},
+    {"id": "fixture-4", "text": "Implement the validation fixture", "family": "fixture-d", "verified": False,
+     **fixture_b, "source": {"project": "fixture-validation"}},
+    {"id": "fixture-5", "text": "Implement the test fixture", "family": "fixture-e", "verified": False,
+     **fixture_b, "source": {"project": "fixture-test"}},
 ]
-files = [("train.jsonl", rows[:2]), ("validation.jsonl", rows[2:3]), ("test.jsonl", rows[3:])]
+files = [("train.jsonl", rows[:2]), ("validation.jsonl", rows[2:4]), ("test.jsonl", rows[4:])]
 def save_rows():
     for name, group in files:
         (work / name).write_text("".join(json.dumps(row) + "\n" for row in group), encoding="utf-8")
@@ -61,7 +67,8 @@ policy = json.loads((root / "ml/lfg-encoder/promotion-policy.json").read_text(en
 policy["minimum_human_verified_examples"] = len(rows[:2])
 (work / "fixture-policy.json").write_text(json.dumps(policy), encoding="utf-8")
 cmd = [sys.executable, "ml/lfg-encoder/train.py", "train", "--dataset", str(work / "training.jsonl"),
-       "--promotion-policy", str(work / "fixture-policy.json"), "--audited-plan", str(plan_path),
+       "--promotion-policy", str(work / "fixture-policy.json"),
+       "--audited-plan", str(plan_path),
        "--base-model", args.base_model, "--model-revision", args.model_revision, "--output", str(work / "model"),
        "--epochs", args.epochs, "--max-length", args.max_length, "--batch-size", args.batch_size,
        "--checkpoint-steps", args.checkpoint_steps]
@@ -75,9 +82,12 @@ if result.returncode:
 manifest = json.loads((work / "model/run-manifest.json").read_text())
 assert manifest["split"]["corpus_audit"]["review_ledger_sha256"]
 assert manifest["split"]["validation_source"] == "audited-validation-partition"
+assert manifest["split"]["training_support"]["counts"]["train"]["sensitive-data"]["positive"] == 1
 assert set(manifest["split"]["train_ids"]) == {"fixture-1", "fixture-2"}
-assert manifest["split"]["validation_ids"] == ["fixture-3"]
-assert "fixture-4" not in manifest["split"]["train_ids"] + manifest["split"]["validation_ids"]
+assert manifest["split"]["validation_ids"] == ["fixture-3", "fixture-4"]
+assert "fixture-5" not in manifest["split"]["train_ids"] + manifest["split"]["validation_ids"]
 assert (work / "model/model.safetensors").is_file()
+classes = json.loads((work / "model/labels.json").read_text(encoding="utf-8"))
+assert classes == sorted(label for group in ("intents", "capabilities", "risks") for label in fixture_labels[group])
 print(json.dumps({"fixture_only": True, "training_rows": len(rows[:2]), "audit_bound": True,
                   "model_sha256": hashlib.sha256((work / "model/model.safetensors").read_bytes()).hexdigest()}))

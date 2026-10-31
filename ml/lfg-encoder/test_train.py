@@ -69,6 +69,38 @@ class DatasetGateTests(unittest.TestCase):
         training[0]["risks"] = ["sensitive-data"]
         train.validate_validation_labels(training, validation)
 
+    def test_reviewed_support_checks_positive_and_negative_per_label_and_split(self):
+        taxonomy = {"intents": {"respond.general"}, "capabilities": {"text.generate"}, "risks": {"sensitive-data"}}
+        policy = train.SUPPORT_POLICY.read_bytes()
+        positive = dict(record(1, True), risks=["sensitive-data"])
+        negative = record(2, True)
+        negative["intents"] = []
+        negative["capabilities"] = []
+        rows = [positive, negative]
+        result = train.training_support(rows, rows, taxonomy, policy)
+        self.assertEqual(result["counts"]["train"]["sensitive-data"]["positive"], 1)
+        with self.assertRaisesRegex(ValueError, "train:sensitive-data has 0 positive/2 negative"):
+            train.training_support([negative, negative], rows, taxonomy, policy)
+        with self.assertRaisesRegex(ValueError, "validation:sensitive-data has 2 positive/0 negative"):
+            train.training_support(rows, [positive, positive], taxonomy, policy)
+
+    def test_support_policy_is_configurable_and_rejects_unknown_or_invalid_rules(self):
+        taxonomy = {"intents": {"respond.general"}, "capabilities": {"text.generate"}, "risks": {"sensitive-data"}}
+        policy = json.loads(train.SUPPORT_POLICY.read_bytes())
+        policy["overrides"] = {"sensitive-data": {"train": {"minimum_positive": 2}}}
+        positive = dict(record(1, True), risks=["sensitive-data"])
+        negative = dict(record(2, True), intents=[], capabilities=[])
+        result = train.training_support([positive, positive, negative], [positive, negative], taxonomy, json.dumps(policy).encode())
+        self.assertEqual(result["counts"]["train"]["sensitive-data"]["minimum_positive"], 2)
+        for overrides in ({"missing": {"train": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"test": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"train": {"minimum_positive": True}}},
+                          {"sensitive-data": {"train": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"train": {"minimum_negative": -1}}}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                train.training_support([positive, negative], [positive, negative], taxonomy,
+                                       json.dumps({**policy, "overrides": overrides}).encode())
+
     def test_run_manifest_prevents_overwrite_and_mismatched_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
