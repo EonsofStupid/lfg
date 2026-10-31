@@ -688,6 +688,17 @@ opened or compared during preparation; final holdout separation remains a
 separate requirement. The candidates come from only three session files and do
 not establish independent validation coverage.
 
+A separate Claude session for the provisionally assigned OneManWho validation
+project yielded 12 pending, unlabeled candidates. Source prefixes verified, and
+the preparation found no normalized overlap with the four selected development
+reference plans. Its private workspace is
+`dataset/private/claude-onemanwho-validation-draft-20261031-v1/workspace`.
+Together with the earlier 35 candidates, this adds a second session within the
+same related-project group; it does not establish independent project diversity.
+No candidate was approved, and the reserved test workspace was not opened or
+compared during this preparation. A local review-server check verified one
+original source and its context endpoint without recording a decision.
+
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
 commit-message prompts. All 34 are unverified, and this plan references no
