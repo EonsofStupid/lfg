@@ -1,0 +1,6 @@
+{
+  "schema_version": "lfg.review-web-config.v1",
+  "max_request_bytes": 65536,
+  "max_prompt_bytes": 262144,
+  "request_timeout_seconds": 10
+}
