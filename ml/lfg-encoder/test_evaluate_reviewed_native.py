@@ -49,7 +49,10 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         self.model = self.root / 'model'
         self.model.mkdir()
         manifest = {'schema_version': 'lfg.encoder-run.v1', 'development_override': False, 'dataset_sha256': digest,
-                    'environment_evidence': {'lock_sha256': 'a' * 64, 'installed_versions_sha256': 'b' * 64},
+                    'environment_evidence': {'lock_sha256': 'a' * 64, 'installed_versions_sha256': 'b' * 64,
+                                             'locked_wheel_payload': {'schema_version': 'lfg.installed-wheel-payload.v1',
+                                                'files': 3, 'bytes': 50, 'payload_sha256': 'f' * 64,
+                                                'excluded_wheel_records': 1, 'excluded_wheel_scripts': 0}},
                     'model_snapshot_evidence': {'manifest_sha256': 'c' * 64},
                     'training_inputs_sha256': 'd' * 64, 'wheelhouse_verifier_sha256': 'e' * 64,
                     'split': {'development_override': False, 'validation_source': 'audited-validation-partition',
@@ -128,6 +131,14 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         manifest_path = self.model / 'run-manifest.json'
         manifest = json.loads(manifest_path.read_text())
         manifest['development_override'] = True
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'not bound'):
+            self.compare()
+
+    def test_rejects_missing_wheel_payload_evidence(self):
+        manifest_path = self.model / 'run-manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['environment_evidence']['locked_wheel_payload'] = None
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, 'not bound'):
             self.compare()

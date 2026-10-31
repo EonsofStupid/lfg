@@ -33,11 +33,18 @@ def audited_test(plan_path: Path, training_dataset: Path, run_manifest: dict[str
     environment = run_manifest.get('environment_evidence')
     model_input = run_manifest.get('model_snapshot_evidence')
     digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+    payload = environment.get('locked_wheel_payload') if isinstance(environment, dict) else None
     if (run_manifest.get('schema_version') != 'lfg.encoder-run.v1'
             or run_manifest.get('development_override') is not False
             or run_manifest.get('dataset_sha256') != dataset_hash
             or not isinstance(environment, dict) or not digest(environment.get('lock_sha256'))
             or not digest(environment.get('installed_versions_sha256'))
+            or not isinstance(payload, dict) or payload.get('schema_version') != 'lfg.installed-wheel-payload.v1'
+            or type(payload.get('files')) is not int or payload['files'] < 1
+            or type(payload.get('bytes')) is not int or payload['bytes'] < 0
+            or not digest(payload.get('payload_sha256'))
+            or any(type(payload.get(field)) is not int or payload[field] < 0
+                   for field in ('excluded_wheel_records', 'excluded_wheel_scripts'))
             or not isinstance(model_input, dict) or not digest(model_input.get('manifest_sha256'))
             or not digest(run_manifest.get('training_inputs_sha256'))
             or not digest(run_manifest.get('wheelhouse_verifier_sha256'))):

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from email.parser import BytesParser
 import hashlib
 import importlib.metadata
 import json
 import os
 import re
 import stat
+import sysconfig
 import zipfile
 from pathlib import Path
 
@@ -85,7 +87,83 @@ def normalize_name(name: str) -> str:
     return re.sub(r'[-_.]+', '-', name).lower()
 
 
-def verify_environment(lock: Path, wheelhouse: Path, allowed_extra: list[str]) -> dict:
+def verify_wheel_payload(wheelhouse: Path) -> dict:
+    """Compare non-generated installed wheel payloads with the supplied wheel bytes."""
+    locations = {name: Path(value).resolve(strict=True) for name, value in sysconfig.get_paths().items()
+                 if name in ('purelib', 'platlib', 'data')}
+    if set(locations) != {'purelib', 'platlib', 'data'}:
+        raise ValueError('interpreter does not expose required installation paths')
+    digest = hashlib.sha256()
+    checked_files = checked_bytes = skipped_records = skipped_scripts = 0
+    destinations: set[str] = set()
+    for path in sorted(wheelhouse.resolve(strict=True).iterdir()):
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [item.filename for item in infos]
+            if len(set(names)) != len(names):
+                raise ValueError('wheel contains duplicate paths')
+            wheels = [item for item in infos if item.filename.endswith('.dist-info/WHEEL')
+                      and item.filename.count('/') == 1]
+            if len(wheels) != 1 or wheels[0].file_size > 4 * 1024 * 1024:
+                raise ValueError('wheel requires one bounded WHEEL metadata file')
+            metadata = BytesParser().parsebytes(archive.read(wheels[0]), headersonly=True)
+            pure = metadata.get('Root-Is-Purelib', '').lower()
+            if pure not in ('true', 'false'):
+                raise ValueError('wheel has invalid Root-Is-Purelib metadata')
+            for item in infos:
+                if item.is_dir():
+                    continue
+                name = item.filename
+                parts = name.split('/')
+                if (not name or '\\' in name or any(part in ('', '.', '..') or ':' in part for part in parts)
+                        or stat.S_ISLNK(item.external_attr >> 16)):
+                    raise ValueError('wheel contains an unsafe file path')
+                if len(parts) == 2 and parts[0].endswith('.dist-info') and parts[1] == 'RECORD':
+                    skipped_records += 1
+                    continue
+                if parts[0].endswith('.data'):
+                    if len(parts) < 3:
+                        raise ValueError('wheel data path is incomplete')
+                    kind = parts[1]
+                    if kind == 'scripts':
+                        skipped_scripts += 1
+                        continue
+                    if kind not in locations:
+                        raise ValueError('wheel has unsupported data scheme')
+                    relative = parts[2:]
+                else:
+                    kind = 'purelib' if pure == 'true' else 'platlib'
+                    relative = parts
+                root = locations[kind]
+                target = root.joinpath(*relative)
+                resolved = target.resolve(strict=True)
+                if not resolved.is_relative_to(root) or not resolved.is_file():
+                    raise ValueError('installed wheel file is outside its expected directory')
+                identity = os.path.normcase(str(resolved))
+                if identity in destinations:
+                    raise ValueError('wheel payloads map to the same installed file')
+                destinations.add(identity)
+                actual = hashlib.sha256()
+                expected = hashlib.sha256()
+                with target.open('rb') as installed, archive.open(item) as original:
+                    for chunk in iter(lambda: original.read(1024 * 1024), b''):
+                        expected.update(chunk)
+                    for chunk in iter(lambda: installed.read(1024 * 1024), b''):
+                        actual.update(chunk)
+                if actual.digest() != expected.digest():
+                    raise ValueError(f'installed wheel payload differs: {path.name} / {name}')
+                checked_files += 1
+                checked_bytes += item.file_size
+                digest.update(json.dumps([path.name, name, expected.hexdigest()], ensure_ascii=True,
+                                         separators=(',', ':')).encode() + b'\n')
+    if not checked_files:
+        raise ValueError('no installed wheel payload files were checked')
+    return {'schema_version': 'lfg.installed-wheel-payload.v1', 'files': checked_files,
+            'bytes': checked_bytes, 'payload_sha256': digest.hexdigest(),
+            'excluded_wheel_records': skipped_records, 'excluded_wheel_scripts': skipped_scripts}
+
+
+def verify_environment(lock: Path, wheelhouse: Path, allowed_extra: list[str], verify_payload: bool = False) -> dict:
     raw = lock.read_bytes()
     try:
         actual = lock_wheelhouse.lock(wheelhouse)
@@ -116,12 +194,19 @@ def verify_environment(lock: Path, wheelhouse: Path, allowed_extra: list[str]) -
         raise ValueError('installed package versions do not match the lock')
     if set(installed) - set(expected) - extras:
         raise ValueError('unlisted installed distributions are not allowed')
+    try:
+        payload = verify_wheel_payload(wheelhouse) if verify_payload else None
+        if verify_payload and lock_wheelhouse.lock(wheelhouse) != raw:
+            raise ValueError('wheelhouse changed during installed payload verification')
+    except zipfile.BadZipFile as error:
+        raise ValueError('wheelhouse changed or contains an invalid wheel') from error
     if lock.read_bytes() != raw:
         raise ValueError('wheelhouse lock changed during verification')
     fingerprint = json.dumps(installed, sort_keys=True, separators=(',', ':')).encode('utf-8')
     return {'lock_sha256': hashlib.sha256(raw).hexdigest(),
             'installed_versions_sha256': hashlib.sha256(fingerprint).hexdigest(),
-            'allowed_extra': sorted(extras), 'installed_files_verified': False}
+            'allowed_extra': sorted(extras), 'installed_files_verified': False,
+            'locked_wheel_payload': payload}
 
 
 def main() -> None:

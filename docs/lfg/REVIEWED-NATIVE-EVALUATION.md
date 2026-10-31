@@ -10,8 +10,10 @@ Hashes and source metadata can still be sensitive, so keep the report private.
 
 The tool checks that every train, validation and test record has a current
 review attestation, the training dataset matches the audited train partition,
-and the model run records that same audit, dataset, split, environment evidence
-and model-snapshot evidence. It rejects below-gate runs. It checks that the
+and the model run records that same audit, dataset, split, locked-wheel payload
+evidence and model-snapshot evidence. It rejects below-gate runs and older
+manifests without payload evidence. The evidence does not cover generated
+bytecode, scripts, bootstrap tools, shadowing files or the interpreter. It checks that the
 ONNX manifest names the selected source model artifact and taxonomy, verifies
 the declared ONNX files, and binds both prediction producers and the native
 model identity to the selected binary and runtime configuration. It repeats

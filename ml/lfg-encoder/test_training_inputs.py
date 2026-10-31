@@ -12,6 +12,84 @@ import training_inputs as inputs
 
 
 class TrainingInputTests(unittest.TestCase):
+    def test_payload_verification_checks_locked_files_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wheels = root / 'wheels'; wheels.mkdir()
+            site = root / 'site'; site.mkdir()
+            data = root / 'data'; data.mkdir()
+            dist = site / 'Example-1.2.dist-info'; dist.mkdir()
+            package = site / 'example'; package.mkdir()
+            meta = b'Metadata-Version: 2.1\nName: Example\nVersion: 1.2\n'
+            wheel_meta = b'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n'
+            (dist / 'METADATA').write_bytes(meta)
+            (dist / 'WHEEL').write_bytes(wheel_meta)
+            (package / '__init__.py').write_bytes(b'VALUE = 1\n')
+            (data / 'asset.txt').write_bytes(b'asset')
+            wheel = wheels / 'fixture.whl'
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                archive.writestr('Example-1.2.dist-info/METADATA', meta)
+                archive.writestr('Example-1.2.dist-info/WHEEL', wheel_meta)
+                archive.writestr('Example-1.2.dist-info/RECORD', 'installer replaces this')
+                archive.writestr('example/__init__.py', b'VALUE = 1\n')
+                archive.writestr('Example-1.2.data/data/asset.txt', b'asset')
+                archive.writestr('Example-1.2.data/scripts/command', '#!python\n')
+            lock = root / 'lock.txt'; lock.write_bytes(lock_wheelhouse.lock(wheels))
+            packages = [SimpleNamespace(metadata={'Name': 'example'}, version='1.2')]
+            paths = {'purelib': str(site), 'platlib': str(site), 'data': str(data)}
+            with patch.object(inputs.importlib.metadata, 'distributions', return_value=packages), \
+                    patch.object(inputs.sysconfig, 'get_paths', return_value=paths):
+                evidence = inputs.verify_environment(lock, wheels, [], verify_payload=True)
+                self.assertFalse(evidence['installed_files_verified'])
+                self.assertEqual(evidence['locked_wheel_payload']['files'], 4)
+                self.assertEqual(evidence['locked_wheel_payload']['excluded_wheel_records'], 1)
+                self.assertEqual(evidence['locked_wheel_payload']['excluded_wheel_scripts'], 1)
+                (package / '__init__.py').write_bytes(b'VALUE = 2\n')
+                with self.assertRaisesRegex(ValueError, 'payload differs'):
+                    inputs.verify_environment(lock, wheels, [], verify_payload=True)
+                (package / '__init__.py').unlink()
+                with self.assertRaises(FileNotFoundError):
+                    inputs.verify_environment(lock, wheels, [], verify_payload=True)
+
+    def test_payload_rejects_unsafe_wheel_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); wheels = root / 'wheels'; wheels.mkdir()
+            for name in ('site', 'data'):
+                (root / name).mkdir()
+            (root / 'site' / 'Example-1.2.dist-info').mkdir()
+            (root / 'site' / 'Example-1.2.dist-info' / 'WHEEL').write_bytes(b'Root-Is-Purelib: true\n')
+            with zipfile.ZipFile(wheels / 'fixture.whl', 'w') as archive:
+                archive.writestr('Example-1.2.dist-info/WHEEL', 'Root-Is-Purelib: true\n')
+                archive.writestr('../escape.py', 'bad')
+            paths = {'purelib': str(root / 'site'), 'platlib': str(root / 'site'), 'data': str(root / 'data')}
+            with patch.object(inputs.sysconfig, 'get_paths', return_value=paths), \
+                    self.assertRaisesRegex(ValueError, 'unsafe file path'):
+                inputs.verify_wheel_payload(wheels)
+
+    def test_payload_rejects_collisions_and_unsupported_scheme(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); wheels = root / 'wheels'; wheels.mkdir()
+            site = root / 'site'; site.mkdir()
+            data = root / 'data'; data.mkdir()
+            dist = site / 'Example-1.2.dist-info'; dist.mkdir()
+            wheel_meta = b'Root-Is-Purelib: true\n'
+            (dist / 'WHEEL').write_bytes(wheel_meta)
+            (site / 'same.py').write_bytes(b'same')
+            path = wheels / 'fixture.whl'
+            def write_wheel(extra):
+                with zipfile.ZipFile(path, 'w') as archive:
+                    archive.writestr('Example-1.2.dist-info/WHEEL', wheel_meta)
+                    archive.writestr('same.py', b'same')
+                    archive.writestr(extra, b'same')
+            paths = {'purelib': str(site), 'platlib': str(site), 'data': str(data)}
+            with patch.object(inputs.sysconfig, 'get_paths', return_value=paths):
+                write_wheel('Example-1.2.data/purelib/same.py')
+                with self.assertRaisesRegex(ValueError, 'same installed file'):
+                    inputs.verify_wheel_payload(wheels)
+                write_wheel('Example-1.2.data/headers/same.py')
+                with self.assertRaisesRegex(ValueError, 'unsupported data scheme'):
+                    inputs.verify_wheel_payload(wheels)
+
     def test_model_manifest_binds_all_files_revision_and_directories(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
