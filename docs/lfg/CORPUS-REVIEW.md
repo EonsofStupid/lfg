@@ -115,6 +115,49 @@ items. It does not assert that there are enough examples or suitable project
 splits for training: the existing corpus audit, label support and sample gates
 still apply.
 
+### Combining reviewed workspaces
+
+`combine_reviewed_workspaces.py` joins current approvals from separately reviewed
+workspaces into a new private plan, ledger, taxonomy and train-only JSONL. It
+locks each workspace while reading, checks matching taxonomies, exports only
+current approvals, and applies the existing audit to the combined result. It
+rejects duplicate IDs, cross-split project/group/family or normalized-text
+overlap, within-split normalized duplicates and missing partitions; stale
+approvals are excluded. Every supplied workspace must contribute at least one current
+approval. It creates the output directory exclusively after staging and auditing;
+if an error occurs during the final copy, inspect the incomplete output and use
+a new path. Its manifest binds input audit, code, policy and output digests.
+
+Check the actual private workspaces without creating an output:
+
+```powershell
+python ml/lfg-encoder/combine_reviewed_workspaces.py `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/makers-heldout-review-draft.v4/workspace `
+  --status
+```
+
+After genuine reviews, replace `--status` with `--output NEW_PRIVATE_DIRECTORY`.
+The output's `plan.json` and `training.jsonl` can then be supplied to the audited
+training command. The sample status uses `promotion-policy.json` by default;
+select the same policy intended for training with `--promotion-policy`. The
+candidate shortfall is optimistic: it counts every record in the training
+workspaces, including pending, rejected and stale records, so it is a lower
+bound on how much additional data may be needed. The count alone does not check
+label support, independence or model quality. Assembly can produce a reviewed
+snapshot before it meets the training sample and label-support gates; it does
+not bypass those gates or mark the snapshot promotable. Audit currently reads the
+test records and therefore does not enforce a blinded holdout.
+
+On 2026-10-31 the status for these three workspaces was 226 train, 35 validation
+and 785 test records, all pending. The default policy required 500 reviewed
+training records: at least 274 additional candidates are needed even if every
+current training candidate is approved. Assembly correctly rejected the current
+workspaces without creating an output. A test-only fixture exercised approved
+records through the combined plan and the existing training/validation audit;
+that fixture is not human-reviewed data or quality evidence.
+
 The current real-request review workspace is
 `dataset/private/real-request-review-workspace.v1`. It was initialized with
 38 pending items and no approvals. Its LFG validation group was used for an
