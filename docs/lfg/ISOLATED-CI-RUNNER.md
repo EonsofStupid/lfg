@@ -33,6 +33,12 @@ only for a same-repository, non-draft `codex/` PR marked
 `ready-to-auto-merge`. It tests the checkout and, after verification, checks
 that both head and base still match before requesting the merge. Branch rules
 and GitHub permissions still apply. A changed head or base requires a new run.
+The kernel golden comparison remains mandatory and logs both file digests.
+Uploading its output is best-effort because an exhausted GitHub artifact quota
+otherwise prevents the remaining verification from running; the upload failure
+is visible in the workflow and the output file is unavailable after the
+disposable container exits. Restore artifact capacity to retain that file in
+GitHub. The printed digest and successful comparison are not a retained copy.
 
 The label is a scheduler selector, **not an authorization boundary**. Other
 workflows able to target it can run code on this runner; repository and fork

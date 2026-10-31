@@ -39,8 +39,10 @@ jobs:
         run: |
           cargo run --locked -q -p lfg-server -- classify "logout doesn't clear the session" > target/kernel-logout.actual.json
           cmp crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
+          sha256sum crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
       - name: Keep the kernel golden output
         if: ${{ always() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: kernel-logout-golden
