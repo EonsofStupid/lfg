@@ -94,3 +94,22 @@ test('wrapper suggestion is a reversible preview and only sends a transform on a
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
   expect(post.mock.calls[0][0].redactions).toEqual([{start: 0, end: Array.from(prefix).length, replacement: ''}])
 })
+
+test('review UI opens an optional record from the fragment and removes it from the address bar', async () => {
+  const dir = resolve(process.cwd(), '../../ml/lfg-encoder/review-web')
+  const parsed = new DOMParser().parseFromString(readFileSync(resolve(dir, 'index.html'), 'utf8'), 'text/html')
+  document.body.innerHTML = parsed.body.innerHTML
+  history.replaceState(null, '', '/#local-test-token&record=record%26one')
+  const calls = []
+  vi.stubGlobal('fetch', vi.fn(async (path, options = {}) => {
+    calls.push({path, authorization: options.headers.Authorization})
+    if (path === '/api/status') return {ok: true, json: async () => ({reviewer: 'r', decisions: {pending: 1, approved: 0, rejected: 0}})}
+    return {ok: true, json: async () => ({item: {id: 'record&one', text: 'fixture', source: {}, project: 'fixture',
+      split: 'train', labels: {intents: ['build'], capabilities: [], risks: []}, annotation_sha256: 'digest'},
+      offset: 0, pending: 1, taxonomy: {intents: ['build'], capabilities: [], risks: []}})}
+  }))
+  Function(readFileSync(resolve(dir, 'app.js'), 'utf8'))()
+  await waitFor(() => expect(document.getElementById('record-id').textContent).toBe('record&one'))
+  expect(calls).toContainEqual({path: '/api/item?id=record%26one', authorization: 'Bearer local-test-token'})
+  expect(location.hash).toBe('')
+})
