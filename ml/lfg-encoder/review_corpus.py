@@ -65,7 +65,7 @@ def init_workspace(plan_path: Path, workspace: Path) -> dict[str, Any]:
     copies = []
     for source, evidence in zip(plan['sources'], report['sources'], strict=True):
         source_path = audit.resolve(plan_path.parent, source['path'])
-        rows, digest = train.load_dataset(source_path)
+        rows, digest = train.load_dataset(source_path, allow_unlabeled_review=True)
         raw_source = source_path.read_bytes()
         if digest != evidence['sha256'] or hashlib.sha256(raw_source).hexdigest() != digest:
             raise ValueError('source changed during initialization')
@@ -126,7 +126,7 @@ def status(workspace: Path) -> dict[str, Any]:
 def find_row(workspace: Path, plan: dict[str, Any], identifier: str) -> tuple[Path, list[dict[str, Any]], int, dict[str, Any]]:
     for source in plan['sources']:
         path = private_path(workspace, source['path'])
-        rows, _ = train.load_dataset(path)
+        rows, _ = train.load_dataset(path, allow_unlabeled_review=True)
         for index, row in enumerate(rows):
             if row['id'] == identifier:
                 return path, rows, index, source
@@ -152,6 +152,8 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
     if not row['verified'] and item['annotation_sha256'] != current_digest:
         raise ValueError('pending record changed; reinitialize review')
     changed = dict(row)
+    if decision == 'approved' and row.get('labels_pending') and proposed is None:
+        raise ValueError('unlabeled records require explicitly supplied labels')
     if proposed is not None:
         if decision != 'approved' or set(proposed) != set(evaluate.FIELDS):
             raise ValueError('label edits require an approved record and all label groups')
@@ -163,6 +165,7 @@ def record_decision(workspace: Path, identifier: str, reviewer: str, decision: s
             changed[field] = sorted(values)
         if not changed['intents']:
             raise ValueError('at least one intent is required')
+        changed.pop('labels_pending', None)
     if audit.audit(workspace / 'plan.json')[0] != report:
         raise ValueError('workspace changed during review')
     if decision == 'approved' or row['verified']:
@@ -194,6 +197,8 @@ def interactive_review(workspace: Path, reviewer: str) -> None:
             if 'review_note' in row:
                 print('REVIEW NOTE:', json.dumps(row['review_note'], ensure_ascii=True))
             print('PROPOSED LABELS:', json.dumps(proposed, ensure_ascii=True, sort_keys=True))
+            if row.get('labels_pending'):
+                print('LABELS NOT YET PROVIDED: select all applicable labels before approving.')
             print('Absent labels are negatives. Check attribution, context, permissions and sensitive data before approving.')
             action = input('[a]pprove, [e]dit labels, [r]eject, [s]kip, [q]uit: ').strip().lower()
             if action == 'e':
@@ -227,7 +232,7 @@ def export_approved(workspace: Path, output: Path) -> dict[str, Any]:
     selected = []
     approved_items = []
     for source in plan['sources']:
-        rows, _ = train.load_dataset(private_path(workspace, source['path']))
+        rows, _ = train.load_dataset(private_path(workspace, source['path']), allow_unlabeled_review=True)
         keep = []
         for row in rows:
             digest = audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)

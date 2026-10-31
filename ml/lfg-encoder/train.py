@@ -130,7 +130,7 @@ def load_records(path: Path) -> list[dict[str, Any]]:
     return load_dataset(path)[0]
 
 
-def load_dataset(path: Path) -> tuple[list[dict[str, Any]], str]:
+def load_dataset(path: Path, *, allow_unlabeled_review: bool = False) -> tuple[list[dict[str, Any]], str]:
     raw = path.read_bytes()
     records = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
     required = {"id", "text", "intents", "capabilities", "risks", "verified", "family"}
@@ -145,7 +145,13 @@ def load_dataset(path: Path) -> tuple[list[dict[str, Any]], str]:
             raise ValueError(f"record {record['id']} verified must be a boolean")
         if not isinstance(record["family"], str) or not record["family"].strip():
             raise ValueError(f"record {record['id']} family must be a non-empty string")
-        if not record["text"].strip() or not record["intents"]:
+        pending = record.get("labels_pending", False)
+        if type(pending) is not bool:
+            raise ValueError(f"record {record['id']} has invalid labels_pending")
+        if pending and (not allow_unlabeled_review or record["verified"] or
+                        any(record[field] != [] for field in ("intents", "capabilities", "risks"))):
+            raise ValueError(f"record {record['id']} has pending labels and is not usable here")
+        if not record["text"].strip() or (not record["intents"] and not pending):
             raise ValueError(f"record {record['id']} has empty text or intents")
         seen.add(record["id"])
     return records, hashlib.sha256(raw).hexdigest()

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
+def verify_record(record: dict) -> None:
     if (record.get('schema_version') != 'lfg.unreviewed-codex-message.v2'
             or not isinstance(record.get('source_file'), str)
             or type(record.get('source_line')) is not int or record['source_line'] < 1
@@ -19,15 +19,36 @@ def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
             or not isinstance(record.get('source_line_sha256'), str)
             or not isinstance(record.get('text_sha256'), str)):
         raise ValueError('invalid inventory entry')
-    path = Path(record['source_file'])
+
+
+def verify_many(records: list[dict], max_bytes: int, max_line_bytes: int) -> list[str]:
+    """Verify selected records in source order, reading each source prefix once."""
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    for index, record in enumerate(records):
+        verify_record(record)
+        groups.setdefault(record['source_file'], []).append((index, record))
+    results = [''] * len(records)
+    for name, group in groups.items():
+        ordered = sorted(group, key=lambda item: item[1]['source_line'])
+        if len({item['source_line'] for _, item in ordered}) != len(ordered):
+            raise ValueError('duplicate source line')
+        for index, text in verify_group(Path(name), ordered, max_bytes, max_line_bytes):
+            results[index] = text
+    return results
+
+
+def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, max_line_bytes: int) -> list[tuple[int, str]]:
     before = path.stat()
-    if record['source_prefix_bytes'] > max_bytes or before.st_size < record['source_prefix_bytes']:
+    if any(record['source_prefix_bytes'] > max_bytes or before.st_size < record['source_prefix_bytes']
+           for _, record in ordered):
         raise ValueError('source prefix is unavailable or exceeds byte limit')
     hasher = hashlib.sha256()
-    selected = None
     total = 0
+    found = []
     with path.open('rb') as source:
         line_number = 0
+        pending = iter(ordered)
+        current = next(pending, None)
         while True:
             line = source.readline(max_line_bytes + 1)
             if not line:
@@ -39,17 +60,27 @@ def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
                 raise ValueError('source grew beyond byte limit')
             hasher.update(line)
             line_number += 1
-            if line_number == record['source_line']:
+            if current and line_number == current[1]['source_line']:
+                index, record = current
                 selected = line.rstrip(b'\r\n')
-                break
+                if (hasher.hexdigest() != record['source_prefix_sha256']
+                        or total != record['source_prefix_bytes']):
+                    raise ValueError('source prefix no longer matches the inventory')
+                if hashlib.sha256(selected).hexdigest() != record['source_line_sha256']:
+                    raise ValueError('source line does not match the inventory')
+                found.append((index, message_text(selected, record)))
+                current = next(pending, None)
+                if current is None:
+                    break
     after = path.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise ValueError('source changed during read')
-    if (hasher.hexdigest() != record['source_prefix_sha256'] or selected is None
-            or total != record['source_prefix_bytes']):
-        raise ValueError('source prefix no longer matches the inventory')
-    if hashlib.sha256(selected).hexdigest() != record['source_line_sha256']:
-        raise ValueError('source line does not match the inventory')
+    if len(found) != len(ordered):
+        raise ValueError('source line is missing')
+    return found
+
+
+def message_text(selected: bytes, record: dict) -> str:
     try:
         row = json.loads(selected)
         payload = row['payload']
@@ -66,6 +97,10 @@ def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
     if hashlib.sha256(text.encode('utf-8')).hexdigest() != record['text_sha256']:
         raise ValueError('message text does not match the inventory')
     return text
+
+
+def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
+    return verify_many([record], max_bytes, max_line_bytes)[0]
 
 
 def main() -> None:
