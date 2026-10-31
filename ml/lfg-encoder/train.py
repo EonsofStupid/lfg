@@ -92,6 +92,13 @@ def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_clas
     return result, cuda_available
 
 
+def make_trainer(model_init: Any, arguments: Any, train_data: Any, validation_data: Any,
+                 tokenizer: Any, trainer_class: Any, collator_class: Any) -> Any:
+    """Pad each batch to its longest tokenized request, for training and evaluation."""
+    return trainer_class(model_init=model_init, args=arguments, train_dataset=train_data,
+                         eval_dataset=validation_data, data_collator=collator_class(tokenizer=tokenizer))
+
+
 def prepare_run(output: Path, manifest: dict[str, Any], resume: bool) -> None:
     """Do not mix unrelated experiments or overwrite an existing run."""
     manifest_path = output / "run-manifest.json"
@@ -348,7 +355,8 @@ def train(args: argparse.Namespace) -> None:
         from datasets import Dataset
         from sklearn.metrics import f1_score, recall_score
         from sklearn.preprocessing import MultiLabelBinarizer
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
+        from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
+                                  Trainer, TrainingArguments)
         from transformers.trainer_utils import get_last_checkpoint
     except ImportError as error:
         raise SystemExit(
@@ -445,8 +453,8 @@ def train(args: argparse.Namespace) -> None:
             args.base_model, revision=args.model_revision, num_labels=len(binarizer.classes_),
             problem_type="multi_label_classification", ignore_mismatched_sizes=args.allow_mismatched_sizes,
             local_files_only=bool(model_manifest))
-    trainer = Trainer(model_init=model_init, args=training_arguments,
-                      train_dataset=train_data, eval_dataset=validation_data)
+    trainer = make_trainer(model_init, training_arguments, train_data, validation_data,
+                           tokenizer, Trainer, DataCollatorWithPadding)
     verify_training_device(args.device, trainer.args.device.type, torch.cuda.is_available())
     verify_training_device(args.device, next(trainer.model.parameters()).device.type, torch.cuda.is_available())
     trainer.train(resume_from_checkpoint=checkpoint)

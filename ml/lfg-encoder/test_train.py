@@ -209,6 +209,22 @@ class DatasetGateTests(unittest.TestCase):
             train.make_training_arguments(
                 args, torch, lambda **kwargs: SimpleNamespace(device=SimpleNamespace(type="cpu")))
 
+    def test_trainer_receives_tokenizer_padding_for_both_datasets(self):
+        tokenizer = object()
+        train_data, validation_data = object(), object()
+        collator = object()
+        def make_collator(*, tokenizer):
+            self.assertIs(tokenizer, expected_tokenizer)
+            return collator
+        def make_trainer(**kwargs):
+            return kwargs
+        expected_tokenizer = tokenizer
+        trainer = train.make_trainer(object(), object(), train_data, validation_data,
+                                     tokenizer, make_trainer, make_collator)
+        self.assertIs(trainer["data_collator"], collator)
+        self.assertIs(trainer["train_dataset"], train_data)
+        self.assertIs(trainer["eval_dataset"], validation_data)
+
     def test_reviewed_training_requires_both_environment_and_model_inputs(self):
         train.validate_input_options(True, None, None, None, [])
         with self.assertRaisesRegex(ValueError, 'reviewed training requires'):
