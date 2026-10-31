@@ -78,6 +78,27 @@ for the recorded fields, overhead, and limits.
 
 An experiment cannot mix semantic grades produced by different rubric hashes;
 changing the rubric requires a new experiment (or restoring the original
-rubric to inspect the prior experiment's statistics). The separate offline
+rubric to inspect the prior experiment's statistics). The runtime also rejects
+an outcome assigned to different variants in the same experiment, including in
+older stored grades. A baseline and candidate must be distinct.
+
+Each outcome has equal weight in `meanScore` and `passRate`: grades are averaged
+within an outcome, then those outcome averages are averaged across the variant.
+For a disputed outcome, the pass contribution is the fraction of its grades
+that passed; it is not a majority verdict. `samples` counts distinct
+caller-supplied outcome IDs, not verified independent tasks or a paired test
+set shared by the variants. `graderRuns` counts distinct
+caller-supplied run IDs, which are not verified identities and do not establish
+independence. `independentGraders` is the number with verified independence;
+the current grade protocol supplies no evidence for that, so it is zero.
+Consequently the positive `minIndependentGraders` policy gate cannot currently
+recommend or authorize promotion; after the sample threshold is met it reports
+`insufficient-independent-evidence`. Authentic, independent grader attribution
+and its evaluation are still required. Existing recorded promotion decisions
+are historical records and may contain statistics produced under older rules;
+they are not retroactively validated by this change.
+
+The separate offline
 encoder training policy in `ml/lfg-encoder/promotion-policy.json` is not this
-runtime promotion policy and remains a distinct experimental gate.
+runtime semantic-grade policy and remains a distinct experimental gate; this
+change does not qualify or promote an encoder.
