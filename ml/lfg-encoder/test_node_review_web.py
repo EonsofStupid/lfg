@@ -1,5 +1,6 @@
 """Local UI tests use simulated review decisions only."""
 import http.client
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -9,6 +10,7 @@ import unittest
 
 import node_review
 import node_review_web
+import review_web
 
 
 ROOT = Path(__file__).resolve().parent
@@ -155,6 +157,48 @@ class NodeReviewWebTests(unittest.TestCase):
         self.assertEqual(record['decision'], 'rejected')
         self.assertNotIn('choice', record)
         self.assertNotIn('split', record)
+
+    def test_opt_in_context_checks_original_prefix_and_never_decides(self):
+        text = '<script>test-only request</script>'
+        def line(text):
+            return (json.dumps({'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                    'content': [{'type': 'input_text', 'text': text}],
+                    'internal_chat_message_metadata_passthrough': {'content_item_kinds': ['user.text']}}}) + '\n').encode()
+        prior, selected = line('earlier user context'), line(text)
+        session = self.root / 'session.jsonl'
+        session.write_bytes(prior + selected)
+        source = {'project': 'source-project', 'kind': 'codex-session-user-text', 'source_file': str(session),
+                  'source_line': 2, 'source_line_sha256': hashlib.sha256(selected.rstrip(b'\r\n')).hexdigest(),
+                  'source_prefix_bytes': len(prior + selected), 'source_prefix_sha256': hashlib.sha256(prior + selected).hexdigest(),
+                  'source_file_sha256': hashlib.sha256(prior + selected).hexdigest(), 'text_sha256': hashlib.sha256(text.encode()).hexdigest()}
+        self.source.write_bytes(node_review.encode({'id': 'fixture', 'text': text, 'family': 'source-family',
+                                                    'source': source, 'review_note': 'Inspect.'}) + b'\n')
+        item = json.loads(self.queue.read_bytes())
+        item['sourceFileSha256'] = node_review.digest(self.source.read_bytes())
+        self.queue.write_bytes(node_review.encode(item) + b'\n')
+        self.ledger.unlink()
+        node_review.init(self.queue, SNAPSHOT, self.ledger)
+        result_item = self.item()
+        identifier = result_item['item']['itemSha256']
+        body = {'itemSha256': identifier}
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+        self.server.context_config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin='https://evil.example')[0], 403)
+        status, headers, raw = self.request('POST', '/api/source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        result = json.loads(raw)
+        self.assertEqual(result['messages'], [{'source_line': 1, 'text': 'earlier user context'}])
+        self.assertEqual(result['contextScope'], 'prior_user_messages_in_session')
+        self.assertEqual(node_review.load_ledger(self.queue, SNAPSHOT, self.ledger)[1]['records'][0]['decision'], 'pending')
+        session.write_bytes(line('changed earlier context') + selected)
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(node_review.load_ledger(self.queue, SNAPSHOT, self.ledger)[1]['records'][0]['decision'], 'pending')
+        session.write_bytes(prior + selected)
+        reject = {'itemSha256': identifier, 'guideSha256': result_item['guideSha256'],
+                  'decision': 'rejected', 'confirmation': 'REJECT', 'attest': True}
+        self.assertEqual(self.request('POST', '/api/decision', body=reject, origin=self.server.origin)[0], 200)
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
 
 
 if __name__ == '__main__':
