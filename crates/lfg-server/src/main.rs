@@ -187,6 +187,18 @@ enum Command {
         #[arg(long)]
         experimental: bool,
     },
+    /// Run the explicitly embedded, unpromoted node suggestion artifact.
+    #[cfg(feature = "embedded-node")]
+    EmbeddedNodeSuggest {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        exemplar_config: Option<PathBuf>,
+        #[arg(long)]
+        prediction_only: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
     /// Run an unpromoted ONNX artifact for offline comparison only.
     #[cfg(feature = "onnx-shadow")]
     OnnxPredict {
@@ -381,6 +393,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     exemplar_config: &exemplar_config,
                 },
                 &engine,
+                prediction_only,
+            )?;
+        }
+        #[cfg(feature = "embedded-node")]
+        Command::EmbeddedNodeSuggest {
+            runtime_config,
+            exemplar_config,
+            prediction_only,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("node suggestions require explicit --experimental".into());
+            }
+            exemplar_suggest::run_embedded(
+                runtime_config.as_deref(),
+                exemplar_config.as_deref(),
                 prediction_only,
             )?;
         }

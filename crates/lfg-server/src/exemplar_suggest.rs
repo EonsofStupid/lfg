@@ -321,6 +321,47 @@ impl<'a> NodeSuggester<'a> {
         })
     }
 
+    /// Use explicitly built-in artifacts, with optional runtime configuration overrides.
+    #[cfg(feature = "embedded-node")]
+    pub fn open_embedded(
+        engine: &'a Engine,
+        operations: OperationsConfig,
+        runtime_override: Option<&Path>,
+        config_override: Option<&Path>,
+    ) -> Result<Self> {
+        let runtime = match runtime_override {
+            Some(path) => std::borrow::Cow::Owned(std::fs::read(path)?),
+            None => std::borrow::Cow::Borrowed(embedded_file("runtime.json")?),
+        };
+        let config_raw = match config_override {
+            Some(path) => std::borrow::Cow::Owned(std::fs::read(path)?),
+            None => std::borrow::Cow::Borrowed(embedded_file("exemplar-config.json")?),
+        };
+        let config = Config::parse(&config_raw)?;
+        let source = Source::open_embedded(&runtime)?;
+        let raw_pack = embedded_file("pack.json")?;
+        if raw_pack.len() as u64 > config.max_pack_bytes {
+            return Err("embedded exemplar pack exceeds configured limit".into());
+        }
+        let pack = Pack::parse(
+            raw_pack,
+            crate::embedded_node::PACK_SHA256,
+            &config,
+            &source,
+            engine,
+        )?;
+        Ok(Self {
+            engine,
+            config,
+            source,
+            pack,
+            operations,
+            config_sha: onnx_embedding::hash(&config_raw),
+            pack_sha: crate::embedded_node::PACK_SHA256.to_owned(),
+            encoder: None,
+        })
+    }
+
     /// Evaluate one request; suggestions are advisory and never replace the baseline.
     pub fn suggest(&mut self, text: &str) -> Result<NodeResponse> {
         self.operations
@@ -377,8 +418,39 @@ impl<'a> NodeSuggester<'a> {
     }
 }
 
+#[cfg(feature = "embedded-node")]
+fn embedded_file(name: &str) -> Result<&'static [u8]> {
+    crate::embedded_node::FILES
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, bytes)| *bytes)
+        .ok_or_else(|| "embedded node file missing".into())
+}
+
+/// Selected snapshot bytes for a binary built with `embedded-node`.
+#[cfg(feature = "embedded-node")]
+pub fn embedded_snapshot() -> Result<&'static [u8]> {
+    embedded_file("snapshot.json")
+}
+
 pub fn run(args: Options<'_>, engine: &Engine, prediction_only: bool) -> Result<()> {
-    let mut suggester = NodeSuggester::open(&args, engine, crate::configured_operations()?)?;
+    let suggester = NodeSuggester::open(&args, engine, crate::configured_operations()?)?;
+    stream(suggester, prediction_only)
+}
+
+#[cfg(feature = "embedded-node")]
+pub fn run_embedded(
+    runtime: Option<&Path>,
+    config: Option<&Path>,
+    prediction_only: bool,
+) -> Result<()> {
+    let engine = Engine::from_json(embedded_snapshot()?)?;
+    let suggester =
+        NodeSuggester::open_embedded(&engine, crate::configured_operations()?, runtime, config)?;
+    stream(suggester, prediction_only)
+}
+
+fn stream(mut suggester: NodeSuggester<'_>, prediction_only: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
@@ -419,13 +491,13 @@ pub fn run(args: Options<'_>, engine: &Engine, prediction_only: bool) -> Result<
                 schema_version: "lfg.node-prediction.v1",
                 item_sha256: &input.id,
                 input_sha256: lfg_core::digest_text(&input.text),
-                snapshot_sha256: engine.snapshot_digest(),
+                snapshot_sha256: suggester.engine.snapshot_digest(),
                 choice,
             })?
         } else {
             json!({"schemaVersion":"lfg.node-suggestion-probe.v1","id":input.id,
-                "inputSha256":lfg_core::digest_text(&input.text),"snapshotSha256":engine.snapshot_digest(),
-                "encoderManifestSha256":suggester.source.manifest_sha,"packSha256":args.pack_sha256,
+                "inputSha256":lfg_core::digest_text(&input.text),"snapshotSha256":suggester.engine.snapshot_digest(),
+                "encoderManifestSha256":suggester.source.manifest_sha,"packSha256":suggester.pack_sha,
                 "exemplarConfigSha256":suggester.config_sha,"runtimeConfigSha256":suggester.source.config_sha,
                 "baseline":response.baseline,"extensionStatus":response.extension_status,
                 "suggestion":response.suggestion,

@@ -109,3 +109,7 @@ It was 32,863,744 bytes with SHA-256
 `9b09b8ed80834be369e4c4f9c39a5c1b571443f04e1bcabe4f42a7416a28d88a`;
 the encoder and test pack remained external files. This was a functional check,
 not a clean-machine installation, throughput benchmark, or release qualification.
+
+An opt-in [embedded node build](EMBEDDED-NODE-EXPERIMENT.md) can package a
+selected encoder, pack and snapshot in the executable. Its local check used a
+simulated-review pack and does not change the review or qualification status.

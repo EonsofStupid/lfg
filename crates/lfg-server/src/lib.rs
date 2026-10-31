@@ -28,6 +28,10 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 mod boundary_questions;
 mod dev_stats;
 mod devpulse_context;
+#[cfg(feature = "embedded-node")]
+mod embedded_node {
+    include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
+}
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]

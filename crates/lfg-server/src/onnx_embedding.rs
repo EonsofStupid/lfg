@@ -1,5 +1,6 @@
 //! Offline, unpromoted native encoder probe; it never selects or routes work.
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fs::File,
     io::{self, BufRead, Read, Write},
@@ -91,8 +92,35 @@ pub(crate) fn bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 #[derive(Clone)]
+enum Artifact {
+    Directory(PathBuf),
+    #[cfg(feature = "embedded-node")]
+    Embedded,
+}
+
+impl Artifact {
+    fn read(&self, name: &str, limit: u64) -> Result<Cow<'_, [u8]>> {
+        match self {
+            Self::Directory(root) => Ok(Cow::Owned(bounded_file(&root.join(name), limit)?)),
+            #[cfg(feature = "embedded-node")]
+            Self::Embedded => {
+                let bytes = crate::embedded_node::FILES
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, bytes)| *bytes)
+                    .ok_or("embedded node file missing")?;
+                if bytes.len() as u64 > limit {
+                    return Err("embedded node file exceeds configured limit".into());
+                }
+                Ok(Cow::Borrowed(bytes))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Source {
-    root: PathBuf,
+    artifact: Artifact,
     pub(crate) manifest: Manifest,
     pub(crate) config: RuntimeConfig,
     pub(crate) config_sha: String,
@@ -108,7 +136,24 @@ pub(crate) struct Encoder {
 impl Source {
     pub(crate) fn open(root: &Path, expected_manifest: &str, config_path: &Path) -> Result<Self> {
         let config_raw = std::fs::read(config_path)?;
-        let config: RuntimeConfig = serde_json::from_slice(&config_raw)?;
+        Self::open_source(
+            Artifact::Directory(root.to_owned()),
+            expected_manifest,
+            &config_raw,
+        )
+    }
+
+    #[cfg(feature = "embedded-node")]
+    pub(crate) fn open_embedded(config_raw: &[u8]) -> Result<Self> {
+        Self::open_source(
+            Artifact::Embedded,
+            crate::embedded_node::MANIFEST_SHA256,
+            config_raw,
+        )
+    }
+
+    fn open_source(artifact: Artifact, expected_manifest: &str, config_raw: &[u8]) -> Result<Self> {
+        let config: RuntimeConfig = serde_json::from_slice(config_raw)?;
         if config.schema_version != "lfg.node-onnx-runtime.v1"
             || config.revision.trim().is_empty()
             || config.cpu_threads != 1
@@ -125,8 +170,8 @@ impl Source {
         {
             return Err("invalid node encoder runtime configuration or manifest digest".into());
         }
-        let config_sha = hash(&config_raw);
-        let manifest_raw = bounded_file(&root.join("manifest.json"), config.max_manifest_bytes)?;
+        let config_sha = hash(config_raw);
+        let manifest_raw = artifact.read("manifest.json", config.max_manifest_bytes)?;
         if hash(&manifest_raw) != expected_manifest {
             return Err("node encoder manifest digest mismatch".into());
         }
@@ -163,7 +208,7 @@ impl Source {
             return Err("unsupported node encoder inputs".into());
         }
         Ok(Self {
-            root: root.to_owned(),
+            artifact,
             manifest,
             config,
             config_sha,
@@ -174,10 +219,9 @@ impl Source {
     pub(crate) fn load(&self) -> Result<Encoder> {
         let config = &self.config;
         let manifest = &self.manifest;
-        let tokenizer_bytes = bounded_file(
-            &self.root.join("tokenizer.json"),
-            config.max_tokenizer_bytes,
-        )?;
+        let tokenizer_bytes = self
+            .artifact
+            .read("tokenizer.json", config.max_tokenizer_bytes)?;
         if hash(&tokenizer_bytes) != manifest.tokenizer_sha256 {
             return Err("tokenizer digest mismatch".into());
         }
@@ -186,7 +230,7 @@ impl Source {
         if tokenizer.get_truncation().is_some() || tokenizer.get_padding().is_some() {
             return Err("node tokenizer must not truncate or pad automatically".into());
         }
-        let model_bytes = bounded_file(&self.root.join("model.onnx"), config.max_model_bytes)?;
+        let model_bytes = self.artifact.read("model.onnx", config.max_model_bytes)?;
         if hash(&model_bytes) != manifest.model_sha256 {
             return Err("node encoder model digest mismatch".into());
         }
