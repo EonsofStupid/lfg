@@ -6,6 +6,7 @@ ml/lfg-encoder/benchmark_process.py text eol=lf
 ml/lfg-encoder/node_evaluate.py text eol=lf
 ml/lfg-encoder/node_review.py text eol=lf
 ml/lfg-encoder/node_review_web.py text eol=lf
+ml/lfg-encoder/draft_review_workspace.py text eol=lf
 ml/lfg-encoder/node-review-web-config.example.json text eol=lf
 ml/lfg-encoder/node-review-web/* text eol=lf
 ml/lfg-encoder/node_exemplars.py text eol=lf
