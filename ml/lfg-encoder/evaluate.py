@@ -103,6 +103,8 @@ def load_taxonomy(path: Path) -> tuple[dict[str, set[str]], str]:
 
 
 def score(records: list[dict[str, Any]], predictions: dict[str, dict[str, Any]], taxonomy: dict[str, set[str]]) -> dict[str, Any]:
+    if any(row.get("schema_version") == "lfg.evaluation-abstention.v1" for row in predictions.values()):
+        raise ValueError("abstentions cannot be scored as predictions")
     ids = {row["id"] for row in records}
     if len(ids) != len(records) or ids != predictions.keys():
         raise ValueError("prediction IDs must exactly match the dataset")

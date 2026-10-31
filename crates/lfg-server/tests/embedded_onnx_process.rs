@@ -74,6 +74,68 @@ fn copied_binary_runs_embedded_model_and_accepts_runtime_override() {
             > 0
     );
 
+    let mut abstain_config: Value =
+        serde_json::from_str(include_str!("../config/onnx-runtime.example.json")).unwrap();
+    abstain_config["overflowPolicy"] = json!("abstain");
+    let abstain_path = temp.path().join("abstain.json");
+    fs::write(&abstain_path, serde_json::to_vec(&abstain_config).unwrap()).unwrap();
+    let mut process = Command::new(&exe)
+        .current_dir(temp.path())
+        .args([
+            "embedded-onnx-predict",
+            "--runtime-config",
+            abstain_path.to_str().unwrap(),
+            "--include-scores",
+        ])
+        .env_remove("LFG_OPERATIONS_CONFIG")
+        .env_remove("LFG_PREFLIGHT_CONFIG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = process.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"id":"long", "text":"review ".repeat(1000)})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"id":"short", "text":"review this change"})
+    )
+    .unwrap();
+    drop(stdin);
+    let result = process.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let responses: Vec<Value> = String::from_utf8(result.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(
+        responses[0]["schema_version"],
+        "lfg.evaluation-abstention.v1"
+    );
+    assert_eq!(responses[0]["abstention_reason"], "token_limit_exceeded");
+    assert_eq!(responses[0]["tokenization"]["truncated"], true);
+    assert_eq!(responses[0]["intents"], json!([]));
+    assert_eq!(responses[0]["capabilities"], json!([]));
+    assert_eq!(responses[0]["risks"], json!([]));
+    assert!(responses[0].get("scores").is_none());
+    assert_eq!(
+        responses[1]["schema_version"],
+        "lfg.evaluation-prediction.v1"
+    );
+    assert!(responses[1].get("scores").is_some());
+
     let artifact =
         std::env::var("LFG_EMBEDDED_ONNX_DIR").expect("feature build artifact directory");
     let digest = std::env::var("LFG_EMBEDDED_ONNX_SHA256").expect("feature build manifest digest");

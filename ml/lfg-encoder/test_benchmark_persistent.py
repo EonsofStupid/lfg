@@ -72,6 +72,9 @@ for line in sys.stdin:
     if sys.argv[1]=='candidate':
       truncated=x['text'].endswith('1')
       result['tokenization']={'processed_tokens':2,'overflow_chunks':int(truncated),'truncated':truncated}
+      if truncated:
+        result['schema_version']='lfg.evaluation-abstention.v1'
+        result['abstention_reason']='token_limit_exceeded'
     print(json.dumps(result),flush=True)
 ''', encoding='utf-8')
             result = benchmark.run(Path(sys.executable), data, config_path,
@@ -81,12 +84,29 @@ for line in sys.stdin:
             self.assertEqual(result['results']['candidate']['model']['id'], 'candidate')
             self.assertEqual(result['results']['baseline']['tokenization'], {'complete': 0, 'truncated': 0, 'unknown': 4})
             self.assertEqual(result['results']['candidate']['tokenization'], {'complete': 2, 'truncated': 2, 'unknown': 0})
+            self.assertEqual(result['results']['candidate']['outcomes'], {'predicted': 2, 'abstained': 2})
+            self.assertEqual(result['results']['baseline']['outcomes'], {'predicted': 4, 'abstained': 0})
             self.assertFalse(result['promotion_eligible'])
             self.assertNotIn('private fixture', json.dumps(result))
             self.assertEqual(result['dataset_sha256'], hashlib.sha256(data.read_bytes()).hexdigest())
             self.assertEqual(result['benchmark_sha256'], hashlib.sha256(Path(benchmark.__file__).read_bytes()).hexdigest())
             self.assertEqual(result['counter_reader_sha256'],
                              hashlib.sha256(Path(benchmark.benchmark_process.__file__).read_bytes()).hexdigest())
+
+    def test_abstention_requires_truncation_reason_and_no_labels_or_scores(self):
+        predictor = benchmark.Predictor.__new__(benchmark.Predictor)
+        predictor.model = predictor.producer = None
+        value = {'schema_version': 'lfg.evaluation-abstention.v1', 'id': 'x',
+                 'input_sha256': benchmark.digest(b'text'), 'producer_sha256': 'a' * 64,
+                 'model': {'id': 'fixture', 'version': '1', 'sha256': 'b' * 64},
+                 'intents': [], 'capabilities': [], 'risks': [],
+                 'tokenization': {'processed_tokens': 2, 'overflow_chunks': 1, 'truncated': True},
+                 'abstention_reason': 'token_limit_exceeded'}
+        predictor.validate_response(value, 'x', 'text')
+        for change in ({'abstention_reason': 'other'}, {'intents': ['build']}, {'scores': {}},
+                       {'tokenization': {'processed_tokens': 2, 'overflow_chunks': 0, 'truncated': False}}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'abstention'):
+                predictor.validate_response({**value, **change}, 'x', 'text')
 
     def test_mismatched_prediction_digest_is_rejected(self):
         code = '''import json,sys
