@@ -626,6 +626,45 @@ follow-ups, privacy redaction, source permission or label coverage can reduce
 the usable set. The OneManWho validation set still comes from one session. A
 separate diverse, reviewed validation set and genuine review remain necessary.
 
+### Claude session candidates
+
+`inventory_claude_sessions.py` accepts explicitly selected session directories
+and their exact project roots. It inventories only single-text, main-session
+records marked `turnOrigin: human`, excluding tool-result and meta records.
+This metadata is an assertion, not proof of authorship or permission. The
+inventory contains paths, hashes and line numbers but no prompt text; treat it
+as private. Configure both byte limits for the actual session sizes:
+
+```powershell
+python ml/lfg-encoder/inventory_claude_sessions.py `
+  --source PROJECT=ABSOLUTE_SESSION_DIRECTORY --project-root PROJECT=ABSOLUTE_PROJECT_ROOT `
+  --max-session-bytes MAX_BYTES --max-line-bytes MAX_LINE_BYTES --output NEW_PRIVATE_INVENTORY.jsonl
+```
+
+Use an assignment file with schema `lfg.claude-review-assignments.v1` and the
+same project/group/split structure as the Codex assignment file. The existing
+`prepare_codex_review.py` accepts that schema, verifies the source prefixes,
+deduplicates against explicitly supplied development reference plans, and
+creates an unlabeled pending-only workspace. Its source verification is also
+available in the browser review screen when the configured session and line
+limits cover the selected sources. Claude prior-message context is not yet
+provided by that screen. A prefix match does not establish full conversational
+context, privacy, rights, label correctness or project independence. A source
+may be appended after inventory; the selected prefix must remain unchanged.
+
+On 2026-10-31, an explicitly scoped scan of the owner's LFG, RRFlow and
+DevPulse Claude session directories found 112 human-marked text records across
+three session files. All 112 selected prefixes verified. The 86 distinct exact
+texts included 80 absent by exact hash from three prior Codex inventories. A
+private training review draft at
+`dataset/private/claude-authorized-training-draft-20261031-v1/workspace`
+contains 78 pending, unlabeled candidates after excluding 24 overlaps with
+the supplied train/validation reference plans and 10 further normalized
+duplicates. None is approved or verified. The reserved test workspace was not
+opened or compared during preparation; final holdout separation remains a
+separate requirement. The candidates come from only three session files and do
+not establish independent validation coverage.
+
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
 commit-message prompts. All 34 are unverified, and this plan references no

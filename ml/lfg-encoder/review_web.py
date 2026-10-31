@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import corpus_audit
 import evaluate
 import inspect_codex_inventory
+import inspect_claude_inventory
 import inventory_checkpoint_prompts
 import review_corpus
 import train
@@ -137,6 +138,12 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
             text, messages, truncated = inspect_codex_inventory.prior_user_context(
                 entry, limits['max_session_bytes'], limits['max_line_bytes'],
                 context_limits['max_messages'], context_limits['max_context_bytes'])
+        status = 'source_prefix_and_original_text_match'
+    elif original.get('kind') == 'claude-session-human-text' and context_limits is None:
+        if limits is None:
+            raise ValueError('source verification is not configured')
+        entry = {**original, 'schema_version': 'lfg.unreviewed-claude-message.v1'}
+        text = inspect_claude_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
         status = 'source_prefix_and_original_text_match'
     elif original.get('kind') == 'git-checkpoint-user-prompt' and context_limits is None:
         if checkpoint_limits is None:
