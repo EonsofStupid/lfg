@@ -20,6 +20,30 @@ def record(index, verified):
 
 
 class DatasetGateTests(unittest.TestCase):
+    def test_token_coverage_counts_special_tokens_and_rejects_overflow_without_text(self):
+        class Tokenizer:
+            def __call__(self, text, **options):
+                self.options = options
+                def encode(value):
+                    return [101] + list(range(len(value.split()))) + [102]
+                return {"input_ids": [encode(value) for value in text] if isinstance(text, list) else encode(text)}
+        tokenizer = Tokenizer()
+        rows = [{"text": "private one"}, {"text": "private one two"}]
+        self.assertEqual(train.token_coverage(rows, tokenizer, 5, "train"),
+                         {"examples": 2, "maximum_tokens": 5, "over_limit": 0})
+        self.assertEqual(tokenizer.options, {"add_special_tokens": True, "truncation": False, "padding": False})
+        with self.assertRaisesRegex(ValueError, "train token coverage gate blocked: 1 of 2") as error:
+            train.token_coverage(rows, tokenizer, 4, "train")
+        self.assertNotIn("private", str(error.exception))
+        self.assertEqual(len(train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 5)["input_ids"]), 2)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 4)
+
+    def test_token_coverage_rejects_invalid_tokenizer_output(self):
+        for ids in ([], None, [True], [[1]]):
+            with self.subTest(ids=ids), self.assertRaisesRegex(ValueError, "invalid tokenizer"):
+                train.token_coverage([{"text": "x"}], lambda *args, **kwargs: {"input_ids": ids}, 8, "validation")
+
     def test_cli_validates_dataset_and_rejects_unintegrated_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "examples.jsonl"
