@@ -220,6 +220,22 @@ class ReviewHandler(BaseHTTPRequestHandler):
     def json_reply(self, code: int, value: dict[str, Any]) -> None:
         self.reply(code, json.dumps(value, ensure_ascii=True, allow_nan=False).encode('utf-8'), 'application/json; charset=utf-8')
 
+    def reject_unauthorized_post(self, max_request_bytes: int) -> None:
+        # Reply before draining. On Windows, closing with an unread small body
+        # can reset the connection before the client receives the rejection.
+        self.close_connection = True
+        self.json_reply(403, {'error': 'not authorized'})
+        lengths = self.headers.get_all('Content-Length', [])
+        if self.headers.get_all('Transfer-Encoding', []) or len(lengths) != 1 or not lengths[0].isdigit():
+            return
+        try:
+            length = int(lengths[0])
+            if length <= max_request_bytes:
+                self.rfile.read(length)
+        except (OSError, ValueError):
+            # The existing socket timeout bounds an incomplete rejected body.
+            return
+
     def allowed_host(self) -> bool:
         return self.headers.get_all('Host', []) == [f'127.0.0.1:{self.server.server_port}']
 
@@ -299,7 +315,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if not self.authorized(post=True):
-            self.json_reply(403, {'error': 'not authorized'})
+            self.reject_unauthorized_post(self.server.config['max_request_bytes'])
             return
         if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context') or self.headers.get('Transfer-Encoding') or \
                 self.headers.get_content_type() != 'application/json':

@@ -2,6 +2,7 @@ import http.client
 import hashlib
 import json
 import secrets
+import socket
 import subprocess
 import tempfile
 import threading
@@ -70,8 +71,9 @@ class ReviewWebTests(unittest.TestCase):
         self.token = valid_token
         self.assertEqual(self.request('GET', '/api/status', host='evil.example')[0], 403)
         self.assertEqual(self.request('GET', '/api/status', origin='https://evil.example')[0], 403)
-        self.assertEqual(self.request('POST', '/api/decision', body={}, origin='https://evil.example')[0], 403)
-        self.assertEqual(self.request('POST', '/api/decision', body={})[0], 403)
+        for _ in range(20):
+            self.assertEqual(self.request('POST', '/api/decision', body={}, origin='https://evil.example')[0], 403)
+            self.assertEqual(self.request('POST', '/api/decision', body={})[0], 403)
         status, headers, data = self.request('GET', '/api/status')
         self.assertEqual(status, 200)
         self.assertEqual(headers['Cache-Control'], 'no-store')
@@ -86,6 +88,17 @@ class ReviewWebTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(raw)['missing_id'])
         self.assertEqual(self.request('GET', '/api/item?id=one&offset=0')[0], 400)
+
+    def test_rejected_partial_body_gets_response_before_drain(self):
+        for length in (100, self.server.config['max_request_bytes'] + 1):
+            with socket.create_connection(('127.0.0.1', self.server.server_port), timeout=2) as client:
+                client.settimeout(2)
+                headers = (f'POST /api/decision HTTP/1.1\r\nHost: 127.0.0.1:{self.server.server_port}\r\n'
+                           f'Authorization: Bearer {self.token}\r\nOrigin: https://evil.example\r\n'
+                           f'Content-Length: {length}\r\nContent-Type: application/json\r\n\r\n')
+                client.sendall(headers.encode('ascii') + b'{')
+                self.assertIn(b' 403 ', client.recv(1024))
+        self.assertEqual(self.request('GET', '/api/status')[0], 200)
 
     def test_wrapper_preview_is_optional_and_approval_records_the_exact_transform(self):
         plan, report, ledger = review_corpus.load_workspace(self.workspace)

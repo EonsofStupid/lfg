@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,12 +149,60 @@ class DatasetGateTests(unittest.TestCase):
     def test_run_lock_rejects_concurrent_writers_and_releases(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
-            with train.run_lock(output):
+            with train.training_run_lock(output):
                 with self.assertRaisesRegex(ValueError, "run lock exists"):
-                    with train.run_lock(output):
+                    with train.training_run_lock(output):
                         self.fail("second writer acquired the lock")
-            with train.run_lock(output):
+            with train.training_run_lock(output):
                 pass
+            self.assertEqual(output.with_name(output.name + ".lock").read_bytes(), train.RUN_LOCK_MAGIC)
+
+    def test_run_lock_recovers_after_process_is_killed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            ready = Path(directory) / "ready"
+            code = ("import sys,time; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
+                    "import train; lock=train.training_run_lock(Path(sys.argv[2])); lock.__enter__(); "
+                    "Path(sys.argv[3]).write_text('ready'); time.sleep(60)")
+            child = subprocess.Popen([sys.executable, "-c", code, str(Path(train.__file__).parent),
+                                      str(output), str(ready)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(ready.exists(), "child did not acquire the training lock")
+                with self.assertRaisesRegex(ValueError, "held by another trainer"):
+                    with train.training_run_lock(output):
+                        self.fail("acquired another process's lock")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=10)
+            with train.training_run_lock(output):
+                pass
+
+    def test_legacy_lock_is_not_assumed_stale_or_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            lock = output.with_name(output.name + ".lock")
+            lock.write_bytes(b"pid=123\n")
+            with self.assertRaisesRegex(ValueError, "unrecognized or legacy"):
+                with train.training_run_lock(output):
+                    self.fail("accepted a legacy lock")
+            self.assertEqual(lock.read_bytes(), b"pid=123\n")
+
+    def test_legacy_and_new_trainers_cannot_hold_same_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_output = Path(directory) / "legacy"
+            new_output = Path(directory) / "current"
+            with train.run_lock(old_output):
+                with self.assertRaisesRegex(ValueError, "unrecognized or legacy"):
+                    with train.training_run_lock(old_output):
+                        self.fail("new trainer accepted a legacy lock")
+            with train.training_run_lock(new_output):
+                with self.assertRaisesRegex(ValueError, "run lock exists"):
+                    with train.run_lock(new_output):
+                        self.fail("legacy trainer accepted a current lock")
 
     def test_training_settings_and_overrides_are_validated(self):
         config = train.load_training_config(train.TRAINING_CONFIG)

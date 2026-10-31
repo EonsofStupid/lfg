@@ -92,7 +92,8 @@ class NodeReviewWebTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/api/status', auth=False)[0], 403)
         self.assertEqual(self.request('GET', '/api/status', host='evil.example')[0], 403)
         self.assertEqual(self.request('GET', '/api/status', origin='https://evil.example')[0], 403)
-        self.assertEqual(self.request('POST', '/api/decision', body={}, origin='https://evil.example')[0], 403)
+        for _ in range(20):
+            self.assertEqual(self.request('POST', '/api/decision', body={}, origin='https://evil.example')[0], 403)
         result = self.item()
         item = result['item']
         self.assertEqual(result['guideStatus'], 'draft')
