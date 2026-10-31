@@ -28,12 +28,55 @@ VENV/Scripts/python.exe -m pip install --no-index --find-links WHEELHOUSE --requ
 VENV/Scripts/python.exe -m pip check
 ```
 
-The lock is not automatically enforced by `train.py` or included in its run
-manifest; preserve the lock and installation evidence with each run. The
-interpreter, pip bootstrap, native libraries, OS and processor are also outside
-this wheel lock. Installations and runs on other machines still need to be
-verified. A changed wheel must fail the hash check: this was tested locally by
-appending a byte to a copy of the `six` wheel, and pip rejected it.
+The trainer can check the selected lock against the wheelhouse and compare the
+installed distribution versions against it. The interpreter, native
+libraries, OS and processor are outside this lock. These checks do not verify
+installed package file bytes or prove that the installed files came from the
+checked wheels; preserve installation evidence. Installations and runs on other
+machines still need verification. A changed wheel must fail the hash check:
+this was tested locally by appending a byte to a copy of the `six` wheel, and
+pip rejected it.
+
+## Bound training inputs
+
+Prepare a local model directory containing the exact files needed by the
+selected model and tokenizer. The directory cannot contain symbolic links or
+Windows reparse points. Create its manifest outside that directory:
+
+```powershell
+python ml/lfg-encoder/training_inputs.py --model-dir LOCAL_MODEL_DIR `
+  --model-id MODEL_ID --revision FULL_COMMIT_SHA --output NEW_MODEL_MANIFEST.json
+```
+
+For training, pass `--base-model LOCAL_MODEL_DIR`, `--model-revision
+FULL_COMMIT_SHA`, `--model-manifest NEW_MODEL_MANIFEST.json`,
+`--environment-lock LOCK_FILE`, and `--wheelhouse WHEELHOUSE`. Explicitly add
+`--environment-allowed-extra pip` or another bootstrap distribution only when
+it exists outside the lock. Unexpected or duplicated installed distributions,
+version mismatches, wheelhouse drift, changed model files and extra model
+directory entries reject the run. The complete installed version fingerprint,
+lock digest, model manifest digest and verifier code digests enter the run
+manifest, so a changed input also rejects resume. Model loading is local-only
+when a model manifest is supplied; its files are checked before loading and
+again after training. Concurrent filesystem modification remains outside this
+check's guarantees.
+
+Reviewed training now requires these input options. Below-gate development runs
+can omit them, but then have no corresponding input evidence. The model ID and
+revision in the manifest are operator declarations, not verification of
+upstream provenance. A model snapshot must be assembled and its source and
+license reviewed independently.
+
+On 2026-10-31, the previously described real-request CPU development run was
+repeated with these checks enabled. A changed model file, a changed wheelhouse,
+and an unlisted installed package were each rejected before their run directory
+was created. A
+second run was intentionally stopped after a complete step-six checkpoint,
+then resumed in the other locked environment. Its final model weights,
+tokenizer files, labels and run/split manifests matched the uninterrupted run;
+the weight SHA-256 was the same `21dd6907...` value below. A subsequent resume
+with an altered model manifest was rejected. These were actual runs over the
+same 23 unreviewed development records, not independent quality evaluations.
 
 ## Observed local runs, 2026-10-31
 
@@ -71,9 +114,9 @@ also matched the earlier run on this machine. Other run files, such as trainer
 state containing timings, were not claimed to match. The outputs and data remain
 private under `target` and `dataset/private`.
 
-The base files were manually checked, not enforced by the trainer, and the
-run manifest records selected package versions rather than every installed
-file. These two runs share the same physical machine, Python installation and
+For these earlier two runs, the base files were manually checked rather than
+enforced by the trainer. The run manifest recorded selected package versions
+rather than every installed file. These two runs share the same physical machine, Python installation and
 model cache. They establish a useful local repeatability result for a tiny,
 unreviewed experiment, not cross-machine determinism, representative quality,
 security recall, Spark support, or a self-contained release.

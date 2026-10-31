@@ -147,6 +147,16 @@ class DatasetGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     train.validate_training_config({**config, field: invalid})
 
+    def test_reviewed_training_requires_both_environment_and_model_inputs(self):
+        train.validate_input_options(True, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'reviewed training requires'):
+            train.validate_input_options(False, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, Path('lock'), None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, None, None, None, ['pip'])
+        train.validate_input_options(False, Path('lock'), Path('wheels'), Path('manifest'), ['pip'])
+
     def test_promotion_policy_rejects_invalid_sample_threshold(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "policy.json"
