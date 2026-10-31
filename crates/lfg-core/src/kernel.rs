@@ -136,6 +136,21 @@ fn valid_segment(value: &str) -> bool {
 }
 
 impl Engine {
+    pub fn snapshot_digest(&self) -> &str {
+        &self.snapshot_sha256
+    }
+
+    pub fn has_choice(&self, node: &str, option: &str) -> bool {
+        matches!(self.snapshot.nodes.get(node), Some(Node::Choice { options, .. }) if options.contains_key(option))
+    }
+
+    pub fn choice_options(&self, node: &str) -> Option<Vec<String>> {
+        match self.snapshot.nodes.get(node) {
+            Some(Node::Choice { options, .. }) => Some(options.keys().cloned().collect()),
+            _ => None,
+        }
+    }
+
     pub fn bundled() -> Result<Self, String> {
         Self::from_json(include_bytes!("../config/kernel-core.v1.json"))
     }
