@@ -152,6 +152,10 @@ sanitized. The bundled two-option example snapshot is not a validated labeling
 guide. These records still need source/context review, useful per-node label
 definitions, decisions, project/family and split assignment, and a per-node
 training and evaluation gate before they can support model development.
+The separate [per-node review and admission workflow](NODE-REVIEW-AND-ADMISSION.md)
+can bind explicit human decisions to this queue, audit declared split
+separation and support, and export admitted train/validation inputs. It does not
+train or qualify a model.
 The journal unit tests and CLI/locking tests also passed in a separate offline
 ARM64 Spark build using test fixtures only. This does not establish production
 durability or authenticate reviewers.
