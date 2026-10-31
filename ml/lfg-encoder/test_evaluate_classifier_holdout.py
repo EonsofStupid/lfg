@@ -31,10 +31,12 @@ class ClassifierHoldoutTests(unittest.TestCase):
         self.test_plan.write_text(json.dumps(test))
         audit, _ = corpus_audit.audit(f.plan)
         fields = ('schema_version', 'plan_sha256', 'taxonomy_sha256', 'review_ledger_sha256',
-                  'auditor_sha256', 'taxonomy_loader_sha256', 'sources', 'counts', 'duplicate_within_split')
+                  'auditor_sha256', 'taxonomy_loader_sha256', 'assessment_targets_validator_sha256',
+                  'sources', 'counts', 'duplicate_within_split')
         manifest_path = f.model / 'run-manifest.json'
         manifest = json.loads(manifest_path.read_bytes())
         manifest['split']['corpus_audit'] = {**{key: audit[key] for key in fields},
+                                               'reviewed_assessment_targets': {s: audit['reviewed_assessment_targets'][s] for s in ('train', 'validation')},
                                                'scope': 'development', 'holdout_assessment': 'not_performed'}
         manifest_path.write_text(json.dumps(manifest))
         artifact_path = f.artifact / 'manifest.json'

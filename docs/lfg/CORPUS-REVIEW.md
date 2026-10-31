@@ -191,6 +191,9 @@ separate and access-controlled.
 The audit and training scripts are identity-bound inputs to these runs; changing
 their bytes changes the recorded code identities and can prevent resuming or
 evaluating an earlier run. Preserve the exact scripts for existing experiments.
+When copying the current scripts to a training host, include
+`assessment_targets.py` alongside the audit, evaluation and trainer modules;
+the validator's digest is recorded with the audited run.
 
 The reviewed trainer accepts the v2 development plan and records its scope.
 Use `--development-plan-only` to reject a legacy complete plan before the audit
@@ -330,6 +333,76 @@ proves representative label support. Validation and test workspaces were not
 opened for this preparation.
 
 ### Local browser review
+
+#### Optional project assessment targets
+
+The review server can also collect reviewer judgments for complexity, models
+and effort, and total agents. These are separate from the existing intent,
+capability and risk labels. Each may be explicitly unknown; a blank model
+selection means unknown, and an agent count of zero is a known value when the
+project profile permits it. An empty model list is not accepted as a substitute
+for unknown. These judgments are not measured model performance or proof of an
+optimal recommendation.
+
+Supply `--assessment-profile PATH` to a new review-server process. The
+[empty configuration template](../../ml/lfg-encoder/assessment-review-config.example.json)
+does not invent options. The review web configuration must set a positive
+`max_assessment_profile_bytes`; choose it for the size of the actual project
+profiles. Each project entry must use the exact project ID in
+the review plan and supply its own choices, for example:
+
+```json
+{
+  "schema_version": "lfg.assessment-review-config.v1",
+  "revision": "project-profile-revision",
+  "projects": [{
+    "project": "project-id",
+    "complexities": [{"id": "configured-bracket-id", "label": "Configured bracket"}],
+    "models": [{"id": "configured-binding-id", "label": "Configured binding",
+      "provider": "provider-id", "model": "model-id", "subscription_id": "subscription-id",
+      "availability": "available", "effort_levels": ["configured-effort"]}],
+    "agent_range": {"min": 1, "max": 4}
+  }]
+}
+```
+
+These IDs, bracket choices and limits are examples only: replace them with the
+project's actual configuration and evidence. `subscription_id` may be null;
+`agent_range` may be null if unknown. A model must be declared `available` in
+the project profile before it can be selected; `unknown` and `unavailable`
+choices are shown but disabled. This is a declaration, not a verified
+subscription entitlement. Do not put credentials in the profile.
+
+The server reads the configured file when displaying an item and accepting an
+approval, so an updated profile can be displayed without restarting. It rejects an approval if the profile changed
+since the record was displayed or during the review. Approval stores the
+project-specific profile snapshot, its digest, the source configuration hash and
+the selected or unknown values inside the annotation bound to the existing
+review ledger. The complete configuration file is not copied, so retain it if
+its original bytes need later verification. The embedded project snapshot and
+its values can expose subscription metadata and remain private with the corpus.
+Changes to a project's later profile do not retroactively change an approved
+historical annotation. Local files must remain trusted against concurrent
+changes; the hash checks are not an adversarial locking protocol.
+The project snapshot is currently repeated in each annotated record, and the
+reviewer rewrites the affected source file on approval. Large profiles or
+corpora can therefore increase storage and review latency; deduplicated profile
+storage and higher-volume review have not been implemented or benchmarked.
+An interrupted review that already wrote assessment targets must be resumed
+through a review server with a matching project profile; the interactive CLI
+does not yet edit these targets and will not silently approve them.
+
+The corpus audit counts known and unknown targets only for currently approved,
+verified records and rejects malformed or mismatched stored profiles. Effort
+coverage is per record: it is partial when only some selected models have an
+effort value. Approved
+exports retain the targets. The current trainer still learns **only** intent,
+capability and risk; its run manifest states those trained label groups. These
+additional fields are not yet consumed by a training head, model selector or
+quality evaluator. A suitable project profile is not automatically obtained from
+DevPulse or another app today. Existing running review servers keep their old
+Python code; use a new process with an explicitly supplied profile after safely
+handling any work in the existing session.
 
 The same workspace can be reviewed in a browser using the Python training
 tools. This is a local corpus-review interface, not the server's developer UI

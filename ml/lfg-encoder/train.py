@@ -251,6 +251,12 @@ def load_dataset(path: Path, *, allow_unlabeled_review: bool = False) -> tuple[l
             raise ValueError(f"record {record['id']} has pending labels and is not usable here")
         if not record["text"].strip() or (not record["intents"] and not pending):
             raise ValueError(f"record {record['id']} has empty text or intents")
+        if 'assessment_targets' in record:
+            import assessment_targets
+            source = record.get('source')
+            if not isinstance(source, dict) or not isinstance(source.get('project'), str):
+                raise ValueError('assessment targets require a source project')
+            assessment_targets.validate_stored(record['assessment_targets'], source['project'])
         seen.add(record["id"])
     return records, hashlib.sha256(raw).hexdigest()
 
@@ -430,7 +436,10 @@ def train(args: argparse.Namespace) -> None:
             support = training_support(train_rows, validation_rows, taxonomy, args.support_policy.read_bytes())
             corpus_audit = {key: audit_report[key] for key in (
                 "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
-                "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
+                "auditor_sha256", "taxonomy_loader_sha256", "assessment_targets_validator_sha256",
+                "sources", "counts", "duplicate_within_split")}
+            corpus_audit['reviewed_assessment_targets'] = {
+                split: audit_report['reviewed_assessment_targets'][split] for split in ('train', 'validation')}
             if audit_report.get("scope") == "development":
                 corpus_audit.update(scope="development", holdout_assessment="not_performed")
         except (OSError, ValueError, TypeError, KeyError) as error:
@@ -443,6 +452,7 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
     if not re.fullmatch(r"[0-9a-f]{40}", args.model_revision or ""):
         raise SystemExit("training requires --model-revision as a full 40-character lowercase commit hash")
+    import assessment_targets
     environment_lock = getattr(args, "environment_lock", None)
     wheelhouse = getattr(args, "wheelhouse", None)
     model_manifest = getattr(args, "model_manifest", None)
@@ -517,12 +527,14 @@ def train(args: argparse.Namespace) -> None:
         "dataset_sha256": split["dataset_sha256"],
         "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
         "training_config_sha256": args.training_config_sha256,
         "environment_evidence": environment_evidence,
         "model_snapshot_evidence": model_evidence,
         "training_inputs_sha256": hashlib.sha256(Path(training_inputs.__file__).read_bytes()).hexdigest() if environment_lock or model_manifest else None,
         "wheelhouse_verifier_sha256": hashlib.sha256(Path(training_inputs.lock_wheelhouse.__file__).read_bytes()).hexdigest() if environment_lock else None,
         "seed": args.seed, "epochs": args.epochs, "max_length": args.max_length,
+        "trained_label_groups": ["intents", "capabilities", "risks"],
         "token_coverage": coverage,
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,

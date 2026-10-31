@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import corpus_audit
+import assessment_targets
 import evaluate
 import inspect_codex_inventory
 import inspect_claude_inventory
@@ -54,10 +55,13 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'checkpoint_verification', 'redaction_suggestions'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
+    if 'max_assessment_profile_bytes' in value and (type(value['max_assessment_profile_bytes']) is not int
+                                                     or value['max_assessment_profile_bytes'] < 1):
+        raise ValueError('invalid assessment profile byte limit')
     if 'source_verification' in value:
         limits = value['source_verification']
         if (not isinstance(limits, dict) or set(limits) != {'max_session_bytes', 'max_line_bytes'}
@@ -196,7 +200,7 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
 
 class ReviewServer(HTTPServer):
     def __init__(self, workspace: Path, reviewer: str, port: int, config: dict[str, Any], token: str,
-                 guide_path: Path | None = None):
+                 guide_path: Path | None = None, assessment_path: Path | None = None):
         if not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
             raise ValueError('reviewer must be a nonempty single-line identifier')
         self.workspace = workspace.resolve(strict=True)
@@ -207,6 +211,12 @@ class ReviewServer(HTTPServer):
         taxonomy, self.taxonomy_hash = evaluate.load_taxonomy(review_corpus.private_path(self.workspace, plan['taxonomy']))
         self.guide_path = guide_path.resolve(strict=True) if guide_path is not None else None
         self.guide, self.guide_sha256 = load_guide(self.guide_path, taxonomy) if self.guide_path else (None, None)
+        self.assessment_path = assessment_path.resolve(strict=True) if assessment_path is not None else None
+        if self.assessment_path:
+            limit = self.config.get('max_assessment_profile_bytes')
+            if type(limit) is not int or limit < 1:
+                raise ValueError('assessment profiles require a configured byte limit')
+            assessment_targets.load_config(self.assessment_path, limit)
         super().__init__(('127.0.0.1', port), ReviewHandler)
 
     @property
@@ -316,16 +326,22 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 annotation = corpus_audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)
                 stale = (not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation) or row['verified']
                 suggestions = [] if stale else redaction_suggestions(row['text'], self.server.config.get('redaction_suggestions', []))
+                config, config_sha = (assessment_targets.load_config(self.server.assessment_path, self.server.config['max_assessment_profile_bytes'])
+                                      if self.server.assessment_path else (None, None))
+                profile = assessment_targets.project_profile(config, source['project']) if config else None
                 self.json_reply(200, {'item': {'id': identifier, 'text': row['text'], 'source': row['source'],
                                                'review_note': row.get('review_note'), 'labels': {k: row[k] for k in evaluate.FIELDS},
                                                'labels_pending': row.get('labels_pending', False),
                                                'project': source['project'], 'split': source['split'],
+                                               'assessment_targets': row.get('assessment_targets'),
                                                'annotation_sha256': annotation,
                                                'redaction_suggestions': suggestions,
                                                'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,
                                                'interrupted_write': bool(row['verified'])},
                                       'taxonomy': {k: sorted(v) for k, v in taxonomy.items()},
                                       'guide': self.server.guide, 'guide_sha256': self.server.guide_sha256,
+                                      'assessment_profile': profile,
+                                      'assessment_config_sha256': config_sha if profile else None,
                                       'pending': len(pending), 'offset': offset})
                 return
             self.json_reply(404, {'error': 'not found'})
@@ -369,7 +385,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     self.json_reply(200, {'status': status})
                 return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
-            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256'}):
+            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256', 'assessment_values', 'assessment_config_sha256'}):
                 raise ValueError('invalid decision')
             decision = value['decision']
             if decision not in ('approved', 'rejected') or value['confirmation'] != ('APPROVE' if decision == 'approved' else 'REJECT'):
@@ -380,6 +396,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if decision == 'approved' and not isinstance(labels, dict):
                 raise ValueError('label groups are required')
             guide_sha256 = None
+            assessment = None
             if decision == 'approved' and self.server.guide_path is not None:
                 plan, _, _ = review_corpus.load_workspace(self.server.workspace)
                 taxonomy, taxonomy_hash = evaluate.load_taxonomy(review_corpus.private_path(self.server.workspace, plan['taxonomy']))
@@ -388,9 +405,25 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         or value.get('guide_sha256') != current_guide):
                     raise ValueError('label guide or taxonomy changed; restart review')
                 guide_sha256 = current_guide
+            if decision == 'approved' and self.server.assessment_path:
+                plan, _, _ = review_corpus.load_workspace(self.server.workspace)
+                _, _, _, source = review_corpus.find_row(self.server.workspace, plan, value['id'])
+                current_config, current_sha = assessment_targets.load_config(self.server.assessment_path, self.server.config['max_assessment_profile_bytes'])
+                profile = assessment_targets.project_profile(current_config, source['project'])
+                if profile is not None:
+                    if value.get('assessment_config_sha256') != current_sha or 'assessment_values' not in value:
+                        raise ValueError('assessment profile changed or values are missing; review again')
+                    assessment = assessment_targets.make_record(value['assessment_values'], profile,
+                                                                current_config['revision'], current_sha)
+                elif 'assessment_values' in value or 'assessment_config_sha256' in value:
+                    raise ValueError('no assessment profile is configured for this project')
+            elif 'assessment_values' in value or 'assessment_config_sha256' in value:
+                raise ValueError('assessment values require an approved record and configured profile')
             review_corpus.record_decision(self.server.workspace, value['id'], self.server.reviewer,
                                           decision, value['annotation_sha256'], labels,
-                                          value.get('redactions'), self.server.config['max_prompt_bytes'], guide_sha256)
+                                          value.get('redactions'), self.server.config['max_prompt_bytes'], guide_sha256,
+                                          assessment, self.server.assessment_path if assessment is not None else None,
+                                          self.server.config.get('max_assessment_profile_bytes') if assessment is not None else None)
             self.json_reply(200, {'saved': True, 'decision': decision})
         except (OSError, ValueError, KeyError, TypeError, UnicodeError, socket.timeout) as error:
             self.json_reply(400, {'error': str(error)})
@@ -404,6 +437,8 @@ def main() -> None:
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--label-guide', type=Path, default=DEFAULT_GUIDE,
                         help='label definitions matching the workspace taxonomy')
+    parser.add_argument('--assessment-profile', type=Path,
+                        help='optional per-project complexity, model and agent review configuration')
     args = parser.parse_args()
     try:
         if not 0 <= args.port <= 65535:
@@ -411,7 +446,8 @@ def main() -> None:
         config = load_config(args.config)
         token = secrets.token_urlsafe(32)
         with train.run_lock(args.workspace / 'review'):
-            with ReviewServer(args.workspace, args.reviewer, args.port, config, token, args.label_guide) as server:
+            with ReviewServer(args.workspace, args.reviewer, args.port, config, token, args.label_guide,
+                              args.assessment_profile) as server:
                 print(f'{server.origin}/#{token}', flush=True)
                 print('Local review is running. Open the URL in your browser; press Ctrl+C to stop.', flush=True)
                 try:

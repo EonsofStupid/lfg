@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import benchmark_persistent
+import assessment_targets
 import calibration
 import corpus_audit
 import evaluate
@@ -52,12 +53,17 @@ def audited_run(plan_path: Path, training_dataset: Path, run_manifest: dict[str,
                    for field in ('excluded_wheel_records', 'excluded_wheel_scripts'))
             or not isinstance(model_input, dict) or not digest(model_input.get('manifest_sha256'))
             or not digest(run_manifest.get('training_inputs_sha256'))
-            or not digest(run_manifest.get('wheelhouse_verifier_sha256'))):
+            or not digest(run_manifest.get('wheelhouse_verifier_sha256'))
+            or run_manifest.get('trained_label_groups') != list(evaluate.FIELDS)
+            or run_manifest.get('assessment_targets_validator_sha256') != file_hash(Path(assessment_targets.__file__))):
         raise ValueError('model run is not bound to the reviewed training input')
     split = run_manifest.get('split')
     fields = ('schema_version', 'plan_sha256', 'taxonomy_sha256', 'review_ledger_sha256',
-              'auditor_sha256', 'taxonomy_loader_sha256', 'sources', 'counts', 'duplicate_within_split')
+              'auditor_sha256', 'taxonomy_loader_sha256', 'assessment_targets_validator_sha256',
+              'sources', 'counts', 'duplicate_within_split')
     expected_audit = {key: report[key] for key in fields}
+    expected_audit['reviewed_assessment_targets'] = {
+        split: report['reviewed_assessment_targets'][split] for split in ('train', 'validation')}
     if development:
         expected_audit.update(scope='development', holdout_assessment='not_performed')
     if (not isinstance(split, dict) or split.get('development_override') is not False
@@ -133,7 +139,7 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
     if mode not in ('embedded', 'external'):
         raise ValueError('unsupported native artifact mode')
     config, config_hash = benchmark_persistent.load_config(benchmark_config)
-    code_paths = [Path(__file__), Path(benchmark_persistent.__file__), Path(corpus_audit.__file__),
+    code_paths = [Path(__file__), Path(assessment_targets.__file__), Path(benchmark_persistent.__file__), Path(corpus_audit.__file__),
                   Path(evaluate.__file__), Path(predict_model.__file__), Path(train.__file__), Path(calibration.__file__)]
     code_hashes = {path.name: file_hash(path) for path in code_paths}
     model_hash = predict_model.artifact_digest(model_dir)

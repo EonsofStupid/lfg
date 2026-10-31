@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmark_persistent
+import assessment_targets
 import corpus_audit
 import evaluate_reviewed_native as native
 import predict_model
@@ -26,6 +27,11 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         for split in ('train', 'validation', 'test'):
             row = {'id': split, 'family': split, 'text': f'private {split}', 'verified': False,
                    'intents': ['build'], 'capabilities': ['write'], 'risks': [], 'source': {'project': split}}
+            if split == 'train':
+                profile = {'project': 'train', 'complexities': [{'id': 'c1', 'label': 'First'}],
+                           'models': [], 'agent_range': {'min': 0, 'max': 4}}
+                row['assessment_targets'] = assessment_targets.make_record(
+                    {'complexity': 'c1', 'models': None, 'agent_count': 1}, profile, 'fixture', 'a' * 64)
             self.rows.append(row)
             path = self.root / f'{split}.jsonl'
             path.write_text(json.dumps(row) + '\n')
@@ -45,10 +51,13 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         audit, _ = corpus_audit.audit(self.plan)
         digest = hashlib.sha256((self.root / 'train.jsonl').read_bytes()).hexdigest()
         fields = ('schema_version', 'plan_sha256', 'taxonomy_sha256', 'review_ledger_sha256',
-                  'auditor_sha256', 'taxonomy_loader_sha256', 'sources', 'counts', 'duplicate_within_split')
+                  'auditor_sha256', 'taxonomy_loader_sha256', 'assessment_targets_validator_sha256',
+                  'sources', 'counts', 'duplicate_within_split')
         self.model = self.root / 'model'
         self.model.mkdir()
         manifest = {'schema_version': 'lfg.encoder-run.v1', 'development_override': False, 'dataset_sha256': digest,
+                    'trained_label_groups': list(native.evaluate.FIELDS),
+                    'assessment_targets_validator_sha256': audit['assessment_targets_validator_sha256'],
                     'environment_evidence': {'lock_sha256': 'a' * 64, 'installed_versions_sha256': 'b' * 64,
                                              'locked_wheel_payload': {'schema_version': 'lfg.installed-wheel-payload.v1',
                                                 'files': 3, 'bytes': 50, 'payload_sha256': 'f' * 64,
@@ -56,7 +65,8 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
                     'model_snapshot_evidence': {'manifest_sha256': 'c' * 64},
                     'training_inputs_sha256': 'd' * 64, 'wheelhouse_verifier_sha256': 'e' * 64,
                     'split': {'development_override': False, 'validation_source': 'audited-validation-partition',
-                              'dataset_sha256': digest, 'corpus_audit': {k: audit[k] for k in fields},
+                              'dataset_sha256': digest, 'corpus_audit': {**{k: audit[k] for k in fields},
+                                  'reviewed_assessment_targets': {s: audit['reviewed_assessment_targets'][s] for s in ('train', 'validation')}},
                               'train_ids': ['train'], 'validation_ids': ['validation'],
                               'train_families': ['train'], 'validation_families': ['validation']}}
         (self.model / 'run-manifest.json').write_text(json.dumps(manifest))
@@ -121,6 +131,7 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         self.assertEqual(report['groups']['candidate']['intents']['labels']['build']['tp'], 1)
         self.assertEqual(report['groups']['baseline']['intents']['labels']['build']['fn'], 1)
         self.assertEqual(report['test_label_support']['risks']['sensitive'], {'positive': 0, 'negative': 1})
+        self.assertEqual(report['audit']['reviewed_assessment_targets']['train']['complexity']['known'], 1)
         self.assertNotIn('private test', json.dumps(report))
 
     def test_rejects_truncated_or_unknown_candidate_coverage(self):
@@ -163,6 +174,13 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError, 'not bound'):
             self.compare()
+
+    def test_rejects_unbound_target_validator_or_misrepresented_label_groups(self):
+        manifest = json.loads((self.model / 'run-manifest.json').read_text())
+        for change in ({'assessment_targets_validator_sha256': '0' * 64},
+                       {'trained_label_groups': ['intents', 'capabilities', 'risks', 'models']}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'not bound'):
+                native.audited_run(self.plan, self.root / 'train.jsonl', {**manifest, **change}, development=False)
 
     def test_rejects_changed_artifact_and_wrong_binary_identity(self):
         (self.artifact / 'model.onnx').write_bytes(b'changed')

@@ -124,7 +124,7 @@ def run(paths: list[Path], output: Path | None, policy_path: Path = train.POLICY
             review_corpus.new_file(combined / 'training.jsonl', training)
             if inspect(workspaces)[0] != initial or policy_path.read_bytes() != policy_raw:
                 raise ValueError('review workspaces changed during assembly')
-            code = [Path(__file__), Path(review_corpus.__file__), Path(corpus_audit.__file__),
+            code = [Path(__file__), Path(review_corpus.assessment_targets.__file__), Path(review_corpus.__file__), Path(corpus_audit.__file__),
                     Path(train.__file__), Path(review_corpus.evaluate.__file__)]
             files = ['plan.json', 'taxonomy.json', 'reviews.jsonl', 'training.jsonl'] + [source['path'] for source in sources]
             manifest = {'schema_version': 'lfg.combined-reviewed-corpus.v1',
