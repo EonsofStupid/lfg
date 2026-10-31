@@ -223,10 +223,41 @@ Paths must be absolute for project roots; project roots cannot overlap. Limits
 are configurable with `--max-session-bytes` and `--max-line-bytes`. Output is
 created exclusively. The last command intentionally prints private text: use it
 only in a private terminal. Paths, line numbers and hashes in the inventory are
-also sensitive. Git ignore is not encryption or access control. The tool does
-not yet convert entries into the labeling workspace; source and surrounding
-context must be inspected, and records must be sanitized and labeled before
-the existing audited review and training workflow can use them.
+also sensitive. Git ignore is not encryption or access control.
+
+To prepare a separate review workspace, provide an assignments JSON file that
+explicitly chooses a group and provisional split for every included project:
+
+```json
+{
+  "schema_version": "lfg.codex-review-assignments.v1",
+  "projects": {
+    "project-name": {"project_group": "related-projects", "split": "train"}
+  }
+}
+```
+
+Then select a new private output directory:
+
+```powershell
+python ml/lfg-encoder/prepare_codex_review.py --inventory PRIVATE_NEW_INVENTORY.jsonl --assignments ASSIGNMENTS.json --taxonomy ml/lfg-encoder/evaluation-taxonomy.v1.json --output PRIVATE_NEW_DIRECTORY
+python ml/lfg-encoder/review_web.py --workspace PRIVATE_NEW_DIRECTORY/workspace --reviewer REVIEWER_ID
+```
+
+Preparation verifies the selected source prefixes in batches, excludes
+normalized exact-text duplicates within a split, and refuses duplicate text or
+a declared project group across splits. It conservatively groups messages from
+the same session into a family; relationships across sessions still require
+human investigation. The output includes raw, potentially sensitive text and
+source paths in both the draft files and the review workspace; keep the whole
+directory private. If output creation is interrupted, inspect the partial
+directory and choose a new path. Missing labels are represented as
+`labels_pending`, not negative examples. The normal dataset loader rejects
+these records even in development mode. Approval requires a reviewer to select
+at least one intent and attest to all labels, source context and privacy. An
+unresolved or sensitive message should be skipped or rejected; the review UI
+does not currently edit or sanitize message text. Nothing is approved by the
+preparation command.
 
 On 2026-10-31 a scan scoped to the local LFG, RRFlow and DevPulse directories
 created `dataset/private/codex-project-session-inventory.v4.jsonl`. It scanned
@@ -242,6 +273,19 @@ passed prefix verification locally. Some messages may overlap the 38 pending
 records or earlier experiments; reconcile them before any training or holdout
 assignment. Makers Impulse remains a candidate external-project holdout and
 was not included in this scan.
+
+The private `dataset/private/codex-session-review-draft.v1/workspace` was then
+created from that inventory using one provisional training group for all three
+related projects. It contains 226 pending unlabeled records: 190 RRFlow, 27
+LFG and 9 DevPulse; 45 normalized duplicates were excluded. The audit reports
+zero approvals and verified records, zero validation or test examples, and no
+promotion eligibility. Source prefix verification proves the copied text came
+from the inventoried records at preparation time; it does not prove the text is
+complete, safe, independent, or attributable to the project owner. Some of this
+material overlaps earlier exploratory use. It is review material, not evidence
+of a trained or qualified model. A loopback server smoke check displayed the
+unlabeled state for one record from each project without recording a decision;
+the training loader rejected the pending-label file.
 
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse

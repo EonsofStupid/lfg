@@ -125,6 +125,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 annotation = corpus_audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)
                 self.json_reply(200, {'item': {'id': identifier, 'text': row['text'], 'source': row['source'],
                                                'review_note': row.get('review_note'), 'labels': {k: row[k] for k in evaluate.FIELDS},
+                                               'labels_pending': row.get('labels_pending', False),
                                                'project': source['project'], 'split': source['split'],
                                                'annotation_sha256': annotation,
                                                'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,

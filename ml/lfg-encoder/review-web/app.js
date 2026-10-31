@@ -57,6 +57,7 @@
     el('request').textContent = current.text;
     el('source').textContent = JSON.stringify(current.source, null, 2);
     el('review-note').textContent = current.review_note || 'No review note recorded.';
+    if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
     if (current.pending_changed) el('notice').textContent = 'This pending record changed. Reinitialize the workspace before deciding.';
     el('attest').checked = false;
