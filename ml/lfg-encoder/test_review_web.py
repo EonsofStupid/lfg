@@ -195,6 +195,44 @@ class ReviewWebTests(unittest.TestCase):
         body['annotation_sha256'] = '0' * 64
         self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
 
+    def test_source_context_is_local_bounded_and_does_not_record_review(self):
+        root = Path(self.temp.name)
+        def message(role, text, kind='user.text'):
+            return {'type': 'response_item', 'payload': {'type': 'message', 'role': role,
+                    'content': [{'type': 'input_text', 'text': text}],
+                    'internal_chat_message_metadata_passthrough': {'content_item_kinds': [kind]}}}
+        rows = [message('user', 'prior private text'), message('assistant', 'assistant text'),
+                message('user', 'selected text'), message('user', 'later text')]
+        lines = [(json.dumps(row) + '\n').encode() for row in rows]
+        prefix = b''.join(lines[:3])
+        session = root / 'context-session.jsonl'; session.write_bytes(b''.join(lines))
+        source = {'project': 'fixture', 'kind': 'codex-session-user-text', 'source_file': str(session),
+                  'source_line': 3, 'source_line_sha256': hashlib.sha256(lines[2].rstrip(b'\r\n')).hexdigest(),
+                  'source_prefix_sha256': hashlib.sha256(prefix).hexdigest(), 'source_prefix_bytes': len(prefix),
+                  'source_file_sha256': hashlib.sha256(session.read_bytes()).hexdigest(),
+                  'text_sha256': hashlib.sha256(b'selected text').hexdigest()}
+        source_path = root / 'source.jsonl'
+        row = json.loads(source_path.read_text(encoding='utf-8'))
+        row.update(text='selected text', source=source)
+        source_path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        workspace = root / 'context-workspace'
+        review_corpus.init_workspace(root / 'plan.json', workspace)
+        self.server.workspace = workspace
+        _, _, data = self.request('GET', '/api/item?offset=0')
+        item = json.loads(data)['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256']}
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin='https://evil.example')[0], 403)
+        status, headers, data = self.request('POST', '/api/source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        value = json.loads(data)
+        self.assertEqual([item['text'] for item in value['messages']], ['prior private text'])
+        self.assertNotIn(b'assistant text', data)
+        self.assertNotIn(b'later text', data)
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        session.write_bytes(b''.join(lines).replace(b'prior private text', b'changed private text'))
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+
     def test_guided_review_binds_approval_to_displayed_guide_and_rejects_changes(self):
         guide = {'schema_version': 'lfg.review-label-guide.v1', 'revision': 'fixture', 'notice': 'Review carefully.',
                  'labels': {'intents': {'build': {'apply': 'Build.', 'boundary': 'Not explanation.'},

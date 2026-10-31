@@ -18,6 +18,37 @@ inspect_spec.loader.exec_module(inspect_module)
 
 
 class SessionInventoryTests(unittest.TestCase):
+    def test_prior_context_is_bounded_user_only_and_prefix_verified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            project = base / 'project'; project.mkdir()
+            sessions = base / 'sessions'; sessions.mkdir()
+            session = sessions / 'context.jsonl'
+            assistant = self.message('assistant private content', ['user.text'])
+            assistant['payload']['role'] = 'assistant'
+            records = [{'type': 'session_meta', 'payload': {'cwd': str(project)}},
+                       self.message('first user', ['user.text']), assistant,
+                       self.message('internal content', ['goal.internal_context']),
+                       self.message('second user', ['user.text']),
+                       self.message('target user', ['user.text']),
+                       self.message('later user', ['user.text'])]
+            session.write_text(''.join(json.dumps(row) + '\n' for row in records), encoding='utf-8')
+            _, rows = module.inventory(sessions, {'project': module.normalize(str(project))}, 100000)
+            record = next(row for row in rows if row['source_line'] == 6)
+            text, context, truncated = inspect_module.prior_user_context(record, 100000, 100000, 1, 1000)
+            self.assertEqual(text, 'target user')
+            self.assertEqual([item['text'] for item in context], ['second user'])
+            self.assertTrue(truncated)
+            text, context, truncated = inspect_module.prior_user_context(record, 100000, 100000, 5, 1000)
+            self.assertEqual([item['text'] for item in context], ['first user', 'second user'])
+            self.assertFalse(truncated)
+            _, context, truncated = inspect_module.prior_user_context(record, 100000, 100000, 5, 5)
+            self.assertEqual(context, [])
+            self.assertTrue(truncated)
+            session.write_text(session.read_text(encoding='utf-8').replace('first user', 'first changed'), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'no longer matches'):
+                inspect_module.prior_user_context(record, 100000, 100000, 5, 1000)
+
     def test_exact_cwd_excludes_nested_sessions(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
