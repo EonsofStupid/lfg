@@ -63,3 +63,34 @@ test('review UI finds a pending record by ID and skips from the returned positio
   document.getElementById('skip').click()
   await waitFor(() => expect(calls).toContain('/api/item?offset=2'))
 })
+
+test('wrapper suggestion is a reversible preview and only sends a transform on approval', async () => {
+  const dir = resolve(process.cwd(), '../../ml/lfg-encoder/review-web')
+  const parsed = new DOMParser().parseFromString(readFileSync(resolve(dir, 'index.html'), 'utf8'), 'text/html')
+  document.body.innerHTML = parsed.body.innerHTML
+  history.replaceState(null, '', '/#local-test-token')
+  const prefix = '<in-app-browser-context>😀</in-app-browser-context>\n\n## My request:\n'
+  const item = {id: 'fixture', text: prefix + '  keep this', source: {}, project: 'fixture', split: 'train',
+    labels: {intents: ['build'], capabilities: [], risks: []}, annotation_sha256: 'digest',
+    redaction_suggestions: [{id: 'wrapper', label: 'Preview removing wrapper', start: 0,
+      end: Array.from(prefix).length, replacement: ''}]}
+  const post = vi.fn()
+  vi.stubGlobal('fetch', vi.fn(async (path, options = {}) => {
+    if (path === '/api/decision') { post(JSON.parse(options.body)); return {ok: true, json: async () => ({saved: true})} }
+    if (path === '/api/status') return {ok: true, json: async () => ({reviewer: 'r', decisions: {pending: 1, approved: 0, rejected: 0}})}
+    return {ok: true, json: async () => ({item, offset: 0, pending: 1, taxonomy: {intents: ['build'], capabilities: [], risks: []}})}
+  }))
+  vi.stubGlobal('prompt', () => 'APPROVE')
+  Function(readFileSync(resolve(dir, 'app.js'), 'utf8'))()
+  await waitFor(() => expect(document.getElementById('suggestions').children.length).toBe(1))
+  document.getElementById('suggestions').firstElementChild.click()
+  expect(document.getElementById('request').value).toBe('  keep this')
+  expect(post).not.toHaveBeenCalled()
+  document.getElementById('reset-redactions').click()
+  expect(document.getElementById('request').value).toBe(item.text)
+  document.getElementById('suggestions').firstElementChild.click()
+  document.getElementById('attest').checked = true
+  document.getElementById('approve').click()
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+  expect(post.mock.calls[0][0].redactions).toEqual([{start: 0, end: Array.from(prefix).length, replacement: ''}])
+})

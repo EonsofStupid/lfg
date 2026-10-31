@@ -24,6 +24,7 @@
           <h2>Request to review</h2>
           <p class="hint">Select sensitive text below and replace it before approval. Check that the remaining request still has its original meaning.</p>
           <textarea id="request" aria-label="Request to review" readonly spellcheck="false"></textarea>
+          <div id="suggestions" class="actions suggestion-actions"></div>
           <label class="redaction-label" for="redaction-replacement">Replacement text</label>
           <input id="redaction-replacement" class="redaction-replacement" type="text" value="[REDACTED]">
           <div class="actions redaction-actions"><button id="redact" type="button" class="secondary">Replace selection</button>

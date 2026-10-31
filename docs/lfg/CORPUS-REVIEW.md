@@ -386,6 +386,25 @@ workspace record is rejected. The tool does not decide whether redactions are
 complete or preserve meaning. Source files and draft copies still contain the
 original text, so approving a redaction does not erase private data. The
 terminal review path does not offer redaction.
+
+The optional `redaction_suggestions` rules in the selected web configuration
+offer **preview** buttons for exact, unique prefix envelopes. The supplied rule
+matches the observed browser-context envelope followed by its request heading;
+it will not propose a change when non-whitespace precedes the envelope, markers
+are repeated, the configured trailing text differs, or the remaining request is
+empty. Copy the configuration to adjust literal markers or line endings for
+other sources. A preview changes only browser memory and can be reset. If a
+reviewer later approves, the existing transformation record stores the exact
+character range and replacement; it does not record which suggestion rule was
+used. Inspect the original, remaining text, surrounding context and every label:
+a matched wrapper does not establish that the remaining request is complete or
+safe to train on.
+
+On this machine, the example rule offered a preview for 51 of the 52 pending
+training records with browser-context markers; one had non-whitespace text
+before the envelope. Eight previews left at most 20 non-whitespace-trimmed
+characters. A read-only local API check displayed one preview and left its
+ledger unchanged. No real record was transformed, approved or counted as clean.
 Decisions, export and subsequent training use the same rules as the terminal
 workflow above. The interface does not verify source authorship, user identity,
 data rights or secrets, and it does not create approvals on its own. Local

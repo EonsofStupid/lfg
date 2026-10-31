@@ -27,6 +27,7 @@ textarea, .redaction-replacement { width: 100%; border: 1px solid #465760; borde
 textarea { min-height: 180px; resize: vertical; white-space: pre-wrap; line-height: 1.6; }
 .redaction-label { display: block; color: #b1c0b7; font-size: .85rem; margin: 12px 0 6px; }
 .redaction-actions { margin: 10px 0 15px; }
+.suggestion-actions { margin: 10px 0; }
 .attest { display: flex; align-items: start; gap: 10px; border-top: 1px solid #344149; padding: 18px 0; color: #d6dfd8; line-height: 1.4; }
 .attest input { flex: none; }
 .actions { display: flex; gap: 9px; flex-wrap: wrap; }

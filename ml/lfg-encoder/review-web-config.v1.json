@@ -10,5 +10,10 @@
   "source_context": {
     "max_messages": 3,
     "max_context_bytes": 16384
-  }
+  },
+  "redaction_suggestions": [
+    {"id": "ambient-browser-envelope", "label": "Preview removing browser context envelope",
+     "start_marker": "<in-app-browser-context", "end_marker": "</in-app-browser-context>",
+     "trailing_text": "\n\n## My request:\n", "replacement": ""}
+  ]
 }
