@@ -39,3 +39,27 @@ test('review UI maps Unicode and Windows line endings to source spans before app
     {start: 0, end: 3, replacement: 'X'}
   ])
 })
+
+test('review UI finds a pending record by ID and skips from the returned position', async () => {
+  const dir = resolve(process.cwd(), '../../ml/lfg-encoder/review-web')
+  const parsed = new DOMParser().parseFromString(readFileSync(resolve(dir, 'index.html'), 'utf8'), 'text/html')
+  document.body.innerHTML = parsed.body.innerHTML
+  history.replaceState(null, '', '/#local-test-token')
+  const calls = []
+  const item = {id: 'requested', text: 'fixture', source: {}, project: 'fixture', split: 'train',
+    labels: {intents: ['build'], capabilities: [], risks: []}, annotation_sha256: 'digest'}
+  vi.stubGlobal('fetch', vi.fn(async path => {
+    calls.push(path)
+    if (path === '/api/status') return {ok: true, json: async () => ({reviewer: 'r', decisions: {pending: 3, approved: 0, rejected: 0}})}
+    return {ok: true, json: async () => ({item, offset: path.includes('id=') ? 1 : 0, pending: 3,
+      taxonomy: {intents: ['build'], capabilities: [], risks: []}})}
+  }))
+  Function(readFileSync(resolve(dir, 'app.js'), 'utf8'))()
+  await waitFor(() => expect(document.getElementById('record-id').textContent).toBe('requested'))
+  document.getElementById('find-id').value = 'requested'
+  document.getElementById('find').click()
+  await waitFor(() => expect(calls).toContain('/api/item?id=requested'))
+  await waitFor(() => expect(document.getElementById('position').textContent).toBe('Pending 2 of 3'))
+  document.getElementById('skip').click()
+  await waitFor(() => expect(calls).toContain('/api/item?offset=2'))
+})

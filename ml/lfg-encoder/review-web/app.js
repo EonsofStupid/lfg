@@ -68,20 +68,22 @@
     }
   }
 
-  async function refresh() {
+  async function refresh(findId = null) {
     current = null;
     el('review').hidden = true;
     el('notice').textContent = '';
     el('source-context').textContent = '';
     const status = await api('/api/status');
     el('summary').textContent = `${status.decisions.pending} pending · ${status.decisions.approved} approved · ${status.decisions.rejected} rejected · ${status.reviewer}`;
-    const result = await api(`/api/item?offset=${offset}`);
+    const result = await api(findId === null ? `/api/item?offset=${offset}` : `/api/item?id=${encodeURIComponent(findId)}`);
+    if (Number.isSafeInteger(result.offset)) offset = result.offset;
     current = result.item;
     el('review').hidden = !current;
     el('empty').hidden = !!current;
     el('skip-blocked').hidden = !result.blocked;
     if (!current) {
-      el('empty-title').textContent = result.blocked ? 'Request too large to display' : 'No more items at this position';
+      el('empty-title').textContent = result.missing_id ? 'Record is not pending in this workspace' :
+        result.blocked ? 'Request too large to display' : 'No more items at this position';
       if (result.blocked) el('notice').textContent = result.blocked + ' Use Skip to move on.';
       return;
     }
@@ -191,6 +193,11 @@
     el('notice').textContent = 'Request restored to its original review copy.';
   });
   el('skip').addEventListener('click', () => { offset += 1; handle(refresh()); });
+  el('find').addEventListener('click', () => {
+    const id = el('find-id').value.trim();
+    if (!id) { el('notice').textContent = 'Enter a pending record ID.'; return; }
+    handle(refresh(id));
+  });
   el('skip-blocked').addEventListener('click', () => { offset += 1; handle(refresh()); });
   el('restart').addEventListener('click', () => { offset = 0; handle(refresh()); });
   el('approve').addEventListener('click', () => handle(decide('approved')));

@@ -78,6 +78,15 @@ class ReviewWebTests(unittest.TestCase):
         self.assertEqual(json.loads(data)['decisions']['pending'], 1)
         self.assertNotIn(b'fixture</script>', data)
 
+    def test_find_pending_record_by_id_and_reject_invalid_query(self):
+        status, _, raw = self.request('GET', '/api/item?id=one')
+        value = json.loads(raw)
+        self.assertEqual((status, value['item']['id'], value['offset']), (200, 'one', 0))
+        status, _, raw = self.request('GET', '/api/item?id=missing')
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(raw)['missing_id'])
+        self.assertEqual(self.request('GET', '/api/item?id=one&offset=0')[0], 400)
+
     def test_oversized_decision_is_rejected_without_approval(self):
         self.server.config['max_request_bytes'] = 10
         try:
