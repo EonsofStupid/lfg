@@ -31,6 +31,7 @@ mod devpulse_context;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 mod intake;
+mod project_attunement;
 use dev_stats::{DevStats, Operation};
 
 #[derive(Clone)]
@@ -141,6 +142,16 @@ fn configured_boundary_questions() -> Result<boundary_questions::Catalog, String
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
     boundary_questions::Catalog::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+/// Prepare the authored boundary questions from explicitly configured local project evidence.
+pub fn attune_local_project(root: &std::path::Path, config: &str) -> Result<Value, String> {
+    project_attunement::run(
+        root,
+        config,
+        &configured_boundary_questions()?,
+        &configured_intake()?,
+    )
 }
 
 fn make_dev_stats(operations: &OperationsConfig) -> Arc<DevStats> {

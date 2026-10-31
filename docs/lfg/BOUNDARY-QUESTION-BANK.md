@@ -73,7 +73,51 @@ not answer the question. That local build was 5,707,776 bytes with SHA-256
 This is a functional smoke check, not a reproducible release, trained binary,
 performance result, or integration with another app.
 
-Bank and section selection is explicit. Automatic stack detection, project
+For local project evidence, `boundary-project` uses an explicitly selected
+configuration to collect file paths and JSON values and feeds them into this
+same catalog. The checked-in example is scoped to LFG itself:
+
+```powershell
+lfg-server boundary-project --root D:\projects\lfg --config crates/lfg-server/config/project-attunement.lfg.example.json
+```
+
+Copy and adapt that configuration for another project. Each source maps a
+catalog binding to either an inventory of files below a named directory or a
+JSON pointer in a named file. Paths are relative to the selected root. An
+inventory extension list of `[]` includes every file; otherwise list extensions
+without dots. Set `recursive` and the entry, depth, and JSON file byte limits
+deliberately. Entry limits are shared across inventories and count directories
+as well as files. Exceeding a limit or encountering a symlink is an error,
+rather than a partial inventory presented as complete. An absent path or JSON
+pointer stays missing. A JSON file is read in full to select the pointer, but
+only the selected value is returned.
+
+The result includes the catalog digest, configuration digest, source paths,
+inventory path-list digests or JSON file SHA-256 hashes, and the ordinary
+attunement preview. An inventory digest covers names, not file contents. The
+command writes the preview to standard output and does not persist it; paths
+and selected values may themselves be sensitive. Existing credential-shaped
+checks reject some inputs but cannot detect all secrets. The configured root,
+files and local machine must be trusted: the path checks are not a sandbox
+against concurrent filesystem changes. No automatic stack detection or
+judgment of question answers is performed.
+
+On 2026-10-31, the example ran against the local LFG checkout: it collected
+12 Rust source paths for `module inventory` and 45 paths for `file tree`,
+supplying those bindings to three of the 120 selected core and Rust questions.
+Nine other distinct binding names remained missing. This is a local functional
+check against real project paths, not human review, a training corpus, or a
+completed app integration.
+
+The same binary was also run against the authorized RRFlow checkout with a
+separate configuration selecting `crates/kernel/rrd-core/src` and
+`crates/kernel`. It collected 14 Rust module paths and 31 file paths and
+attached the two scoped inventories to three questions; the other nine binding
+names remained missing. This reads project paths only, not the file contents,
+and does not establish an integrated RRFlow deployment. The adaptable example
+is `crates/lfg-server/config/project-attunement.rrflow.example.json`.
+
+Bank and section selection is explicit. Automatic stack detection, broad project
 artifact discovery, maturity gating, question execution, yes/no or inconclusive
 answers, attunement persistence, and RRFlow/SWAG/MCP integration are not yet
 implemented. The existing app intake form is a separate project configuration
