@@ -1,0 +1,8 @@
+{
+  "schema_version": "lfg.encoder-prediction-config.v1",
+  "default_threshold": 0.5,
+  "label_thresholds": {},
+  "batch_size": 8,
+  "cpu_threads": 1,
+  "max_input_bytes": 65536
+}

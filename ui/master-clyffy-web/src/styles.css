@@ -181,6 +181,11 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 .subscription-row button { background: none; border: 1px solid var(--line); color: var(--muted); padding: .3rem .7rem; font-size: .72rem; }
 .subscription-row button.is-active { color: #07100d; background: var(--cyan); border-color: var(--cyan); }
 .subscription-row-note { margin-left: auto; color: var(--muted); font-size: .62rem; font-style: italic; }
+.intake-list { display: grid; gap: .8rem; }
+.intake-list > div { border-top: 1px solid var(--line); padding-top: .6rem; }
+.intake-list dt { color: var(--muted); font-size: .8rem; }
+.intake-list dd { margin: .4rem 0 0; }
+.intake-list pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: inherit; }
 
 .branch-inspector { top: 5.7rem; }
 .keyword-chip { display: inline-block; margin: 0 .3rem .3rem 0; padding: .12rem .4rem; border: 1px solid var(--lime); color: var(--lime); font-size: .7rem; }

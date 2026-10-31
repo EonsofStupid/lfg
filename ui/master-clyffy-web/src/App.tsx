@@ -6,9 +6,9 @@ import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
+import { IntakePanel } from './IntakePanel'
 import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
 
-const DEFAULT_PROMPT = 'Research cutting-edge agent routing, implement the visual system, test it, and independently grade the result.'
 const SESSION_ID = `browser-${crypto.randomUUID()}`
 const GraphCanvas = lazy(() => import('./GraphCanvas'))
 
@@ -16,7 +16,7 @@ type Mode = 'guided' | 'inspector'
 
 export default function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [prompt, setPrompt] = useState('')
   const [revision, setRevision] = useState(1)
   const [preview, setPreview] = useState<PreflightSnapshot | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
@@ -121,7 +121,7 @@ export default function App() {
             <span>TYPE HERE</span><b>↘</b>
           </motion.div>
           <div className="composer-heading"><div><p className="eyebrow">PROMPT SIGNAL INTAKE</p><h1 id="prompt-label">Watch a team compile itself.</h1></div><span className="privacy-pill">MEMORY ONLY · CPU PREFLIGHT</span></div>
-          <textarea value={prompt} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" aria-invalid={promptTooLarge} />
+          <textarea value={prompt} rows={4} onChange={(event) => { setPrompt(event.target.value); setRevision((value) => value + 1) }} aria-label="Prompt to route" placeholder="Describe what you want to do" aria-invalid={promptTooLarge} />
           <div className="composer-footer">
             <button className="commit-button" onClick={handleCommit} disabled={busy || !status || !prompt.trim() || promptTooLarge}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
             <span>{promptBytes.toLocaleString()} / {status?.operations.maxPromptBytes.toLocaleString() ?? '…'} UTF-8 bytes</span>
@@ -173,6 +173,9 @@ export default function App() {
           )}
         </section>
 
+        {!publicEmbed && mode === 'inspector' && status && debounceMs && <IntakePanel
+          prompt={prompt} promptTooLarge={promptTooLarge} revision={revision} classification={classification} activeSubscriptions={activeSubscriptions} debounceMs={debounceMs}
+        />}
         {!publicEmbed && mode === 'inspector' && status && debounceMs && historyLimit && <DevPanel
           status={status} debounceMs={debounceMs} historyLimit={historyLimit}
           onDebounce={setDebounceOverride} onHistory={setHistoryOverride}

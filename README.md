@@ -72,6 +72,10 @@ npm run dev
 The Vite dev server (port 5174) proxies `/api/*` to `http://127.0.0.1:4317`,
 where `lfg-server serve` listens by default.
 
+For a release build that embeds the browser assets in the executable, see
+[bundled UI builds](docs/lfg/BUNDLED-UI.md). The UI build is a build-time
+prerequisite, not a runtime Node.js requirement.
+
 Check activation without consuming a model run:
 
 ```bash
@@ -94,7 +98,7 @@ cargo run -p lfg-server -- lfg-bench --iterations 1000
 ## Environment
 
 - `LFG_STATE_DIR` — where signal JSONL history is written (defaults to a temp dir)
-- `MASTER_CLYFFY_UI_DIR` — static UI directory `lfg-server serve` falls back to when no dev proxy is in front of it (defaults to `ui/master-clyffy-web/dist`)
+- `MASTER_CLYFFY_UI_DIR` — optional external UI directory; overrides embedded assets when supplied. Without the embedded feature, it defaults to the checkout's `ui/master-clyffy-web/dist`.
 
 ## Layout
 

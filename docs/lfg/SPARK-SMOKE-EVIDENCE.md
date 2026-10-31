@@ -21,6 +21,8 @@ model is not suitable for product inference.
 - Dataset SHA-256: `93640be08ad6da46e6124e99753fc349efb60cd43b967f55c4fff83695b1724e`.
   Trainer SHA-256: `054148eed1985ba80cb4ec0bb7009d7149aae7282a2b62b88b7ed735a379c438`.
   Run manifest records configuration, policy, split and dependency identities.
+  This identifies the trainer snapshot used at the time; later reviewed-corpus
+  gate changes have a different trainer hash and were not part of this run.
 - Limits: separate Docker container capped at 6 GiB and two CPUs; no changes to
   the running service. GPU is shared, not isolated by those limits.
 - A test completed on GB10, saved artifacts and checkpoints, and a fresh

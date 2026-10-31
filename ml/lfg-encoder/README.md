@@ -19,8 +19,9 @@ actual PR titles and excerpts linked to outcome journals, not original prompts.
 
 The promotion order is fixed:
 
-1. Validate the corpus with `python3 train.py validate`.
-2. Train with a pinned model revision only after the sample gate.
+1. Audit a reviewed, project-separated corpus plan and validate the assembled
+   training snapshot with `python3 train.py validate --dataset DATASET`.
+2. Train with the audited plan and a pinned model revision only after the sample gate.
 3. Export a versioned ONNX artifact and manifest.
 4. Benchmark through the Rust runtime.
 5. Promote only when `promotion-policy.json` passes.
@@ -54,9 +55,10 @@ the review happened. The sample gate alone does not make a model promotion-ready
    and complexity need separate labels and evaluations; this classifier does not
    currently learn them.
 4. Train a candidate, export and benchmark it, then evaluate it independently
-   against the baseline and the policy. The current script does not implement
-   those evaluation, ONNX export, or promotion checks. Keep the rule encoder in
-   charge until those checks and runtime integration exist and pass.
+   against the baseline and the policy. The experimental evaluator below can
+   report classification errors, but ONNX export, CPU runtime integration,
+   calibration, independent-test qualification and promotion checks are still
+   missing. Keep the rule encoder in charge until those checks exist and pass.
 
 For a local development smoke test on Windows, install Python 3.10 or newer,
 then from the repository root. Supply the full immutable commit for a test model
@@ -75,7 +77,10 @@ is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
 The `--allow-below-gate` flag is for development only and allows unverified rows
 into the experiment. Without it, training requires the policy's minimum number
-of records explicitly marked `verified` and excludes unverified rows. A run
+of verified records and an audited project-separated plan with current review
+attestations for every train, validation, and test example. The input must
+exactly match its reviewed train partition and contain no unverified rows. See
+[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run
 requires at least two families and writes the seed, dataset hash, row IDs and
 family assignments to `split-manifest.json` in the ignored output directory.
 This family split is for development validation, not a final test: it is not
@@ -121,3 +126,47 @@ the actual host before relying on it. Use one trainer per output directory.
 One [GB10 infrastructure smoke test](../../docs/lfg/SPARK-SMOKE-EVIDENCE.md)
 has since exercised training, interruption, resume and fresh-process GPU reload;
 it does not qualify the image, dataset or model for production.
+
+## Compare a candidate with the Rust baseline
+
+The Rust binary's `baseline-predict` reads dataset JSONL on stdin and emits one
+prediction per example. `predict_model.py` uses a saved experimental model on
+CPU and emits the same schema. Both outputs contain example IDs and input
+SHA-256 hashes, not prompt text. These identifiers and hashes can still reveal
+information through guessing: keep predictions and reports private, and never
+publish them without review. Thresholds, CPU threads, input limits and batch
+size are configured in `prediction-config.v1.json`; its default threshold is an
+uncalibrated development setting, not a quality claim.
+
+On Windows from the repository root, first build the Rust server and use a
+separate dataset and model directory. Replace `MODEL_DIR` and `DATASET` with
+actual paths; output files in `target` are Git-ignored. The commands use
+`cmd /c` for byte-preserving redirection in Windows PowerShell:
+
+```powershell
+cargo build -p lfg-server
+cmd /c "target\debug\lfg-server.exe baseline-predict < DATASET > target\baseline.jsonl"
+cmd /c ".venv\Scripts\python.exe ml\lfg-encoder\predict_model.py --dataset DATASET --model MODEL_DIR --taxonomy ml\lfg-encoder\evaluation-taxonomy.v1.json --config ml\lfg-encoder\prediction-config.v1.json > target\candidate.jsonl"
+.\.venv\Scripts\python.exe ml/lfg-encoder/evaluate.py --dataset DATASET --taxonomy ml/lfg-encoder/evaluation-taxonomy.v1.json --predictions target/baseline.jsonl --training-split MODEL_DIR/split-manifest.json
+.\.venv\Scripts\python.exe ml/lfg-encoder/evaluate.py --dataset DATASET --taxonomy ml/lfg-encoder/evaluation-taxonomy.v1.json --predictions target/candidate.jsonl --training-split MODEL_DIR/split-manifest.json
+```
+
+These examples assume paths without spaces; quote paths as appropriate for the
+shell. For unreviewed draft records, `--allow-unverified` is required on each
+evaluation command. Results then describe agreement with draft labels only.
+The evaluator rejects mismatched IDs, input hashes, model identities, unknown
+labels and declared overlap with a supplied training split. A supplied split
+only checks declared IDs and family names; it cannot establish independent
+projects, provenance, human review, unseen paraphrases, or absence of other
+leakage. Without a split, separation is `not_checked`. Every report is marked
+ineligible for promotion until those requirements and promotion gates exist.
+
+The configurable taxonomy defines the label universe. Per-label counts include
+false positives for labels with no positive examples; macro F1 averages only
+labels with positive reference support, while micro F1 includes all declared
+labels. Empty denominators are `null`. Compare models using the same dataset
+and taxonomy hashes and inspect the support for each label. Predictions are
+binary: this workflow does not measure calibration, runtime CPU cycles, memory,
+quantization loss, or model quality on an independently reviewed final test.
+See the [exploratory comparison](../../docs/lfg/EVALUATION-SMOKE.md) for a
+recorded same-data smoke test and its limits.
