@@ -108,6 +108,23 @@ valid prompts or independent labeled examples. Representative positive and
 negative security cases, human review, independently held-out projects, and
 assessment of reuse and privacy remain necessary before a serious training run.
 
+An additional local draft contains 12 operator-attributed excerpts from seven
+DevPulse documents at commit `cb7baf0756cbff1ca7a4c18bef81ebdae1e0ee57`.
+Each record includes source path, line range, source and text hashes, and the
+normalization used to join wrapped quote lines. The stored spans and hashes were
+checked against the pinned Git blobs. The original complete requests and their
+authorship have not been independently recovered. Their labels and negatives
+are AI-proposed, and every record remains unverified. The file is Git-ignored
+at `dataset/private/devpulse-attributed-draft.cb7baf07.jsonl`.
+
+A new local provisional plan and pending-only review queue include those rows
+without changing the original files. The audit reports 25 reconstructed RRFlow
+training examples, 16 DevPulse validation excerpts, and five previously
+inspected Makers test examples. None of the 46 is approved or verified, all 16
+validation rows have the same provisional intent and capability labels, and
+none of the three splits has a positive `sensitive-data` label. These counts
+are not evidence of adequate variety, independence, or a blinded test.
+
 ### Makers checkpoint inventory
 
 `inventory_checkpoint_prompts.py` scans a pinned local Git commit for Replit
