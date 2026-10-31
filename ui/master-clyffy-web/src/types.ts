@@ -174,3 +174,12 @@ export type IntakePreview = {
   missingRequired: number
   answers: Array<{ id: string; question: string; required: boolean; status: 'filled' | 'missing' | 'invalid'; value: unknown }>
 }
+
+export type AppContext = {
+  schemaVersion: 'lfg.app-context.v1'
+  status: 'disabled' | 'ready' | 'unavailable'
+  revision: string | null
+  configDigest?: string | null
+  pollIntervalMs: number | null
+  providers: Array<{ id: string; activated: boolean; capabilities: string[] }> | null
+}

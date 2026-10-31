@@ -99,6 +99,7 @@ cargo run -p lfg-server -- lfg-bench --iterations 1000
 
 - `LFG_STATE_DIR` — where signal JSONL history is written (defaults to a temp dir)
 - `MASTER_CLYFFY_UI_DIR` — optional external UI directory; overrides embedded assets when supplied. Without the embedded feature, it defaults to the checkout's `ui/master-clyffy-web/dist`.
+- `LFG_DEVPULSE_CONTEXT_CONFIG` — optional configuration for reading a local DevPulse provider roster; see [project intake](docs/lfg/APP-INTAKE.md).
 
 ## Layout
 

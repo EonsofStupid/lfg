@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "lfg.devpulse-context.v1",
+  "revision": "local-example-1",
+  "endpoint": "127.0.0.1:7341",
+  "timeoutMs": 2000,
+  "pollIntervalMs": 5000,
+  "maxResponseBytes": 262144
+}

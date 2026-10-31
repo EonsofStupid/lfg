@@ -26,6 +26,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 mod dev_stats;
+mod devpulse_context;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 mod intake;
@@ -40,6 +41,7 @@ pub struct AppState {
     operations: OperationsConfig,
     dev_stats: Arc<DevStats>,
     intake: Arc<intake::Template>,
+    devpulse_context: Option<Arc<devpulse_context::Source>>,
 }
 
 impl AppState {
@@ -61,6 +63,7 @@ impl AppState {
             operations,
             dev_stats,
             intake: Arc::new(intake::Template::bundled()),
+            devpulse_context: None,
         }
     }
 
@@ -84,6 +87,13 @@ impl AppState {
         let intake = configured_intake().map_err(|error| {
             RuntimeError::InvalidRequest(format!("intake configuration: {error}"))
         })?;
+        let devpulse_context = std::env::var_os("LFG_DEVPULSE_CONTEXT_CONFIG")
+            .map(|path| devpulse_context::Source::from_path(std::path::Path::new(&path)))
+            .transpose()
+            .map_err(|error| {
+                RuntimeError::InvalidRequest(format!("DevPulse context configuration: {error}"))
+            })?
+            .map(Arc::new);
         let dev_stats = make_dev_stats(&operations);
         let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Ok(Self {
@@ -103,6 +113,7 @@ impl AppState {
             operations,
             dev_stats,
             intake: Arc::new(intake),
+            devpulse_context,
         })
     }
 }
@@ -246,8 +257,25 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lfg/dev-stats", get(lfg_dev_stats))
         .route("/api/lfg/intake/template", get(lfg_intake_template))
         .route("/api/lfg/intake/preview", post(lfg_intake_preview))
+        .route("/api/lfg/intake/app-context", get(lfg_app_context))
         .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
+}
+
+async fn lfg_app_context(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<devpulse_context::Context>,
+) {
+    let context = match &state.devpulse_context {
+        Some(source) => source.context(&state.intake).await,
+        None => devpulse_context::disabled(),
+    };
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(context),
+    )
 }
 
 async fn lfg_intake_template(
@@ -884,6 +912,27 @@ mod tests {
         assert_eq!(preview["sourceApp"], "app");
         assert_eq!(preview["missingRequired"], 2);
         assert!(state.lfg.lock().await.signals(None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_context_is_disabled_by_default_and_not_cacheable() {
+        let response = router(AppState::new())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/lfg/intake/app-context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let context: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(context["status"], "disabled");
+        assert!(context["providers"].is_null());
     }
 
     #[tokio::test]
