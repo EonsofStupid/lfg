@@ -27,7 +27,7 @@ powershell -NoProfile -File ci/isolated-runner/supervise.ps1 -Config PRIVATE_CON
 
 The host must have Docker Desktop running and a GitHub CLI login with repository
 administration access. Set the repository variable to a JSON runner selection,
-for example `["self-hosted","lfg-checked-merge"]`, and choose the same label in
+for example `["lfg-checked-merge"]`, and choose the same label in
 the supervisor configuration. The checked-merge workflow selects that runner
 only for a same-repository, non-draft `codex/` PR marked
 `ready-to-auto-merge`. It tests the checkout and, after verification, checks
@@ -40,7 +40,9 @@ is visible in the workflow and the output file is unavailable after the
 disposable container exits. Restore artifact capacity to retain that file in
 GitHub. The printed digest and successful comparison are not a retained copy.
 
-The label is a scheduler selector, **not an authorization boundary**. Other
+The supervisor registers only the selected custom label, not the generic
+`self-hosted` label, so jobs requesting only the generic label cannot claim
+this runner. The custom label is still a scheduler selector, **not an authorization boundary**. Other
 workflows able to target it can run code on this runner; repository and fork
 workflow permissions must be appropriate for that risk. Containers share the
 host kernel and retain network access, including potentially to local services;
