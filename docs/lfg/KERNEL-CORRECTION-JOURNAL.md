@@ -86,6 +86,13 @@ family and split are all unset. A snapshot option is not evidence that it is
 an appropriate label for a request: review its meaning and the original context,
 and skip an item if the option set is inadequate or the decision is uncertain.
 
+The kernel may record a provisional top-ranked choice in its observation before
+the node's threshold or ambiguity check escalates. Current queue generation
+sets `baselineChoice` to null in that case, because the choice was not committed.
+Queues produced before this correction can instead show that provisional value;
+recreate affected queues before relying on their baseline fields. The existing
+11-item LFG queue was checked and has no affected rows.
+
 The queue is a point-in-time display aid, not a ledger. Editing it does not
 record a correction. After examining an item and its source, an actual reviewer
 can use its observation sequence and node with `kernel-correct` above; the
