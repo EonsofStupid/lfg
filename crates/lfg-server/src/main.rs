@@ -90,6 +90,26 @@ enum Command {
         #[arg(long)]
         source_max_bytes: u64,
     },
+    /// Create a private pending-only review queue for uncorrected choice nodes.
+    KernelJournalReviewQueue {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        source_jsonl: PathBuf,
+        #[arg(long)]
+        source_max_bytes: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        output_max_bytes: u64,
+        /// Explicitly acknowledge that the new queue contains plaintext requests.
+        #[arg(long)]
+        include_text: bool,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
     /// Export corrected observations with available text as pending per-node review candidates.
     KernelJournalExport {
         #[arg(long)]
@@ -221,6 +241,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
             let source = kernel_journal::SourceIndex::read(&source_jsonl, source_max_bytes)?;
             println!("{}", store.reconcile(&source)?);
+        }
+        Command::KernelJournalReviewQueue {
+            journal,
+            journal_max_bytes,
+            source_jsonl,
+            source_max_bytes,
+            output,
+            output_max_bytes,
+            include_text,
+            snapshot,
+        } => {
+            if !include_text {
+                return Err(
+                    "review queue contains plaintext; explicit --include-text is required".into(),
+                );
+            }
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = kernel_journal::SourceIndex::read(&source_jsonl, source_max_bytes)?;
+            println!(
+                "{}",
+                store.review_queue(&engine, &source, &output, output_max_bytes)?
+            );
         }
         Command::KernelJournalExport {
             journal,

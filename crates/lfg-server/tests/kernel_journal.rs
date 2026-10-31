@@ -29,6 +29,104 @@ fn predict(path: &Path, capture: bool) -> std::process::Output {
 }
 
 #[test]
+fn review_queue_uses_verified_source_without_fabricating_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = dir.path().join("journal.jsonl");
+    let source = dir.path().join("source.jsonl");
+    let queue = dir.path().join("queue.jsonl");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+        .args(["kernel-predict", "--max-examples", "2", "--journal"])
+        .arg(&journal)
+        .args(["--journal-max-bytes", "100000"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let records =
+        b"{\"id\":\"a\",\"text\":\"unmatched fixture\"}\n{\"id\":\"b\",\"text\":\"run command\"}\n";
+    child.stdin.take().unwrap().write_all(records).unwrap();
+    assert!(child.wait().unwrap().success());
+    std::fs::write(&source, records).unwrap();
+    let before = std::fs::read(&journal).unwrap();
+    let invoke = |path: &Path, limit: &str, include: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lfg-server"));
+        command
+            .args(["kernel-journal-review-queue", "--journal"])
+            .arg(&journal)
+            .args(["--journal-max-bytes", "100000", "--source-jsonl"])
+            .arg(&source)
+            .args(["--source-max-bytes", "100000", "--output"])
+            .arg(path)
+            .args(["--output-max-bytes", limit]);
+        if include {
+            command.arg("--include-text");
+        }
+        command.output().unwrap()
+    };
+    assert!(!invoke(&queue, "100000", false).status.success());
+    assert!(!invoke(&queue, "1", true).status.success());
+    assert!(!queue.exists());
+    std::fs::write(&source, b"{\"id\":\"a\",\"text\":\"changed fixture\"}\n").unwrap();
+    assert!(!invoke(&queue, "100000", true).status.success());
+    assert!(!queue.exists());
+    std::fs::write(&source, records).unwrap();
+    let result = invoke(&queue, "100000", true);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("unmatched fixture"));
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["items"], 2);
+    assert_eq!(report["baselineSelected"], 1);
+    assert_eq!(report["baselineUnselected"], 1);
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&queue)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["status"], "pending_review");
+    assert_eq!(rows[0]["options"], serde_json::json!(["chat", "tool_call"]));
+    assert!(rows[0]["baselineChoice"].is_null());
+    assert_eq!(rows[1]["baselineChoice"], "tool_call");
+    assert!(rows.iter().all(|row| row["reviewedChoice"].is_null()
+        && row["reviewer"].is_null()
+        && row["project"].is_null()
+        && row["family"].is_null()
+        && row["split"].is_null()));
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    assert!(!invoke(&queue, "100000", true).status.success());
+
+    let correction = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+        .args(["kernel-correct", "--journal"])
+        .arg(&journal)
+        .args([
+            "--journal-max-bytes",
+            "100000",
+            "--observation",
+            "1",
+            "--node",
+            "operation",
+            "--choice",
+            "chat",
+            "--reviewer",
+            "test-reviewer",
+            "--attest",
+        ])
+        .output()
+        .unwrap();
+    assert!(correction.status.success());
+    let second = dir.path().join("queue2.jsonl");
+    let result = invoke(&second, "100000", true);
+    assert!(result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["items"], 1);
+    assert_eq!(report["alreadyCorrected"], 1);
+}
+
+#[test]
 fn active_writer_excludes_other_processes_until_stream_finishes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.jsonl");
