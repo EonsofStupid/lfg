@@ -186,7 +186,9 @@
       const result = await api('/api/source-context', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({id: checked.id, annotation_sha256: checked.annotation_sha256})});
       if (current !== checked) return;
-      const prefix = result.truncated ? 'Earlier messages were omitted by the configured limits.\n\n' : '';
+      const scope = result.context_scope === 'same_file_order_not_verified_conversation_ancestry' ?
+        'Earlier human-marked messages in file order; they may belong to a different conversation branch.\n\n' : '';
+      const prefix = scope + (result.truncated ? 'Earlier messages were omitted by the configured limits.\n\n' : '');
       el('source-context').textContent = prefix + (result.messages.length ?
         result.messages.map(message => `Source line ${message.source_line}:\n${message.text}`).join('\n\n') :
         'No prior user messages are available within the configured limits.');

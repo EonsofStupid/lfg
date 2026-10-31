@@ -647,8 +647,11 @@ same project/group/split structure as the Codex assignment file. The existing
 deduplicates against explicitly supplied development reference plans, and
 creates an unlabeled pending-only workspace. Its source verification is also
 available in the browser review screen when the configured session and line
-limits cover the selected sources. Claude prior-message context is not yet
-provided by that screen. A prefix match does not establish full conversational
+limits cover the selected sources. On request, the screen can display a bounded
+suffix of prior human-marked, single-text messages from the same file and exact
+project root. It verifies the selected prefix first; the displayed file order
+does not establish conversation ancestry and may include a different branch.
+Tool results, assistant output and later messages are excluded. A prefix match does not establish full conversational
 context, privacy, rights, label correctness or project independence. A source
 may be appended after inventory; the selected prefix must remain unchanged.
 

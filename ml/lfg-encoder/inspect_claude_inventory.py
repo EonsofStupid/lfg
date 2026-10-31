@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import deque
 from pathlib import Path
 
 import inspect_codex_inventory
@@ -51,3 +52,36 @@ def verify_many(records: list[dict], max_bytes: int, max_line_bytes: int) -> lis
 
 def verify(record: dict, max_bytes: int, max_line_bytes: int) -> str:
     return verify_many([record], max_bytes, max_line_bytes)[0]
+
+
+def prior_user_context(record: dict, max_bytes: int, max_line_bytes: int,
+                       max_messages: int, max_context_bytes: int) -> tuple[str, list[dict], bool]:
+    """Return a bounded file-order suffix, not a verified conversation ancestry."""
+    verify_record(record)
+    if any(type(value) is not int or value < 1 for value in (max_bytes, max_line_bytes, max_messages, max_context_bytes)):
+        raise ValueError('context limits must be positive integers')
+    messages = deque()
+    size = 0
+    truncated = False
+
+    def consume(line_number: int, line: bytes) -> None:
+        nonlocal size, truncated
+        text = inventory_claude_sessions.message_text(json.loads(line), record['project_root'])
+        if text is None:
+            return
+        length = len(text.encode('utf-8'))
+        if length > max_context_bytes:
+            messages.clear()
+            size = 0
+            truncated = True
+            return
+        messages.append((line_number, text, length))
+        size += length
+        while len(messages) > max_messages or size > max_context_bytes:
+            _, _, removed = messages.popleft()
+            size -= removed
+            truncated = True
+
+    found = inspect_codex_inventory.verify_group(Path(record['source_file']), [(0, record)], max_bytes,
+                                                max_line_bytes, consume, parse_message=message_text)
+    return found[0][1], [{'source_line': line, 'text': text} for line, text, _ in messages], truncated

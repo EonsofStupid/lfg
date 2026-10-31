@@ -1,5 +1,8 @@
 import json
+import http.client
+import secrets
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -70,6 +73,26 @@ class ClaudeInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'line exceeds'):
             inventory.inventory({'one': (self.sessions, str(self.project))}, 100000, 8)
 
+    def test_prior_context_is_bounded_filtered_and_prefix_verified(self):
+        self.write([self.row('first'), dict(self.row('tool result'), sourceToolAssistantUUID='tool'),
+                    dict(self.row('other branch'), isSidechain=True), self.row('second'), self.row('selected'),
+                    self.row('later')])
+        _, records = self.inspect()
+        record = records[2]
+        text, context, truncated = inspect_claude_inventory.prior_user_context(record, 100000, 10000, 1, 1000)
+        self.assertEqual(text, 'selected')
+        self.assertEqual([item['text'] for item in context], ['second'])
+        self.assertTrue(truncated)
+        _, context, truncated = inspect_claude_inventory.prior_user_context(record, 100000, 10000, 5, 1000)
+        self.assertEqual([item['text'] for item in context], ['first', 'second'])
+        self.assertFalse(truncated)
+        _, context, truncated = inspect_claude_inventory.prior_user_context(record, 100000, 10000, 5, 3)
+        self.assertEqual(context, [])
+        self.assertTrue(truncated)
+        self.write([self.row('tampered'), self.row('selected')])
+        with self.assertRaises(ValueError):
+            inspect_claude_inventory.prior_user_context(record, 100000, 10000, 5, 1000)
+
     def test_inventory_prepares_pending_workspace_and_verifies_original_source(self):
         self.write([self.row('first request'), self.row('second request'), self.row('first request')])
         _, rows = self.inspect()
@@ -96,6 +119,37 @@ class ClaudeInventoryTests(unittest.TestCase):
         limits = {'max_session_bytes': 100000, 'max_line_bytes': 10000}
         self.assertEqual(review_web.verify_source(workspace, identifier, digest, limits),
                          'source_prefix_and_original_text_match')
+        second = source_rows[1]
+        second_digest = corpus_audit.annotation_digest(second, source['project'], source['split'],
+                                                       review_corpus.evaluate.load_taxonomy(workspace / 'taxonomy.json')[1])
+        context = review_web.verify_source(workspace, second['id'], second_digest, limits,
+                                           {'max_messages': 3, 'max_context_bytes': 1000})
+        self.assertEqual([item['text'] for item in context['messages']], ['first request'])
+        self.assertEqual(context['context_scope'], 'same_file_order_not_verified_conversation_ancestry')
+        self.assertEqual(review_corpus.status(workspace)['decisions'], {'pending': 2, 'approved': 0, 'rejected': 0})
+        token = secrets.token_urlsafe(32)
+        config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        config['source_verification'] = limits
+        server = review_web.ReviewServer(workspace, 'fixture-reviewer', 0, config, token)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=10)
+            body = json.dumps({'id': second['id'], 'annotation_sha256': second_digest})
+            connection.request('POST', '/api/source-context', body=body,
+                               headers={'Authorization': 'Bearer ' + token, 'Origin': server.origin,
+                                        'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+            payload = json.loads(response.read())
+            self.assertEqual([item['text'] for item in payload['messages']], ['first request'])
+            self.assertEqual(payload['context_scope'], 'same_file_order_not_verified_conversation_ancestry')
+            connection.close()
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
         self.write([self.row('changed')])
         with self.assertRaises(ValueError):
             review_web.verify_source(workspace, identifier, digest, limits)
