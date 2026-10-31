@@ -41,6 +41,13 @@ class DatasetGateTests(unittest.TestCase):
         self.assertEqual(train.select_training_records(rows, 1, False), [rows[0]])
         self.assertEqual(train.select_training_records(rows, 1, True), rows)
 
+    def test_verified_count_alone_does_not_start_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "examples.jsonl"
+            dataset.write_text("\n".join(json.dumps(record(i, True)) for i in range(500)), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "audited-plan is required"):
+                train.train(argparse.Namespace(dataset=dataset, allow_below_gate=False, audited_plan=None))
+
     def test_split_keeps_families_together_and_is_repeatable(self):
         rows = [dict(record(i, True), family=f"family-{i // 3}") for i in range(15)]
         training, validation = train.grouped_split(rows, 731)
@@ -99,6 +106,15 @@ class DatasetGateTests(unittest.TestCase):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):
                     train.validate_training_config({**config, field: invalid})
+
+    def test_promotion_policy_rejects_invalid_sample_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            policy = json.loads(train.POLICY.read_text(encoding="utf-8"))
+            policy["minimum_human_verified_examples"] = 0
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "minimum_human_verified_examples"):
+                train.load_promotion_policy(path)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+{
+  "schema_version": "lfg.encoder-onnx-export-config.v1",
+  "opset_version": 17,
+  "parity_batch_sizes": [1, 2],
+  "absolute_tolerance": 0.0001,
+  "relative_tolerance": 0.0001,
+  "cpu_threads": 1,
+  "max_model_bytes": 1500000000
+}

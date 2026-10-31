@@ -80,6 +80,29 @@ class CorpusAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the configured taxonomy"):
             corpus_audit.audit(self.root / "plan.json")
 
+    def test_training_gate_requires_all_three_reviewed_partitions_and_exact_train_data(self):
+        extra = {"id": "c", "text": "independent review", "family": "family-c", "verified": False,
+                 "intents": ["build"], "capabilities": [], "risks": [], "source": {"project": "gamma"}}
+        (self.root / "c.jsonl").write_text(json.dumps(extra), encoding="utf-8")
+        self.plan["sources"].append({"path": "c.jsonl", "project": "gamma", "split": "validation"})
+        self.write()
+        _, queue = corpus_audit.audit(self.root / "plan.json")
+        approvals = [{**item, "decision": "approved", "reviewer": "reviewer-1",
+                      "reviewed_at": "2026-10-30T12:00:00Z"} for item in queue]
+        (self.root / "reviews.jsonl").write_text("\n".join(map(json.dumps, approvals)), encoding="utf-8")
+        self.plan["review_ledger"] = "reviews.jsonl"
+        for row in self.rows:
+            row["verified"] = True
+        extra["verified"] = True
+        (self.root / "c.jsonl").write_text(json.dumps(extra), encoding="utf-8")
+        self.write()
+        corpus_audit.validate_training_corpus([self.rows[0]], self.root / "plan.json")
+        snapshot, _ = corpus_audit.assemble_training(self.root / "plan.json")
+        self.assertEqual([json.loads(line)["id"] for line in snapshot.splitlines()], ["a"])
+        changed = {**self.rows[0], "text": "not the reviewed text"}
+        with self.assertRaisesRegex(ValueError, "does not exactly match"):
+            corpus_audit.validate_training_corpus([changed], self.root / "plan.json")
+
 
 if __name__ == "__main__":
     unittest.main()

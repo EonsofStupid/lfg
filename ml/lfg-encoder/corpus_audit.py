@@ -145,6 +145,8 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise ValueError("review ledger contains IDs absent from this plan")
     report = {"schema_version": "lfg.encoder-corpus-audit.v1", "plan_sha256": hashlib.sha256(raw_plan).hexdigest(),
               "taxonomy_sha256": taxonomy_hash, "review_ledger_sha256": ledger_hash,
+              "auditor_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "taxonomy_loader_sha256": hashlib.sha256(Path(evaluate.__file__).read_bytes()).hexdigest(),
               "sources": source_digests, "counts": {name: dict(value) for name, value in counts.items()},
               "label_support": {split: {field: dict(sorted(values.items())) for field, values in fields.items()}
                                 for split, fields in coverage.items()},
@@ -159,6 +161,8 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
     report, queue = audit(plan_path)
     if not report["review_ledger_sha256"]:
         raise ValueError("audited training requires a review ledger")
+    if report["duplicate_within_split"]:
+        raise ValueError("audited training rejects duplicate normalized text within a split")
     for split in SPLITS:
         counts = report["counts"][split]
         if counts.get("examples", 0) == 0:
@@ -171,7 +175,7 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
         if not isinstance(row.get("source"), dict) or not isinstance(row["source"].get("project"), str):
             raise ValueError("training example lacks project provenance")
         identifier = row.get("id")
-        if not isinstance(identifier, str) or identifier in actual or not row.get("verified"):
+        if not isinstance(identifier, str) or identifier in actual or row.get("verified") is not True:
             raise ValueError("training examples must have unique IDs and verified flags")
         actual[identifier] = annotation_digest(row, row["source"]["project"], "train", report["taxonomy_sha256"])
     if actual != expected:
@@ -179,10 +183,35 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
     return report
 
 
+def assemble_training(plan_path: Path) -> tuple[bytes, dict[str, Any]]:
+    """Build a train snapshot only when the audited input is unchanged and reviewed."""
+    report, _ = audit(plan_path)
+    raw_plan = plan_path.read_bytes()
+    if hashlib.sha256(raw_plan).hexdigest() != report["plan_sha256"]:
+        raise ValueError("plan changed during assembly")
+    plan = json.loads(raw_plan)
+    records = []
+    for source, evidence in zip(plan["sources"], report["sources"], strict=True):
+        if source["split"] != "train":
+            continue
+        rows, digest = train.load_dataset(resolve(plan_path.parent, source["path"]))
+        if digest != evidence["sha256"]:
+            raise ValueError("source changed during assembly")
+        records.extend(rows)
+    checked = validate_training_corpus(records, plan_path)
+    if checked != report:
+        raise ValueError("audit inputs changed during assembly")
+    output = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+                     for row in records).encode("utf-8")
+    return output, report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, type=Path)
-    parser.add_argument("--review-queue", type=Path, help="create a new private, pending-only JSONL review queue")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--review-queue", type=Path, help="create a new private, pending-only JSONL review queue")
+    output.add_argument("--training-output", type=Path, help="create a new reviewed training JSONL snapshot")
     args = parser.parse_args()
     try:
         report, queue = audit(args.plan)
@@ -191,6 +220,14 @@ def main() -> None:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as out:
                 for item in queue:
                     out.write(json.dumps(item, ensure_ascii=True, separators=(",", ":")) + "\n")
+        if args.training_output is not None:
+            payload, checked = assemble_training(args.plan)
+            if checked != report:
+                raise ValueError("audit inputs changed before output")
+            descriptor = os.open(args.training_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as out:
+                out.write(payload)
+            report["training_snapshot_sha256"] = hashlib.sha256(payload).hexdigest()
         print(json.dumps(report, indent=2, sort_keys=True, allow_nan=False))
     except (ValueError, OSError, UnicodeError, TypeError, KeyError) as error:
         raise SystemExit(f"corpus audit rejected: {error}") from error

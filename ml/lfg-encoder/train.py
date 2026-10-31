@@ -22,8 +22,31 @@ POLICY = ROOT / "promotion-policy.json"
 TRAINING_CONFIG = ROOT / "training-config.v1.json"
 
 
+def load_promotion_policy(path: Path) -> dict[str, Any]:
+    return parse_promotion_policy(path.read_bytes())
+
+
+def parse_promotion_policy(raw: bytes) -> dict[str, Any]:
+    policy = json.loads(raw)
+    if not isinstance(policy, dict) or policy.get("schema_version") != "lfg.encoder-promotion.v1":
+        raise ValueError("unsupported promotion policy")
+    for field in ("minimum_human_verified_examples", "maximum_p95_micros_512_tokens"):
+        if type(policy.get(field)) is not int or policy[field] < 1:
+            raise ValueError(f"invalid {field}")
+    for field in ("minimum_intent_capability_macro_f1", "minimum_security_recall",
+                  "maximum_expected_calibration_error", "maximum_quantization_quality_loss"):
+        value = policy.get(field)
+        if type(value) not in (int, float) or not 0 <= value <= 1:
+            raise ValueError(f"invalid {field}")
+    return policy
+
+
 def load_training_config(path: Path) -> dict[str, Any]:
-    config = json.loads(path.read_text(encoding="utf-8"))
+    return parse_training_config(path.read_bytes())
+
+
+def parse_training_config(raw: bytes) -> dict[str, Any]:
+    config = json.loads(raw)
     validate_training_config(config)
     return config
 
@@ -130,7 +153,8 @@ def load_dataset(path: Path) -> tuple[list[dict[str, Any]], str]:
 def validate(args: argparse.Namespace) -> None:
     records, dataset_digest = load_dataset(args.dataset)
     labels = sorted({label for record in records for key in ("intents", "capabilities", "risks") for label in record[key]})
-    policy = json.loads(POLICY.read_text(encoding="utf-8"))
+    policy_path = getattr(args, "promotion_policy", POLICY)
+    policy = load_promotion_policy(policy_path)
     print(json.dumps({
         "schema_version": "lfg.encoder-dataset-report.v1",
         "records": len(records),
@@ -161,16 +185,23 @@ def select_training_records(records: list[dict[str, Any]], minimum: int, develop
 
 
 def train(args: argparse.Namespace) -> None:
-    records, dataset_digest = load_dataset(args.dataset)
-    policy = json.loads(POLICY.read_text(encoding="utf-8"))
-    records = select_training_records(records, policy["minimum_human_verified_examples"], args.allow_below_gate)
+    input_records, dataset_digest = load_dataset(args.dataset)
+    policy_path = getattr(args, "promotion_policy", POLICY)
+    policy_bytes = policy_path.read_bytes()
+    policy = parse_promotion_policy(policy_bytes)
+    records = select_training_records(input_records, policy["minimum_human_verified_examples"], args.allow_below_gate)
     corpus_audit = None
     if not args.allow_below_gate:
+        if len(records) != len(input_records):
+            raise SystemExit("training corpus gate blocked: remove unverified examples from the training input")
         if args.audited_plan is None:
             raise SystemExit("training gate blocked: --audited-plan is required for non-development training")
         try:
             import corpus_audit as audit_module
-            corpus_audit = audit_module.validate_training_corpus(records, args.audited_plan)
+            audit_report = audit_module.validate_training_corpus(records, args.audited_plan)
+            corpus_audit = {key: audit_report[key] for key in (
+                "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
+                "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
         except (OSError, ValueError, TypeError, KeyError) as error:
             raise SystemExit(f"training corpus gate blocked: {error}") from error
     try:
@@ -207,9 +238,9 @@ def train(args: argparse.Namespace) -> None:
         "base_model": args.base_model,
         "model_revision": args.model_revision,
         "dataset_sha256": split["dataset_sha256"],
-        "policy_sha256": hashlib.sha256(POLICY.read_bytes()).hexdigest(),
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "training_config_sha256": hashlib.sha256(args.training_config.read_bytes()).hexdigest(),
+        "training_config_sha256": args.training_config_sha256,
         "seed": args.seed, "epochs": args.epochs, "max_length": args.max_length,
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,
@@ -267,6 +298,7 @@ def main() -> None:
     parser.add_argument("command", choices=["validate", "train"])
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--training-config", type=Path, default=TRAINING_CONFIG)
+    parser.add_argument("--promotion-policy", type=Path, default=POLICY)
     parser.add_argument("--base-model")
     parser.add_argument("--model-revision", help="full immutable Hugging Face commit hash")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "experimental")
@@ -282,7 +314,9 @@ def main() -> None:
     parser.add_argument("--audited-plan", type=Path, help="reviewed and project-separated corpus plan")
     args = parser.parse_args()
     try:
-        config = load_training_config(args.training_config)
+        config_bytes = args.training_config.read_bytes()
+        config = parse_training_config(config_bytes)
+        args.training_config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         fields = ("base_model", "seed", "epochs", "max_length", "batch_size", "checkpoint_steps", "allow_mismatched_sizes")
         for field in fields:
             if getattr(args, field) is None:

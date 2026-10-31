@@ -19,8 +19,9 @@ actual PR titles and excerpts linked to outcome journals, not original prompts.
 
 The promotion order is fixed:
 
-1. Validate the corpus with `python3 train.py validate`.
-2. Train with a pinned model revision only after the sample gate.
+1. Audit a reviewed, project-separated corpus plan and validate the assembled
+   training snapshot with `python3 train.py validate --dataset DATASET`.
+2. Train with the audited plan and a pinned model revision only after the sample gate.
 3. Export a versioned ONNX artifact and manifest.
 4. Benchmark through the Rust runtime.
 5. Promote only when `promotion-policy.json` passes.
@@ -76,7 +77,10 @@ is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
 The `--allow-below-gate` flag is for development only and allows unverified rows
 into the experiment. Without it, training requires the policy's minimum number
-of records explicitly marked `verified` and excludes unverified rows. A run
+of verified records and an audited project-separated plan with current review
+attestations for every train, validation, and test example. The input must
+exactly match its reviewed train partition and contain no unverified rows. See
+[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run
 requires at least two families and writes the seed, dataset hash, row IDs and
 family assignments to `split-manifest.json` in the ignored output directory.
 This family split is for development validation, not a final test: it is not
