@@ -205,6 +205,50 @@ workspace was supplied. Those counts are candidates, not usable reviewed
 training examples; the single-session validation source remains inadequate for
 broad qualification.
 
+### AI-drafted label workspace
+
+`draft_review_workspace.py` can create a separate pending-only review workspace
+from explicitly supplied label proposals. It accepts **training-only** source
+workspaces, requires every input decision to be pending, verifies each draft
+against its original annotation digest and the selected taxonomy and guide, and
+never approves a record. It preserves the input workspace and leaves records
+without proposals unlabeled. A selected record carries its AI-draft author,
+original annotation, guide and proposal digests, and a visible review note.
+Unchecked labels are still proposed negatives, not facts. A reviewer must
+independently check every label and negative, source, context, privacy and
+rights. AI suggestions may anchor a reviewer and are not independent review.
+
+The proposal JSON has `schema_version: lfg.ai-label-drafts.v1`, the exact
+`taxonomy_sha256` and `guide_sha256`, an `author` string, and `items`. Each item
+has `id`, its current `annotation_sha256`, a `labels` object with `intents`,
+`capabilities` and `risks` arrays, and a nonempty `note`. Omit an item when its
+labels are uncertain. Create the file privately and select it explicitly:
+
+```powershell
+python ml/lfg-encoder/draft_review_workspace.py `
+  --workspace PRIVATE_TRAIN_WORKSPACE --proposals PRIVATE_PROPOSALS.json `
+  --guide ml/lfg-encoder/label-guide.v1.json --output NEW_PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_web.py --workspace NEW_PRIVATE_DIRECTORY/workspace `
+  --reviewer REVIEWER_ID --label-guide ml/lfg-encoder/label-guide.v1.json
+```
+
+The tool creates both a private source copy and a separate review workspace.
+Select the new workspace **instead of** the original for subsequent assembly;
+using both duplicates the same source records. If preparation is interrupted,
+inspect any partial output and choose a new directory. Neither Git ignore nor
+the local token encrypts these private files. An explicitly below-gate development
+run can still consume unreviewed data; ordinary reviewed training cannot.
+
+On this machine, six real LFG conversation requests were given assistant-drafted
+labels and explanatory caveats in `dataset/private/lfg-ai-label-proposals.v1.json`.
+Each original message matched its recorded session prefix; that check does not
+prove authorship, context, rights, privacy or label correctness. The resulting
+`dataset/private/codex-session-ai-draft.v2/workspace` contains all 226 original
+training candidates: six AI drafts, 220 still unlabeled, 226 pending and zero
+approved. The earlier `.v1` draft did not retain previous review notes; use
+`.v2`. A local read-only API check showed one suggestion and its AI warning
+without changing the ledger. These are not reviewed training examples.
+
 ### Local browser review
 
 The same workspace can be reviewed in a browser using the Python training
