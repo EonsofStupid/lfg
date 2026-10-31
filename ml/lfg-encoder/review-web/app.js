@@ -130,9 +130,11 @@
     const checked = current;
     el('source-check').textContent = 'Checking source…';
     try {
-      await api('/api/verify-source', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      const result = await api('/api/verify-source', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({id: checked.id, annotation_sha256: checked.annotation_sha256})});
-      if (current === checked) el('source-check').textContent = 'Original message and source prefix match. Check context, authorship, rights, and privacy separately.';
+      if (current === checked) el('source-check').textContent = result.status === 'checkpoint_history_and_original_text_match' ?
+        'Original prompt and recorded Git history match. Check context, authorship, rights, and privacy separately.' :
+        'Original message and source prefix match. Check context, authorship, rights, and privacy separately.';
     } catch (error) {
       if (current === checked) el('source-check').textContent = `Source check failed: ${error.message}`;
     }

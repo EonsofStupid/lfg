@@ -224,6 +224,31 @@ The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a
 record. Local source paths and hashes remain private metadata.
+
+For Git checkpoint records, source verification is separately opt-in. Copy
+`review-web-config.v1.json` to a private configuration file and add a
+`checkpoint_verification` object, using the absolute path of the local checkout
+and an operator-selected history size limit, for example:
+
+```json
+"checkpoint_verification": {
+  "repo": "D:/path/to/authorized/checkout",
+  "max_history_bytes": 104857600
+}
+```
+
+Pass that complete configuration with `--config PRIVATE_CONFIG.json` when
+starting the review server. **Check original source** re-reads the pinned Git
+history from the configured checkout, checks its recorded stream digest, and
+re-extracts the selected commit's prompt, source fields, session family and
+text. It checks the record again after reading. No source repository is chosen
+from the review record, and the returned result does not contain the prompt.
+This uses the current extractor to recheck the original history; the source's
+stored extractor hash identifies the earlier preparation, not the running code.
+The check does not establish authorship, rights, privacy, context, or label
+correctness and does not approve a record. Git must be installed, the checkout
+must contain the pinned history, and the configured byte limit must be large
+enough. Prior-message context is not provided for Git checkpoint records.
 Approving requires the attestation checkbox and typing `APPROVE`; rejection
 requires typing `REJECT`. The underlying workspace checks the displayed digest,
 taxonomy, project and split before saving. Skipped items remain pending.
@@ -605,8 +630,8 @@ python ml/lfg-encoder/prepare_checkpoint_review.py `
 
 The new directory must not exist. It and its workspace contain private original
 prompts; Git ignore is not encryption. The browser review command above accepts
-the workspace path. Its automatic source-check button currently supports Codex
-session records only, not these Git checkpoint records. Review their source
+the workspace path. Configure checkpoint verification as described above to
+check these records against the pinned local Git history. Review their source
 commits and surrounding context separately before making any decision.
 
 A second local checkout, `D:/dev/dev-and-sort/makers (2)/makers`, at commit

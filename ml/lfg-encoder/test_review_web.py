@@ -2,12 +2,15 @@ import http.client
 import hashlib
 import json
 import secrets
+import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import corpus_audit
+import inventory_checkpoint_prompts
 import review_corpus
 import review_web
 
@@ -194,6 +197,63 @@ class ReviewWebTests(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
         body['annotation_sha256'] = '0' * 64
         self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+
+    def test_git_checkpoint_check_uses_configured_repo_and_never_approves(self):
+        root = Path(self.temp.name)
+        repo = root / 'git-repo'
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True).stdout
+        git('init')
+        message = root / 'message.txt'
+        text = 'Example request for a test fixture'
+        message.write_text('checkpoint\n\nUser prompt:\n\n' + text +
+                           '\n\nReplit-Commit-Author: Assistant\nReplit-Commit-Session-Id: test-session\n', encoding='utf-8')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+            'commit', '--allow-empty', '-F', str(message))
+        revision = git('rev-parse', 'HEAD').decode().strip()
+        history = inventory_checkpoint_prompts.read_history(repo, revision, 100000)
+        _, records = inventory_checkpoint_prompts.parse_history(history, 'fixture', revision)
+        candidate = records[0]
+        source = {**candidate['source'], 'text_sha256': candidate['text_sha256'],
+                  'history_stream_sha256': hashlib.sha256(history).hexdigest()}
+        row = {'id': 'checkpoint-' + candidate['id'], 'text': text,
+               'family': 'checkpoint-session-' + candidate['session_sha256'],
+               'intents': [], 'capabilities': [], 'risks': [], 'labels_pending': True,
+               'verified': False, 'source': source}
+        path = root / 'source.jsonl'
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        workspace = root / 'checkpoint-workspace'
+        review_corpus.init_workspace(root / 'plan.json', workspace)
+        self.server.workspace = workspace
+        _, _, data = self.request('GET', '/api/item?offset=0')
+        item = json.loads(data)['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256']}
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        self.server.config['checkpoint_verification'] = {'repo': str(repo), 'max_history_bytes': 100000}
+        status, _, data = self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)['status'], 'checkpoint_history_and_original_text_match')
+        self.assertNotIn(text.encode(), data)
+        self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+        with patch.object(inventory_checkpoint_prompts, 'read_history', return_value=history + b'changed'):
+            self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        self.server.config['checkpoint_verification']['max_history_bytes'] = 1
+        self.assertEqual(self.request('POST', '/api/verify-source', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+
+    def test_checkpoint_configuration_requires_absolute_repo_and_positive_limit(self):
+        config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        config_path = Path(self.temp.name) / 'config.json'
+        for limits in ({'repo': 'relative', 'max_history_bytes': 100},
+                       {'repo': str(Path(self.temp.name).resolve()), 'max_history_bytes': 0},
+                       {'repo': str(Path(self.temp.name).resolve()), 'max_history_bytes': True}):
+            config_path.write_text(json.dumps({**config, 'checkpoint_verification': limits}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'checkpoint verification'):
+                review_web.load_config(config_path)
+        limits = {'repo': str(Path(self.temp.name).resolve()), 'max_history_bytes': 100}
+        config_path.write_text(json.dumps({**config, 'checkpoint_verification': limits}), encoding='utf-8')
+        self.assertEqual(review_web.load_config(config_path)['checkpoint_verification'], limits)
 
     def test_source_context_is_local_bounded_and_does_not_record_review(self):
         root = Path(self.temp.name)
