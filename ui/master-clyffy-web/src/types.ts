@@ -165,3 +165,12 @@ export type DevStats = {
   summaries: Array<{ operation: 'preflight' | 'classification'; samples: number; errors: number; p50TotalMicros: number | null; p95TotalMicros: number | null }>
   traces: Array<{ sequence: number; recordedAt: string; operation: string; outcome: string; totalMicros: number; queueMicros: number | null; workMicros: number | null }>
 }
+
+export type IntakePreview = {
+  schemaVersion: 'lfg.intake-preview.v1'
+  templateRevision: string
+  templateDigest: string
+  sourceApp: string
+  missingRequired: number
+  answers: Array<{ id: string; question: string; required: boolean; status: 'filled' | 'missing' | 'invalid'; value: unknown }>
+}

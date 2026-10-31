@@ -28,11 +28,16 @@ const classification = {
 beforeEach(() => {
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session' })
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
     if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2, devTools: { statsEnabled: true, traceCapacity: 8, statsPollIntervalMs: 1000, debounceMinMs: 5, debounceMaxMs: 80, historyMinSamples: 1, historyMaxSamples: 8 } } }))
     if (path.endsWith('/preflight')) return new Response(JSON.stringify(preflight))
-    if (path.endsWith('/classify')) return new Response(JSON.stringify(classification))
+    if (path.endsWith('/classify')) return new Response(JSON.stringify({ ...classification, revision: JSON.parse(String(init?.body)).revision }))
+    if (path.endsWith('/intake/preview')) {
+      const body = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({schemaVersion: 'lfg.intake-preview.v1', templateRevision: 'test', templateDigest: 'e'.repeat(64), sourceApp: body.sourceApp, missingRequired: 1,
+        answers: [{id: 'user_request', question: 'What is the user asking to do?', required: true, status: body.facts.request.text ? 'filled' : 'missing', value: body.facts.request.text || null}]}))
+    }
     if (path.endsWith('/dev-stats')) return new Response(JSON.stringify({schemaVersion: 'lfg.dev-stats.v1', enabled: true, capacity: 8, totalRecorded: 1, evicted: 0, cpuTimeMicros: null, operationsDigest: 'd'.repeat(64), encoderDigest: 'a'.repeat(64), classifierDigest: 'c'.repeat(64), summaries: [{operation: 'preflight', samples: 1, errors: 0, p50TotalMicros: 100, p95TotalMicros: 100}], traces: [{sequence: 1, recordedAt: '2026-01-01T00:00:00Z', operation: 'preflight', outcome: 'ok', totalMicros: 100, queueMicros: 10, workMicros: 80}]}))
     return new Response('{}', { status: 404 })
   }))
@@ -40,9 +45,15 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
+function enterPrompt(value = 'Implement my feature and run tests') {
+  fireEvent.change(screen.getByRole('textbox', { name: 'Prompt to route' }), { target: { value } })
+}
+
 test('shows measured elapsed time separately from committed tallies', async () => {
   render(<App />)
   expect(screen.getByRole('heading', { name: /watch a team compile itself/i })).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: 'Prompt to route' })).toHaveValue('')
+  enterPrompt()
   await waitFor(() => expect(screen.getByText('0.085 ms elapsed')).toBeInTheDocument())
   expect(screen.getByText('3')).toBeInTheDocument()
   expect(screen.getByText('Committed')).toBeInTheDocument()
@@ -50,6 +61,7 @@ test('shows measured elapsed time separately from committed tallies', async () =
 
 test('uses configured subscription IDs instead of a built-in provider roster', async () => {
   render(<App />)
+  enterPrompt()
   const configured = await screen.findByRole('button', { name: 'project-seat' })
   expect(screen.queryByRole('button', { name: 'Claude' })).not.toBeInTheDocument()
   fireEvent.click(configured)
@@ -61,6 +73,7 @@ test('uses configured subscription IDs instead of a built-in provider roster', a
 
 test('uses the configured UTF-8 byte limit for multibyte input', async () => {
   render(<App />)
+  enterPrompt()
   await screen.findByRole('button', { name: 'project-seat' })
   const prompt = screen.getByRole('textbox', { name: 'Prompt to route' })
   fireEvent.change(prompt, { target: { value: 'é'.repeat(61) } })
@@ -76,6 +89,7 @@ test('uses the configured UTF-8 byte limit for multibyte input', async () => {
 test('schedules analysis using the server-configured debounce', async () => {
   const timer = vi.spyOn(window, 'setTimeout')
   render(<App />)
+  enterPrompt()
   await screen.findByRole('button', { name: 'project-seat' })
   expect(timer.mock.calls.some(([, delay]) => delay === 10)).toBe(true)
 })
@@ -91,9 +105,14 @@ test('does not send prompts when server configuration is incompatible', async ()
 test('shows local traces and applies browser-only tuning', async () => {
   const timer = vi.spyOn(window, 'setTimeout')
   const { container } = render(<App />)
+  enterPrompt()
   await screen.findByRole('button', { name: 'project-seat' })
   await waitFor(() => expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1))
   fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText('Implement my feature and run tests')).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+    String(url).endsWith('/intake/preview') && JSON.parse(String(init?.body)).facts.request.text === 'Implement my feature and run tests'
+  )).toBe(true))
   expect(await screen.findByText(/1 traces recorded/)).toHaveTextContent('CPU time unavailable')
   expect(screen.getByText('0.010 ms')).toBeInTheDocument()
   fireEvent.change(screen.getByRole('slider', { name: 'Browser debounce' }), { target: { value: '25' } })

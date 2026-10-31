@@ -28,6 +28,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 mod dev_stats;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
+mod intake;
 use dev_stats::{DevStats, Operation};
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ pub struct AppState {
     classifier_config: Arc<ClassifierConfig>,
     operations: OperationsConfig,
     dev_stats: Arc<DevStats>,
+    intake: Arc<intake::Template>,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
             classifier_config: Arc::new(ClassifierConfig::default_alpha()),
             operations,
             dev_stats,
+            intake: Arc::new(intake::Template::bundled()),
         }
     }
 
@@ -78,6 +81,9 @@ impl AppState {
         let operations = configured_operations().map_err(|error| {
             RuntimeError::InvalidRequest(format!("operational configuration: {error}"))
         })?;
+        let intake = configured_intake().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("intake configuration: {error}"))
+        })?;
         let dev_stats = make_dev_stats(&operations);
         let (lfg_events, _) = broadcast::channel(operations.event_buffer_capacity());
         Ok(Self {
@@ -96,8 +102,18 @@ impl AppState {
             classifier_config: Arc::new(classifier_config),
             operations,
             dev_stats,
+            intake: Arc::new(intake),
         })
     }
+}
+
+fn configured_intake() -> Result<intake::Template, String> {
+    let Some(path) = std::env::var_os("LFG_INTAKE_TEMPLATE") else {
+        return Ok(intake::Template::bundled());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    intake::Template::parse(&text).map_err(|error| format!("invalid {path:?}: {error}"))
 }
 
 fn make_dev_stats(operations: &OperationsConfig) -> Arc<DevStats> {
@@ -228,8 +244,42 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/lfg/classify", post(lfg_classify))
         .route("/api/lfg/dev-stats", get(lfg_dev_stats))
+        .route("/api/lfg/intake/template", get(lfg_intake_template))
+        .route("/api/lfg/intake/preview", post(lfg_intake_preview))
         .layer(DefaultBodyLimit::max(max_http_body_bytes))
         .with_state(state)
+}
+
+async fn lfg_intake_template(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<Value>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({"template": &*state.intake, "digest": state.intake.digest()})),
+    )
+}
+
+async fn lfg_intake_preview(
+    State(state): State<AppState>,
+    Json(request): Json<intake::AppSnapshot>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<intake::Preview>,
+    ),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let preview = state
+        .intake
+        .preview(request)
+        .map_err(|error| error_response(StatusCode::BAD_REQUEST, "invalid_intake", &error))?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(preview),
+    ))
 }
 
 async fn lfg_classify(
@@ -812,6 +862,28 @@ mod tests {
         assert_eq!(snapshot["needsBiggerModel"], true);
         assert!(snapshot["escalationCatalog"].as_array().unwrap().is_empty());
         assert!(snapshot["recommendedEscalation"].is_null());
+    }
+
+    #[tokio::test]
+    async fn intake_preview_accepts_app_facts_without_persisting_them() {
+        let state = AppState::new();
+        let request = Request::builder().method("POST").uri("/api/lfg/intake/preview")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"schemaVersion":"lfg.app-snapshot.v1", "sourceApp":"app",
+                "facts":{"project":{"id":"one"},"request":{"text":"Build a real feature"},"providers":[]}}).to_string())).unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let body = to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let preview: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(preview["sourceApp"], "app");
+        assert_eq!(preview["missingRequired"], 2);
+        assert!(state.lfg.lock().await.signals(None).unwrap().is_empty());
     }
 
     #[tokio::test]

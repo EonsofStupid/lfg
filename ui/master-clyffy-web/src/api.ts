@@ -1,4 +1,4 @@
-import type { ClassificationSnapshot, DevStats, GraphSnapshot, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
+import type { ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -47,6 +47,11 @@ export const getGraph = (workflowId: string, throughSequence?: number) =>
   requestJSON<GraphSnapshot>(`/api/shippin/intelligence/lfg/workflows/${encodeURIComponent(workflowId)}/graph${throughSequence === undefined ? '' : `?throughSequence=${throughSequence}`}`)
 
 export const getDevStats = () => requestJSON<DevStats>('/api/lfg/dev-stats')
+
+export const previewIntake = (facts: Record<string, unknown>) =>
+  requestJSON<IntakePreview>('/api/lfg/intake/preview', {
+    method: 'POST', body: JSON.stringify({ schemaVersion: 'lfg.app-snapshot.v1', sourceApp: 'lfg-ui', facts })
+  })
 
 export const classify = (sessionId: string, revision: number, text: string, activeSubscriptions: string[], routingNeed: string | null) =>
   requestJSON<ClassificationSnapshot>('/api/lfg/classify', {

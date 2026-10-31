@@ -70,6 +70,10 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
     policy["minimumSamplesPerArm"] = json!(7);
     let mut operations: Value =
         serde_json::from_str(include_str!("../../lfg-runtime/config/operations.v1.json")).unwrap();
+    let mut intake: Value =
+        serde_json::from_str(include_str!("../config/intake-template.v1.json")).unwrap();
+    intake["revision"] = json!("intake-proof");
+    intake["questions"] = json!([{"id":"custom", "question":"What is requested?", "sourcePath":"/request/text", "kind":"string", "required":true}]);
     operations["revision"] = json!("operations-proof");
     operations["maxPromptBytes"] = json!(16);
     operations["maxHttpBodyBytes"] = json!(400);
@@ -92,6 +96,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         ("rubric.json", &rubric),
         ("policy.json", &policy),
         ("operations.json", &operations),
+        ("intake.json", &intake),
     ] {
         write_json(&root.join(name), value);
     }
@@ -105,6 +110,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         .env("LFG_EVALUATION_RUBRIC", root.join("rubric.json"))
         .env("LFG_PROMOTION_POLICY", root.join("policy.json"))
         .env("LFG_OPERATIONS_CONFIG", root.join("operations.json"))
+        .env("LFG_INTAKE_TEMPLATE", root.join("intake.json"))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut server = RunningServer(command.spawn().unwrap());
@@ -125,6 +131,16 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
             json!({"sessionId":"test","revision":1,"text":"special-visual","activeSubscriptions":["fixture-seat"]}),
         ),
     );
+    let preview = http_json(
+        port,
+        "POST",
+        "/api/lfg/intake/preview",
+        Some(
+            json!({"schemaVersion":"lfg.app-snapshot.v1", "sourceApp":"host", "facts":{"request":{"text":"actual request"}}}),
+        ),
+    );
+    assert_eq!(preview["templateRevision"], "intake-proof");
+    assert_eq!(preview["answers"][0]["value"], "actual request");
     assert_eq!(classified["project"], "project-proof");
     assert_eq!(classified["configRevision"], "profile-proof");
     assert_eq!(
