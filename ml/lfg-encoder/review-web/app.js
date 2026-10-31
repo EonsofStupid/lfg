@@ -31,7 +31,7 @@
     return value;
   }
 
-  function labels(taxonomy, selected) {
+  function labels(taxonomy, selected, guide) {
     const container = el('labels');
     container.replaceChildren();
     for (const field of ['intents', 'capabilities', 'risks']) {
@@ -47,7 +47,21 @@
         box.dataset.field = field;
         box.value = name;
         box.checked = selected[field].includes(name);
-        label.append(box, document.createTextNode(name));
+        const content = document.createElement('span');
+        const title = document.createElement('strong');
+        title.textContent = name;
+        content.append(title);
+        if (guide) {
+          const definition = guide.labels[field][name];
+          const apply = document.createElement('span');
+          apply.className = 'label-guidance';
+          apply.textContent = `Apply: ${definition.apply}`;
+          const boundary = document.createElement('span');
+          boundary.className = 'label-guidance';
+          boundary.textContent = `Boundary: ${definition.boundary}`;
+          content.append(apply, boundary);
+        }
+        label.append(box, content);
         group.append(label);
       }
       container.append(group);
@@ -82,7 +96,10 @@
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
     if (current.pending_changed) el('notice').textContent = 'This pending record changed. Reinitialize the workspace before deciding.';
     el('attest').checked = false;
-    labels(result.taxonomy, current.labels);
+    current.guide_sha256 = result.guide_sha256;
+    el('guide-notice').textContent = result.guide ? `${result.guide.notice} Guide revision: ${result.guide.revision}.` :
+      'No label guide was configured for this review server.';
+    labels(result.taxonomy, current.labels, result.guide);
   }
 
   async function decide(decision) {
@@ -97,6 +114,7 @@
     for (const box of document.querySelectorAll('#labels input:checked')) selected[box.dataset.field].push(box.value);
     const data = { id: current.id, annotation_sha256: current.annotation_sha256, decision,
       confirmation, labels: selected };
+    if (decision === 'approved' && current.guide_sha256) data.guide_sha256 = current.guide_sha256;
     if (decision === 'approved' && redactions.length) data.redactions = redactions;
     await api('/api/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data) });

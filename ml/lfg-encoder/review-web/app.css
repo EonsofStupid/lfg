@@ -19,7 +19,9 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .95rem/1.6 "Segoe UI
 .hint { font-size: .88rem; margin-bottom: 20px; }
 fieldset { border: 0; border-top: 1px solid #344149; padding: 15px 0 0; margin: 15px 0; }
 legend { font-size: .78rem; font-weight: 700; color: #aebcb4; text-transform: uppercase; letter-spacing: .1em; padding-right: 10px; }
-.choice { display: flex; align-items: center; gap: 10px; padding: 7px 0; overflow-wrap: anywhere; }
+.choice { display: flex; align-items: start; gap: 10px; padding: 10px 0; overflow-wrap: anywhere; }
+.choice input { flex: none; margin-top: 3px; }
+.label-guidance { display: block; color: #b1c0b7; font-size: .82rem; line-height: 1.4; margin-top: 4px; }
 input[type="checkbox"] { accent-color: #a8de6c; width: 17px; height: 17px; }
 textarea, .redaction-replacement { width: 100%; border: 1px solid #465760; border-radius: 8px; background: #10191c; color: #ecf1eb; padding: 10px; font: inherit; }
 textarea { min-height: 180px; resize: vertical; white-space: pre-wrap; line-height: 1.6; }

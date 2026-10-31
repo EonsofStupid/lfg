@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import secrets
@@ -22,6 +23,29 @@ import train
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / 'review-web'
 DEFAULT_CONFIG = ROOT / 'review-web-config.v1.json'
+DEFAULT_GUIDE = ROOT / 'label-guide.v1.json'
+
+
+def load_guide(path: Path, taxonomy: dict[str, set[str]]) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or set(value) != {'schema_version', 'revision', 'notice', 'labels'}
+            or value['schema_version'] != 'lfg.review-label-guide.v1'
+            or not isinstance(value['revision'], str) or not value['revision'].strip()
+            or not isinstance(value['notice'], str) or not value['notice'].strip()
+            or not isinstance(value['labels'], dict) or set(value['labels']) != set(evaluate.FIELDS)):
+        raise ValueError('invalid label guide')
+    for field in evaluate.FIELDS:
+        labels = value['labels'][field]
+        if not isinstance(labels, dict) or set(labels) != taxonomy[field]:
+            raise ValueError('label guide does not match workspace taxonomy')
+        for description in labels.values():
+            if (not isinstance(description, dict) or set(description) != {'apply', 'boundary'}
+                    or any(not isinstance(text, str) or not text.strip() for text in description.values())):
+                raise ValueError('each label requires application and boundary guidance')
+    if path.read_bytes() != raw:
+        raise ValueError('label guide changed while loading')
+    return value, hashlib.sha256(raw).hexdigest()
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -73,14 +97,18 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
 
 
 class ReviewServer(HTTPServer):
-    def __init__(self, workspace: Path, reviewer: str, port: int, config: dict[str, Any], token: str):
+    def __init__(self, workspace: Path, reviewer: str, port: int, config: dict[str, Any], token: str,
+                 guide_path: Path | None = None):
         if not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
             raise ValueError('reviewer must be a nonempty single-line identifier')
         self.workspace = workspace.resolve(strict=True)
         self.reviewer = reviewer.strip()
         self.config = config
         self.token = token
-        review_corpus.load_workspace(self.workspace)
+        plan, _, _ = review_corpus.load_workspace(self.workspace)
+        taxonomy, self.taxonomy_hash = evaluate.load_taxonomy(review_corpus.private_path(self.workspace, plan['taxonomy']))
+        self.guide_path = guide_path.resolve(strict=True) if guide_path is not None else None
+        self.guide, self.guide_sha256 = load_guide(self.guide_path, taxonomy) if self.guide_path else (None, None)
         super().__init__(('127.0.0.1', port), ReviewHandler)
 
     @property
@@ -157,6 +185,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 row = rows[index]
                 taxonomy, taxonomy_hash = evaluate.load_taxonomy(
                     review_corpus.private_path(self.server.workspace, plan['taxonomy']))
+                if taxonomy_hash != self.server.taxonomy_hash:
+                    raise ValueError('workspace taxonomy changed; restart review')
                 if len(row['text'].encode('utf-8')) > self.server.config['max_prompt_bytes']:
                     self.json_reply(200, {'item': None, 'blocked': 'Request exceeds configured display limit.',
                                           'pending': len(pending), 'offset': offset})
@@ -170,6 +200,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                                                'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,
                                                'interrupted_write': bool(row['verified'])},
                                       'taxonomy': {k: sorted(v) for k, v in taxonomy.items()},
+                                      'guide': self.server.guide, 'guide_sha256': self.server.guide_sha256,
                                       'pending': len(pending), 'offset': offset})
                 return
             self.json_reply(404, {'error': 'not found'})
@@ -204,7 +235,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 self.json_reply(200, {'status': status})
                 return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
-            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions'}):
+            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256'}):
                 raise ValueError('invalid decision')
             decision = value['decision']
             if decision not in ('approved', 'rejected') or value['confirmation'] != ('APPROVE' if decision == 'approved' else 'REJECT'):
@@ -214,9 +245,18 @@ class ReviewHandler(BaseHTTPRequestHandler):
             labels = value['labels'] if decision == 'approved' else None
             if decision == 'approved' and not isinstance(labels, dict):
                 raise ValueError('label groups are required')
+            guide_sha256 = None
+            if decision == 'approved' and self.server.guide_path is not None:
+                plan, _, _ = review_corpus.load_workspace(self.server.workspace)
+                taxonomy, taxonomy_hash = evaluate.load_taxonomy(review_corpus.private_path(self.server.workspace, plan['taxonomy']))
+                _, current_guide = load_guide(self.server.guide_path, taxonomy)
+                if (taxonomy_hash != self.server.taxonomy_hash or current_guide != self.server.guide_sha256
+                        or value.get('guide_sha256') != current_guide):
+                    raise ValueError('label guide or taxonomy changed; restart review')
+                guide_sha256 = current_guide
             review_corpus.record_decision(self.server.workspace, value['id'], self.server.reviewer,
                                           decision, value['annotation_sha256'], labels,
-                                          value.get('redactions'), self.server.config['max_prompt_bytes'])
+                                          value.get('redactions'), self.server.config['max_prompt_bytes'], guide_sha256)
             self.json_reply(200, {'saved': True, 'decision': decision})
         except (OSError, ValueError, KeyError, TypeError, UnicodeError, socket.timeout) as error:
             self.json_reply(400, {'error': str(error)})
@@ -228,6 +268,8 @@ def main() -> None:
     parser.add_argument('--reviewer', required=True)
     parser.add_argument('--port', type=int, default=0, help='loopback port; 0 selects an available port')
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument('--label-guide', type=Path, default=DEFAULT_GUIDE,
+                        help='label definitions matching the workspace taxonomy')
     args = parser.parse_args()
     try:
         if not 0 <= args.port <= 65535:
@@ -235,7 +277,7 @@ def main() -> None:
         config = load_config(args.config)
         token = secrets.token_urlsafe(32)
         with train.run_lock(args.workspace / 'review'):
-            with ReviewServer(args.workspace, args.reviewer, args.port, config, token) as server:
+            with ReviewServer(args.workspace, args.reviewer, args.port, config, token, args.label_guide) as server:
                 print(f'{server.origin}/#{token}', flush=True)
                 print('Local review is running. Open the URL in your browser; press Ctrl+C to stop.', flush=True)
                 try:

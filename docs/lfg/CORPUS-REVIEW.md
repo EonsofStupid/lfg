@@ -185,6 +185,21 @@ resources. The server rejects non-loopback host headers, requests without the
 token, and cross-origin decisions. Responses are marked `no-store`.
 
 The browser displays one pending request, source and proposed labels at a time.
+It displays the application rule and boundary for each label from the
+configurable `ml/lfg-encoder/label-guide.v1.json`, a structured rendering of
+the current draft [labeling guide](../../ml/lfg-encoder/LABELING.md). Use
+`--label-guide OTHER_GUIDE.json` for a different taxonomy or reviewed guide.
+The guide must define every workspace taxonomy label and no others; an invalid
+or mismatched guide prevents the browser server from starting. A browser
+approval records the guide's SHA-256 in the reviewed record, which is included
+in its existing approval digest. If the configured guide or taxonomy changes
+after display, the server rejects the approval and review must be restarted.
+Keep the exact guide file alongside the review evidence: exports retain its hash,
+not the file itself. The terminal reviewer and programmatic servers started
+without a guide can still produce legacy approvals without a guide hash; the
+corpus audit does not currently require one. A digest identifies the supplied
+guide, not proof that a person understood or applied it. The guide is draft and
+the taxonomy still lacks complexity, language, model class and agent count.
 For a `codex-session-user-text` record, **Check original source** rereads the
 bounded original session prefix, verifies its recorded hash and selected line,
 and compares the original message with the review copy. The source check is
