@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,74 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 const SCHEMA: &str = "lfg.kernel-journal.v1";
+
+#[derive(Deserialize)]
+struct SourceRow {
+    id: String,
+    text: String,
+}
+
+pub struct SourceIndex {
+    path: PathBuf,
+    max_bytes: u64,
+    sha256: String,
+    rows: BTreeMap<String, String>,
+}
+
+impl SourceIndex {
+    pub fn read(path: &Path, max_bytes: u64) -> Result<Self, String> {
+        if max_bytes == 0 {
+            return Err("source size limit must be positive".into());
+        }
+        let mut file = File::open(path).map_err(|error| format!("cannot open source: {error}"))?;
+        let before = file.metadata().map_err(|error| error.to_string())?;
+        if !before.is_file() || before.len() > max_bytes {
+            return Err("source is not a bounded regular file".into());
+        }
+        let mut raw = Vec::new();
+        (&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut raw)
+            .map_err(|error| error.to_string())?;
+        let after = file.metadata().map_err(|error| error.to_string())?;
+        if raw.len() as u64 != before.len()
+            || before.len() != after.len()
+            || before.modified().ok() != after.modified().ok()
+        {
+            return Err("source changed while reading".into());
+        }
+        let mut rows = BTreeMap::new();
+        for line in raw
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        {
+            let row: SourceRow =
+                serde_json::from_slice(line).map_err(|_| "invalid source JSONL record")?;
+            if row.id.trim().is_empty()
+                || row.text.trim().is_empty()
+                || rows.insert(row.id, row.text).is_some()
+            {
+                return Err("source IDs must be unique and source text nonempty".into());
+            }
+        }
+        if rows.is_empty() {
+            return Err("source contains no records".into());
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            max_bytes,
+            sha256: format!("{:x}", sha2::Sha256::digest(&raw)),
+            rows,
+        })
+    }
+
+    fn verify_unchanged(&self) -> Result<(), String> {
+        if Self::read(&self.path, self.max_bytes)?.sha256 != self.sha256 {
+            return Err("source changed during operation".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -131,11 +199,39 @@ impl JsonlJournal {
             "bytes":self.length,"tailSha256":self.tail})
     }
 
+    pub fn reconcile(&self, source: &SourceIndex) -> Result<Value, String> {
+        let mut matched = 0u64;
+        let mut missing = 0u64;
+        for observation in self.observations.values() {
+            if let Some(text) = source.rows.get(&observation.request_id) {
+                if lfg_core::digest_text(text) != observation.input_sha256
+                    || observation
+                        .captured_text
+                        .as_ref()
+                        .is_some_and(|captured| captured != text)
+                {
+                    return Err("source text differs from its journal observation".into());
+                }
+                matched += 1;
+            } else {
+                missing += 1;
+            }
+        }
+        source.verify_unchanged()?;
+        Ok(
+            json!({"schemaVersion":"lfg.kernel-source-reconciliation.v1",
+            "observations":self.observations.len(),"matched":matched,"missing":missing,
+            "sourceRecords":source.rows.len(),"sourceSha256":source.sha256,
+            "journalTailSha256":self.tail,"reviewed":false}),
+        )
+    }
+
     pub fn show(
         &self,
         engine: &lfg_core::kernel::Engine,
         sequence: u64,
         include_text: bool,
+        source: Option<&SourceIndex>,
     ) -> Result<Value, String> {
         let mut observation = self
             .observations
@@ -145,6 +241,10 @@ impl JsonlJournal {
         if observation.snapshot_sha256 != engine.snapshot_digest() {
             return Err("observation does not match the supplied snapshot".into());
         }
+        if let Some(source) = source {
+            self.reconcile(source)?;
+        }
+        let source_text = source.and_then(|index| index.rows.get(&observation.request_id));
         let captured_text_available = observation.captured_text.is_some();
         if !include_text {
             observation.captured_text = None;
@@ -162,7 +262,9 @@ impl JsonlJournal {
         }
         Ok(
             json!({"observationSequence":sequence,"observation":observation,
-            "capturedTextAvailable":captured_text_available,"choiceOptions":choices}),
+            "capturedTextAvailable":captured_text_available,"sourceTextAvailable":source_text.is_some(),
+            "sourceText":if include_text { source_text } else { None },
+            "sourceFileSha256":source.map(|value| &value.sha256),"choiceOptions":choices}),
         )
     }
 
@@ -316,9 +418,13 @@ impl JsonlJournal {
         engine: &lfg_core::kernel::Engine,
         output: &Path,
         max_output_bytes: u64,
+        source: Option<&SourceIndex>,
     ) -> Result<Value, String> {
         if max_output_bytes == 0 {
             return Err("output size limit must be positive".into());
+        }
+        if let Some(source) = source {
+            self.reconcile(source)?;
         }
         let mut seen = std::collections::BTreeSet::new();
         let mut bytes = Vec::new();
@@ -348,12 +454,20 @@ impl JsonlJournal {
             if snapshot_sha256 != engine.snapshot_digest() || !engine.has_choice(node, choice) {
                 return Err("correction does not match the supplied snapshot".into());
             }
-            let Some(text) = observation.captured_text.as_ref() else {
+            let from_source = source.and_then(|index| index.rows.get(&observation.request_id));
+            let text = observation.captured_text.as_ref().or(from_source);
+            let Some(text) = text else {
                 without_text += 1;
                 continue;
             };
-            let row = json!({"schemaVersion":"lfg.node-correction-candidate.v1", "status":"pending_review",
+            let origin = if observation.captured_text.is_some() {
+                "journal"
+            } else {
+                "source_jsonl"
+            };
+            let row = json!({"schemaVersion":"lfg.node-correction-candidate.v2", "status":"pending_review",
                 "requestId":observation.request_id, "text":text, "inputSha256":observation.input_sha256,
+                "textOrigin":origin,"sourceFileSha256":source.filter(|_| from_source.is_some()).map(|value| &value.sha256),
                 "snapshotSha256":snapshot_sha256, "snapshotRevision":observation.snapshot_revision,
                 "node":node,"proposedChoice":choice,"reviewerClaim":reviewer,
                 "observationSequence":observation_sequence,"correctionSequence":correction_sequence,
@@ -372,7 +486,10 @@ impl JsonlJournal {
             exported += 1;
         }
         if exported == 0 {
-            return Err("no corrected observations contain captured text".into());
+            return Err("no corrected observations have available verified text".into());
+        }
+        if let Some(source) = source {
+            source.verify_unchanged()?;
         }
         let mut file = OpenOptions::new()
             .write(true)
@@ -384,8 +501,9 @@ impl JsonlJournal {
         file.sync_all()
             .map_err(|error| format!("candidate export sync failed: {error}"))?;
         Ok(
-            json!({"schemaVersion":"lfg.node-candidate-export.v1","candidates":exported,
+            json!({"schemaVersion":"lfg.node-candidate-export.v2","candidates":exported,
             "correctedWithoutText":without_text,"sha256":format!("{:x}", sha2::Sha256::digest(&bytes)),
+            "sourceFileSha256":source.map(|value| &value.sha256),
             "journalTailSha256":self.tail,
             "status":"pending_review"}),
         )
@@ -529,7 +647,7 @@ mod tests {
         assert_eq!(journal.status()["observations"], 1);
         assert_eq!(journal.status()["corrections"], 1);
         assert_eq!(journal.status()["capturedText"], 0);
-        let shown = journal.show(&engine, 1, false).unwrap();
+        let shown = journal.show(&engine, 1, false, None).unwrap();
         assert_eq!(
             shown["choiceOptions"]["operation"],
             json!(["chat", "tool_call"])
@@ -540,7 +658,7 @@ mod tests {
                 .unwrap();
         other["revision"] = json!("r2");
         let other = lfg_core::kernel::Engine::from_json(other.to_string().as_bytes()).unwrap();
-        assert!(journal.show(&other, 1, false).is_err());
+        assert!(journal.show(&other, 1, false, None).is_err());
         drop(journal);
         let changed = raw.replace("reviewer", "changed-reviewer");
         std::fs::write(&path, changed).unwrap();
@@ -562,9 +680,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(journal.status()["capturedText"], 1);
-        assert!(journal.show(&engine, 1, false).unwrap()["observation"]["capturedText"].is_null());
+        assert!(
+            journal.show(&engine, 1, false, None).unwrap()["observation"]["capturedText"].is_null()
+        );
         assert_eq!(
-            journal.show(&engine, 1, true).unwrap()["observation"]["capturedText"],
+            journal.show(&engine, 1, true, None).unwrap()["observation"]["capturedText"],
             "fixture text"
         );
         drop(journal);
@@ -605,24 +725,123 @@ mod tests {
         journal
             .correct(&engine, 1, "operation", "chat", "reviewer")
             .unwrap();
-        assert!(journal.export_candidates(&engine, &output, 1).is_err());
+        assert!(
+            journal
+                .export_candidates(&engine, &output, 1, None)
+                .is_err()
+        );
         assert!(!output.exists());
         drop(journal);
         let mut journal = JsonlJournal::open(&journal_path, 100000, false).unwrap();
-        let report = journal.export_candidates(&engine, &output, 100000).unwrap();
+        let report = journal
+            .export_candidates(&engine, &output, 100000, None)
+            .unwrap();
         assert_eq!(report["candidates"], 1);
         let row: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
         assert_eq!(row["status"], "pending_review");
         assert_eq!(row["proposedChoice"], "chat");
         assert!(row["project"].is_null() && row["family"].is_null() && row["split"].is_null());
-        assert!(journal.export_candidates(&engine, &output, 100000).is_err());
+        assert!(
+            journal
+                .export_candidates(&engine, &output, 100000, None)
+                .is_err()
+        );
         journal
             .correct(&engine, 1, "operation", "tool_call", "reviewer")
             .unwrap();
         assert!(
             journal
-                .export_candidates(&engine, &dir.path().join("ambiguous.jsonl"), 100000)
+                .export_candidates(&engine, &dir.path().join("ambiguous.jsonl"), 100000, None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn source_reconciliation_and_export_bind_to_exact_input_without_changing_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.jsonl");
+        let source_path = dir.path().join("source.jsonl");
+        let output = dir.path().join("candidates.jsonl");
+        let engine = lfg_core::kernel::Engine::bundled().unwrap();
+        let mut journal = JsonlJournal::open(&journal_path, 100000, true).unwrap();
+        journal
+            .observe(
+                "example",
+                "private fixture",
+                &result(&engine, "private fixture"),
+                false,
+            )
+            .unwrap();
+        journal
+            .observe(
+                "not-in-source",
+                "another fixture",
+                &result(&engine, "another fixture"),
+                false,
+            )
+            .unwrap();
+        journal
+            .correct(&engine, 1, "operation", "chat", "reviewer")
+            .unwrap();
+        std::fs::write(
+            &source_path,
+            b"{\"id\":\"example\",\"text\":\"private fixture\",\"extra\":true}\n",
+        )
+        .unwrap();
+        let source = SourceIndex::read(&source_path, 100000).unwrap();
+        let summary = journal.reconcile(&source).unwrap();
+        assert_eq!(summary["matched"], 1);
+        assert_eq!(summary["missing"], 1);
+        assert_eq!(summary["reviewed"], false);
+        let hidden = journal.show(&engine, 1, false, Some(&source)).unwrap();
+        assert_eq!(hidden["sourceTextAvailable"], true);
+        assert!(hidden["sourceText"].is_null());
+        assert_eq!(
+            journal.show(&engine, 1, true, Some(&source)).unwrap()["sourceText"],
+            "private fixture"
+        );
+        assert!(
+            !serde_json::to_string(&summary)
+                .unwrap()
+                .contains("private fixture")
+        );
+        drop(journal);
+        let before = std::fs::read(&journal_path).unwrap();
+        let journal = JsonlJournal::open(&journal_path, 100000, false).unwrap();
+        let report = journal
+            .export_candidates(&engine, &output, 100000, Some(&source))
+            .unwrap();
+        let row: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(row["status"], "pending_review");
+        assert_eq!(row["textOrigin"], "source_jsonl");
+        assert_eq!(row["schemaVersion"], "lfg.node-correction-candidate.v2");
+        assert_eq!(row["sourceFileSha256"], summary["sourceSha256"]);
+        assert_eq!(row["text"], "private fixture");
+        assert_eq!(report["candidates"], 1);
+        drop(journal);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), before);
+        let journal = JsonlJournal::open(&journal_path, 100000, false).unwrap();
+        std::fs::write(
+            &source_path,
+            b"{\"id\":\"example\",\"text\":\"changed fixture\"}\n",
+        )
+        .unwrap();
+        assert!(journal.reconcile(&source).is_err());
+        let changed = SourceIndex::read(&source_path, 100000).unwrap();
+        assert!(journal.reconcile(&changed).is_err());
+        let new_output = dir.path().join("wrong.jsonl");
+        assert!(
+            journal
+                .export_candidates(&engine, &new_output, 100000, Some(&changed))
+                .is_err()
+        );
+        assert!(!new_output.exists());
+        std::fs::write(
+            &source_path,
+            b"{\"id\":\"x\",\"text\":\"a\"}\n{\"id\":\"x\",\"text\":\"b\"}\n",
+        )
+        .unwrap();
+        assert!(SourceIndex::read(&source_path, 100000).is_err());
+        assert!(SourceIndex::read(&source_path, 1).is_err());
     }
 }

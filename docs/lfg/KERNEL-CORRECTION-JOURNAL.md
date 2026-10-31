@@ -40,19 +40,49 @@ observation and an option in its exact snapshot. `--attest` and `REVIEWER_ID`
 are local assertions; the CLI does not authenticate a person or establish that
 a review occurred. It does not grant permission or change the kernel.
 
-If full text was explicitly captured and a correction was recorded, export
-pending per-node candidates to a **new** private file:
+If text was not captured in the journal, an operator can supply the original
+private JSONL source instead. Its rows must have unique, nonempty `id` and
+`text` fields. The tool checks exact UTF-8 text hashes against each matching
+observation; it never changes the journal or treats a match as approval:
+
+```powershell
+target/release/lfg-server.exe kernel-journal-reconcile `
+  --journal PRIVATE_JOURNAL.jsonl --journal-max-bytes 10485760 `
+  --source-jsonl PRIVATE_REQUESTS.jsonl --source-max-bytes 10485760
+
+target/release/lfg-server.exe kernel-journal-show `
+  --journal PRIVATE_JOURNAL.jsonl --journal-max-bytes 10485760 --observation 1 `
+  --source-jsonl PRIVATE_REQUESTS.jsonl --source-max-bytes 10485760 --include-text
+```
+
+`reconcile` reports matched and missing counts plus source and journal digests,
+without returning the text. It rejects any matching ID whose text changed.
+`show` also checks the source and only displays its text when explicitly asked.
+The check identifies the selected file bytes, not authorship, rights, complete
+context or reviewer identity. Source size is bounded and the source is reread
+to detect ordinary changes during the operation; this is not a lock against
+hostile concurrent modification. Inspect the original source and context before
+attesting to a correction.
+
+When a correction has been recorded and matching text is available from either
+the journal or the explicitly selected source, export pending per-node
+candidates to a **new** private file:
 
 ```powershell
 target/release/lfg-server.exe kernel-journal-export `
   --journal PRIVATE_JOURNAL.jsonl --journal-max-bytes 10485760 `
+  --source-jsonl PRIVATE_REQUESTS.jsonl --source-max-bytes 10485760 `
   --output NEW_PRIVATE_CANDIDATES.jsonl --output-max-bytes 10485760
 ```
 
 The exporter refuses multiple corrections for the same observation and node,
 unknown snapshots or choices, an existing output, over-limit output, and an
-empty result. It excludes corrected observations without captured text and
-reports their count. Candidates remain `pending_review`, with project, family
+empty result. The source flags are optional when the journal already contains
+captured text. It excludes corrected observations for which neither source has
+text and reports their count. Candidate records identify the text origin and,
+when used, the source file digest. This export uses the versioned
+`lfg.node-correction-candidate.v2` schema; it supersedes the earlier captured-text
+only candidate format. Candidates remain `pending_review`, with project, family
 and split unset; they are not accepted by the existing training loader and are
 not approved labels. Per-node review, source and rights checks, split assignment,
 label support, and a separate evaluation procedure must be implemented before
@@ -75,9 +105,11 @@ leave a partial new file if the filesystem fails; inspect it before retrying.
 
 On 2026-10-31 the journal recorded 11 previously inspected, unreviewed LFG
 conversation requests locally: 11 observations, zero corrections, zero
-captured texts. Each recorded request ID and input digest was checked against
-the local source record. The local status check verified the chain, and export with no
-corrected captured text was rejected without creating a file. This is real
+captured texts. The reconciliation command matched all 11 request IDs and input
+digests against the local source, and an explicit local show check confirmed
+that source text is hidden by default and available on request. The local status
+check verified the chain, and export with no corrections was rejected without
+creating a file. This is real
 observation provenance, not a reviewed training dataset. The journal remains
 under `dataset/private` and was not sent to the Spark or committed.
 The journal unit tests and CLI/locking tests also passed in a separate offline

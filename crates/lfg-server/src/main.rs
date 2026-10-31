@@ -64,11 +64,26 @@ enum Command {
         observation: u64,
         #[arg(long)]
         snapshot: Option<PathBuf>,
-        /// Display retained input text if it was explicitly captured.
+        /// Display text from the journal or an explicitly selected, verified source.
         #[arg(long)]
         include_text: bool,
+        #[arg(long)]
+        source_jsonl: Option<PathBuf>,
+        #[arg(long)]
+        source_max_bytes: Option<u64>,
     },
-    /// Export captured, corrected observations as pending per-node review candidates.
+    /// Match journal observation IDs and digests to an explicitly selected source file.
+    KernelJournalReconcile {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        source_jsonl: PathBuf,
+        #[arg(long)]
+        source_max_bytes: u64,
+    },
+    /// Export corrected observations with available text as pending per-node review candidates.
     KernelJournalExport {
         #[arg(long)]
         journal: PathBuf,
@@ -80,6 +95,10 @@ enum Command {
         output_max_bytes: u64,
         #[arg(long)]
         snapshot: Option<PathBuf>,
+        #[arg(long)]
+        source_jsonl: Option<PathBuf>,
+        #[arg(long)]
+        source_max_bytes: Option<u64>,
     },
     /// Append an explicitly attested correction to a prior kernel observation.
     KernelCorrect {
@@ -171,10 +190,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             observation,
             snapshot,
             include_text,
+            source_jsonl,
+            source_max_bytes,
         } => {
             let engine = load_kernel(snapshot)?;
             let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
-            println!("{}", store.show(&engine, observation, include_text)?);
+            let source = load_source(source_jsonl, source_max_bytes)?;
+            println!(
+                "{}",
+                store.show(&engine, observation, include_text, source.as_ref())?
+            );
+        }
+        Command::KernelJournalReconcile {
+            journal,
+            journal_max_bytes,
+            source_jsonl,
+            source_max_bytes,
+        } => {
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = kernel_journal::SourceIndex::read(&source_jsonl, source_max_bytes)?;
+            println!("{}", store.reconcile(&source)?);
         }
         Command::KernelJournalExport {
             journal,
@@ -182,12 +217,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             output_max_bytes,
             snapshot,
+            source_jsonl,
+            source_max_bytes,
         } => {
             let engine = load_kernel(snapshot)?;
             let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = load_source(source_jsonl, source_max_bytes)?;
             println!(
                 "{}",
-                store.export_candidates(&engine, &output, output_max_bytes)?
+                store.export_candidates(&engine, &output, output_max_bytes, source.as_ref())?
             );
         }
         Command::KernelCorrect {
@@ -231,6 +269,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve { bind } => serve(bind).await?,
     }
     Ok(())
+}
+
+fn load_source(
+    path: Option<PathBuf>,
+    limit: Option<u64>,
+) -> Result<Option<kernel_journal::SourceIndex>, Box<dyn std::error::Error>> {
+    match (path, limit) {
+        (Some(path), Some(limit)) => Ok(Some(kernel_journal::SourceIndex::read(&path, limit)?)),
+        (None, None) => Ok(None),
+        _ => Err("source path and source byte limit must be supplied together".into()),
+    }
 }
 
 fn classify(
