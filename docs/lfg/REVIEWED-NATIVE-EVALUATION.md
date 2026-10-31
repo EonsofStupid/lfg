@@ -36,10 +36,26 @@ from disk. `embedded` verifies that the binary reports the supplied artifact's
 manifest digest; the selected artifact directory is still required to verify
 source lineage. The existing benchmark configuration provides request timeout
 and dataset/response limits. This is an accuracy comparison, not the
-persistent CPU performance benchmark. The native command currently returns
-binary labels, so calibration is unavailable. A report always has
-`promotion_eligible: false`: separate calibrated quality, security, latency,
-memory, quantization and release checks remain necessary. Low or absent label
+persistent CPU performance benchmark. Add `--calibration-config
+ml/lfg-encoder/calibration.v1.json` to request native per-label sigmoid scores
+and aggregate empirical calibration statistics. The score output is explicitly
+uncalibrated and is enabled only for that offline request; it is not a claim of
+confidence calibration or a live-routing change.
+
+The configuration supplies bin edges from zero to one. For every label, the
+evaluator computes empirical binary expected calibration error (ECE),
+`sum((bin_count / observations) * abs(mean_score - positive_rate))`, and the
+mean squared probability error (Brier score). Bins are left-closed and
+right-open, except that the last includes one. The report also gives the mean
+of per-label ECE values and the ECE over pooled label observations; these are
+different summaries. It verifies that the scores cover the whole taxonomy and
+produce exactly the emitted labels at the artifact's configured thresholds.
+Per-label support and bin counts remain essential: a score computed from a
+small or unrepresentative test set does not establish calibration. Individual
+scores are held in process memory, while the report contains aggregate values.
+
+A report always has `promotion_eligible: false`: separate quality, security,
+latency, memory, quantization and release checks remain necessary. Low or absent label
 support makes any metric correspondingly weak; no support threshold is
 automatically treated as sufficient.
 
@@ -57,6 +73,29 @@ identity digest matched its declared artifact, runtime and taxonomy components
 for one real, unreviewed DevPulse excerpt; that is a wire-identity check, not a
 reviewed evaluation or quality measurement.
 
+With the optional score output, the Windows x86-64 MSVC experimental release
+binary SHA-256 `20673c099ad2f722ad686013218b1e579528af65413761a565c71f8a5315202c`
+was compared with its source PyTorch model on the existing 15 unreviewed
+DevPulse excerpts. Across their five output labels, the maximum absolute score
+difference was `5.96e-8` and no threshold decision changed. This is numerical
+agreement on that sample, not ground-truth calibration or accuracy. The
+embedded weights derive from private project data and are not release-qualified.
+The 123,309,568-byte binary was rebuilt offline in a fresh target directory on
+the same machine with the same selected artifact, UI assets and static-runtime
+flags; the two SHA-256 hashes matched. Its static import table listed Windows
+system libraries and no ONNX Runtime or MSVC runtime DLL. This is not a
+cross-machine or clean-installation qualification.
+
+Three non-isolated, paired persistent-process runs on the same excerpts compared
+the same embedded command with and without `--include-scores`: each process
+handled 150 measured requests (15 unique excerpts repeated ten times, after
+warmup). Without scores, medians were 14.94–15.50 ms and p95s 28.69–28.81 ms;
+with scores, medians were 14.96–15.40 ms and p95s 28.15–28.69 ms. Process
+cycles ranged from 48.9–50.6 million per request without scores and 48.5–50.2
+million with scores. These overlapping observations do not establish zero
+overhead, a 512-token p95, or general performance. The aggregate reports and
+score-parity report remain in `dataset/private`.
+
 Separately, a fixture-only plan with simulated review approvals and one test
 record was run end to end through the actual native binary and a separately
 exported fixture ONNX artifact. The command returned a non-promotable report;
@@ -64,3 +103,5 @@ the fixture contained no positive `sensitive-data` examples, so its security
 recall was unavailable. This verifies the wiring, not real-data quality,
 human review, calibration, or release readiness. The fixture report remains in
 `target/lfg-reviewed-native-eval-fixture-v1.json` on the development machine.
+A second fixture-only run exercised the optional score and ECE/Brier path; its
+single test record cannot establish calibration.

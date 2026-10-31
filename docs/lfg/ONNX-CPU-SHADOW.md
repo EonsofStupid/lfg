@@ -33,6 +33,10 @@ the existing evaluator. It rejects duplicate IDs and inputs or example counts
 outside configured limits. The example runtime configuration is
 `crates/lfg-server/config/onnx-runtime.example.json`; native inference currently
 supports a single CPU thread and rejects other requested thread counts.
+An optional `--include-scores` flag on either native prediction command adds
+per-label `sigmoid-uncalibrated-v1` values to each local response for offline
+evaluation. The flag does not alter the emitted label decisions or live routing.
+Scores are not calibrated confidence, and per-request outputs can be sensitive.
 
 The v2 export manifest records token length and tokenizer directions in addition
 to file hashes. The runtime verifies the pinned manifest and the model,
@@ -56,7 +60,7 @@ python ml/lfg-encoder/compare_onnx_shadow.py --binary LFG_BINARY --artifact ONNX
 An opt-in `embedded-onnx` feature can instead include an explicitly selected
 artifact in the executable. The separate external-artifact command remains
 available in the same build. No production-trained artifact, qualified model,
-automated update channel, live inference routing, calibration, or final
+automated update channel, live inference routing, qualified calibration, or final
 independent evaluation is provided by either command. Older v1 exports must be
 re-exported; they do not record the input contract required by this runtime.
 

@@ -68,6 +68,55 @@ fn copied_binary_runs_embedded_model_and_accepts_runtime_override() {
     );
     let expected: Value = serde_json::from_slice(&external.stdout).unwrap();
     assert_eq!(actual, expected);
+    assert!(actual.get("scores").is_none());
+
+    let scored = predict(
+        &exe,
+        temp.path(),
+        &["embedded-onnx-predict", "--include-scores"],
+    );
+    assert!(
+        scored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scored.stderr)
+    );
+    let mut scored_value: Value = serde_json::from_slice(&scored.stdout).unwrap();
+    let scores = scored_value
+        .as_object_mut()
+        .unwrap()
+        .remove("scores")
+        .unwrap();
+    assert_eq!(scored_value, actual);
+    assert_eq!(scores["semantics"], "sigmoid-uncalibrated-v1");
+    let values = scores["values"].as_object().unwrap();
+    assert!(!values.is_empty());
+    assert!(
+        values
+            .values()
+            .all(|value| value.as_f64().is_some_and(|v| (0.0..=1.0).contains(&v)))
+    );
+
+    let scored_external = predict(
+        &exe,
+        temp.path(),
+        &[
+            "onnx-predict",
+            "--artifact",
+            &artifact,
+            "--manifest-sha256",
+            &digest,
+            "--runtime-config",
+            config.to_str().unwrap(),
+            "--include-scores",
+        ],
+    );
+    assert!(
+        scored_external.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scored_external.stderr)
+    );
+    let external_value: Value = serde_json::from_slice(&scored_external.stdout).unwrap();
+    assert_eq!(external_value["scores"], scores);
 
     let mut limit: Value =
         serde_json::from_str(include_str!("../config/onnx-runtime.example.json")).unwrap();

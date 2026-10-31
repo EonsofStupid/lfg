@@ -193,8 +193,11 @@ The configurable taxonomy defines the label universe. Per-label counts include
 false positives for labels with no positive examples; macro F1 averages only
 labels with positive reference support, while micro F1 includes all declared
 labels. Empty denominators are `null`. Compare models using the same dataset
-and taxonomy hashes and inspect the support for each label. Predictions are
-binary: this workflow does not measure calibration, runtime CPU cycles, memory,
-quantization loss, or model quality on an independently reviewed final test.
+and taxonomy hashes and inspect the support for each label. The default
+predictions are binary; the reviewed native comparison can optionally measure
+empirical ECE and Brier score from uncalibrated native scores using explicitly
+configured bins. This does not fit a calibrator or establish quality. Runtime
+CPU cycles, memory, quantization loss, and independently reviewed final-test
+quality require separate evidence.
 See the [exploratory comparison](../../docs/lfg/EVALUATION-SMOKE.md) for a
 recorded same-data smoke test and its limits.
