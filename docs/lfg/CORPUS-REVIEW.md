@@ -150,6 +150,48 @@ default label-support requirements: its training group has no positive
 so running this count on them is a diagnostic, not reviewed support. See the
 [experiment](REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
+### Additional attributed DevPulse excerpts
+
+On 2026-10-30, 16 quotations attributed to the operator were selected from
+11 DevPulse plan documents at commit `cb7baf0756cbff1ca7a4c18bef81ebdae1e0ee57`.
+One was wholly contained in an earlier draft excerpt and was excluded from the
+candidate review set. The 15 remaining private records preserve document paths,
+line spans, blob hashes, normalized quote text and text hashes. Their spans and
+hashes were checked against the pinned Git blobs. The project documents call
+the passages verbatim, but the original complete requests and authorship were
+not independently recovered. These may be fragments, follow-ups or overlapping
+ideas, not 15 independent examples. Exact-text checks do not detect all such
+relationships. None has been approved, independently sanitized or verified.
+
+The Git-ignored file is
+`dataset/private/devpulse-quoted-deduplicated.cb7baf07.v3.jsonl`, SHA-256
+`75b706fc397145691593b7eeb5e9faa6794b7151490eaaca6ea7f604c2e7510d`.
+The discarded-overlap source file and the local curation and verification
+scripts are also retained in the private directory for traceability. Draft
+labels and negatives are AI proposals: 14 are marked as software building and
+one as web research. That research excerpt does not establish that external
+web access is required; the proposed labels need human review. No record has
+a positive `sensitive-data` proposal.
+
+A separate local plan, `dataset/private/real-requests-review.plan.v1.json`,
+places these 15 and the 12 earlier DevPulse excerpts in a provisional training
+group and the 11 LFG conversation messages in a provisional validation group.
+It has no test source. Its pending queue contains 38 records and zero approvals;
+the audit found no normalized exact duplicates within the declared splits.
+These project assignments are a review aid, not proof of source independence.
+The LFG messages trained the earlier experimental model, so this validation
+group is not an untouched holdout for that model or a final evaluation set.
+The draft DevPulse training group has no `respond.general`, `verify.outcome`,
+`text.generate`, or `sensitive-data` positives, while the LFG validation group
+proposes the first three. Even after review, this plan cannot pass the training
+and coverage gates without more suitable data and an independent test source.
+
+For triage only, the existing rule baseline produced `build.software` on two of
+the 14 new excerpts with that proposed label, and `research.web` on the one
+with that proposed label. This is comparison with unreviewed guesses, not a
+verified accuracy measure. The baseline predictions and report remain private.
+The candidate Makers Impulse holdout was not read for this new plan.
+
 ### Makers checkpoint inventory
 
 `inventory_checkpoint_prompts.py` scans a pinned local Git commit for Replit
