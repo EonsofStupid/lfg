@@ -77,6 +77,50 @@ development, and its artifacts remain experimental. A different versioned
 promotion-policy file can be selected with `--promotion-policy`; changing its
 sample threshold does not establish adequate data or quality.
 
+## Local review workspace
+
+`review_corpus.py` provides a terminal-based review workflow for an existing
+unreviewed plan. It copies the plan, taxonomy and sources into a new local
+workspace and starts every decision as pending. It refuses to initialize from
+an existing ledger or records already marked verified. It never contacts a
+network service. The workspace contains the original private text: choose an
+access-controlled directory and do not commit it. Git ignore is not encryption;
+on Windows, access depends on the directory's inherited ACL.
+
+```powershell
+python ml/lfg-encoder/review_corpus.py init --plan PRIVATE_PLAN.json --workspace NEW_PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_corpus.py review --workspace PRIVATE_DIRECTORY --reviewer REVIEWER_ID
+python ml/lfg-encoder/review_corpus.py status --workspace PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_corpus.py export --workspace PRIVATE_DIRECTORY --output NEW_PRIVATE_EXPORT_DIRECTORY
+```
+
+Review displays the request, source, review note and proposed labels. The
+reviewer can edit all label groups, skip, or explicitly approve or reject an
+item. Approving requires typing `APPROVE`; rejecting requires `REJECT` and is
+not reversible within that workspace. Blank label groups mean negatives, not
+unknowns. If a request, attribution, label, source permission or potential
+secret is uncertain, skip or reject it rather than approving it. Review the
+actual source and context separately; the tool displays provenance but does
+not establish authorship, licensing or secret removal. The reviewer identifier
+and time are recorded attestations, not identity verification.
+
+Decisions are bound to the displayed record, taxonomy, project and split. An
+approval made stale by an edit is not exported. If a process stops between
+writing a source and its ledger, the item stays pending and must be explicitly
+reviewed again. The workspace lock coordinates this tool's processes only;
+avoid editing workspace files concurrently. If a crash leaves `review.lock`,
+first verify no reviewer is running before removing it. Export creates a new
+plan containing only current approvals and excludes pending, rejected and stale
+items. It does not assert that there are enough examples or suitable project
+splits for training: the existing corpus audit, label support and sample gates
+still apply.
+
+The current real-request review workspace is
+`dataset/private/real-request-review-workspace.v1`. It was initialized with
+38 pending items and no approvals. Its LFG validation group was used for an
+earlier experiment and it has no test source; review alone cannot turn this
+plan into an independent final evaluation.
+
 `smoke_reviewed_gate.py` tests the gate through an actual short model-training
 call using invented fixture records and simulated approvals. It creates a new
 output directory, requires an explicitly chosen cached model and immutable
