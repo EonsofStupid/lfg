@@ -64,6 +64,10 @@ explicitly states `candidateExecutionVerified: false` and
 verified candidate inference, confidence and performance measurements, and
 held-out evaluation remain required before promotion.
 
+An [experimental per-node exemplar builder](NODE-EXEMPLAR-EXTENSION.md) can
+produce candidate prediction files after the review and admission gate passes.
+It remains an offline Python path and has not been qualified for release.
+
 ## Local evidence
 
 On 2026-10-31 the runner was invoked against the real local LFG queue. It
