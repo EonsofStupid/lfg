@@ -25,7 +25,9 @@ const classification = {
     strengths: [], effortLevels: [], evidence: { source: 'fixture', basis: 'synthetic', observedAt: 'test' }
   } }]
 }
+let appContext: { schemaVersion: string; status: string; revision: string | null; pollIntervalMs: number | null; providers: unknown[] | null }
 beforeEach(() => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'disabled', revision: null, pollIntervalMs: null, providers: null}
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session' })
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -33,6 +35,7 @@ beforeEach(() => {
     if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2, devTools: { statsEnabled: true, traceCapacity: 8, statsPollIntervalMs: 1000, debounceMinMs: 5, debounceMaxMs: 80, historyMinSamples: 1, historyMaxSamples: 8 } } }))
     if (path.endsWith('/preflight')) return new Response(JSON.stringify(preflight))
     if (path.endsWith('/classify')) return new Response(JSON.stringify({ ...classification, revision: JSON.parse(String(init?.body)).revision }))
+    if (path.endsWith('/intake/app-context')) return new Response(JSON.stringify(appContext))
     if (path.endsWith('/intake/preview')) {
       const body = JSON.parse(String(init?.body))
       return new Response(JSON.stringify({schemaVersion: 'lfg.intake-preview.v1', templateRevision: 'test', templateDigest: 'e'.repeat(64), sourceApp: body.sourceApp, missingRequired: 1,
@@ -41,6 +44,35 @@ beforeEach(() => {
     if (path.endsWith('/dev-stats')) return new Response(JSON.stringify({schemaVersion: 'lfg.dev-stats.v1', enabled: true, capacity: 8, totalRecorded: 1, evicted: 0, cpuTimeMicros: null, operationsDigest: 'd'.repeat(64), encoderDigest: 'a'.repeat(64), classifierDigest: 'c'.repeat(64), summaries: [{operation: 'preflight', samples: 1, errors: 0, p50TotalMicros: 100, p95TotalMicros: 100}], traces: [{sequence: 1, recordedAt: '2026-01-01T00:00:00Z', operation: 'preflight', outcome: 'ok', totalMicros: 100, queueMicros: 10, workMicros: 80}]}))
     return new Response('{}', { status: 404 })
   }))
+})
+
+test('uses the live host roster and preserves qualified capabilities in intake', async () => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'ready', revision: 'host-test', pollIntervalMs: 5000,
+    providers: [{id: 'provider-id', activated: true, capabilities: ['read-sessions']}]}
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText(/Activation can mean history-only access/)).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => {
+    if (!String(url).endsWith('/intake/preview')) return false
+    const facts = JSON.parse(String(init?.body)).facts
+    return facts.providers?.[0]?.id === 'provider-id' && facts.providers[0].capabilities.includes('read-sessions')
+  })).toBe(true))
+})
+
+test('does not replace unavailable host facts with declared subscription availability', async () => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'unavailable', revision: 'host-test', pollIntervalMs: 5000, providers: null}
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText(/DevPulse context is unavailable/)).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => {
+    if (!String(url).endsWith('/intake/preview')) return false
+    const facts = JSON.parse(String(init?.body)).facts
+    return facts.request?.text === 'Implement my feature and run tests' && !('providers' in facts)
+  })).toBe(true))
 })
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })

@@ -92,7 +92,7 @@ impl Template {
         lfg_core::digest_value(&serde_json::to_value(self).expect("intake template serializes"))
     }
 
-    fn safe(&self, value: &Value) -> bool {
+    pub(crate) fn safe(&self, value: &Value) -> bool {
         match value {
             Value::Object(object) => object.iter().all(|(key, nested)| {
                 !self
