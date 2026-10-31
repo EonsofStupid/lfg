@@ -6,43 +6,49 @@ run, and trained on its own.
 
 ## Project objective
 
-Build a self-contained, CPU-oriented classification system and UI that provide
-fast, inspectable observations for an operator or downstream orchestration
-system. The recovered LFG v3 notes describe a deterministic five-operation
-kernel that produces an address and recipe, with an evaluated suggestion
-extension for cases that escalate. Later project requirements include tracing,
-model and effort profiles, cloud/local use, and configurable integrations.
-See [notes alignment](docs/lfg/NOTES-ALIGNMENT.md) for the design and the gap
-between it and the current implementation.
+LFG is a tuned model and a standalone product. For each prompt it reports four
+results: the **intent**, the **complexity**, the **models** suggested, and the
+**total agents** the work needs, with the evidence behind each. It ships as a
+self-contained, CPU-oriented binary with its own UI. It is useful on its own
+and can be combined with SWAG and RRFlow.
 
-The intended product is an operational assessment and routing overlay for a
-larger reasoning workflow. It should visualize task strands and boundaries,
-surface intent and routing signals, and preserve a clean signal trail. Its
-recommendations are inputs to the operator or downstream agents; producing the
-final answer remains their responsibility. LFG's observations do not grant
-authorization. The roles and integration boundaries described by the recovered
-notes and the current RRFlow repository need reconciliation before integration
-can be claimed complete.
+When combined, SWAG accepts LFG's assessment as a data-point suggestion. After
+a suggestion receives a second confirmation, SWAG can apply it with more
+weight, but only once LFG's suggestions have been shown to be reliable on real
+tasks. RRFlow keeps authorization and budgets; an LFG suggestion never grants
+permission or dispatches work by itself, and LFG does not produce the final
+answer.
+
+The UI must be easy for a non-specialist to read and configure. For each prompt
+it shows, in order: the prompt received, the formula applied to it, the
+brackets the prompt fell into, the agents and models suggested, and the
+subscriptions recognized. AI agents that manage LFG need the same operations as
+clear, documented steps.
+
+The recovered LFG v3 notes describe a deterministic five-operation kernel that
+produces an address and recipe, with an evaluated suggestion extension for
+cases that escalate. See [notes alignment](docs/lfg/NOTES-ALIGNMENT.md) for the
+design and the gap between it and the current implementation.
 
 ### Development path and current status
 
-- **Current foundation:** the active CPU encoder is deterministic and rule-based.
-  The Rust runtime includes signal, graph, and evaluation/promotion machinery;
-  the UI visualizes the resulting workflow. The full assessment and routing
-  experience above is the objective, not a claim that every recommendation is
-  already available or validated.
-- **First, establish a controlled baseline:** use explicit rules, protocol
-  checks, and evaluation gates to establish reliable behavior. Rule-based
-  encoding is not itself supervised machine learning.
-- **Then, evaluate learned behavior:** the offline classifier training lane and
-  the local CPU LLM experiment explore possible improvements. Learned or adaptive
-  behavior, including any unsupervised approach, should gain authority only
-  after the signal path, evaluation criteria, and safety checks are proven.
+- **Current foundation:** runtime answers come from deterministic rules. Intent,
+  a yes/no "needs a bigger model" signal, an agent estimate and a model choice
+  from a configured catalog (empty by default) exist, but they are split across
+  the preflight and category classifiers, whose agent estimates use different
+  formulas. No single output yet carries all four results.
+- **Tuning the model:** the training lane in `ml/lfg-encoder/` tunes LFG's
+  model. Its labels currently cover intent, capability and risk only;
+  complexity, model and agent-count labels are needed before tuning can improve
+  all four results. A tuned version replaces or extends the rules only after
+  evaluation gates show its suggestions are reliable.
+- **Product:** the self-contained binary, embedded UI, configuration and
+  integrations are tracked in the [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md).
 
-Success means an operator can inspect an assessment, understand the signals behind
-it, and use it to choose an appropriate reasoning plan; the recommendations must
-be evaluated against real tasks before they are trusted. Concrete quality,
-latency, and resource thresholds still need to be defined.
+Success means a person can read an assessment, understand why LFG suggested
+those brackets, agents and models, and change the configuration that produced
+it, and that SWAG can rely on the suggestion once it is proven. Concrete
+quality, latency, and resource thresholds still need to be defined.
 
 Rules, scoring parameters, and model catalog entries are configured rather than
 fixed in code. See [LFG configuration](docs/lfg/CONFIGURATION.md) for the

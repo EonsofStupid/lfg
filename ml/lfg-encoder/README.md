@@ -1,10 +1,13 @@
 # LFG prompt-recipe encoder
 
-This is the offline, non-authoritative training lane for the Rust
-MasterClyffy CPU preflight encoder. It learns multi-label intent, capability,
-and risk classification. It is not the Jina/GTE retrieval lesson and it does
-not write the final CoSTAR packet. Runtime prompts are not collected here. The
-checked-in corpus is intentionally authored synthetic data.
+This is the training lane for LFG's model, exported for the Rust MasterClyffy
+CPU runtime. Its target is the four results LFG reports: intent, complexity,
+suggested models and total agents. The current label set covers only intent,
+capability and risk; complexity, model and agent-count labels still need to be
+defined in the [label guide](LABELING.md) and in reviewed data. It is not the
+Jina/GTE retrieval lesson and it does not write the final CoSTAR packet.
+Runtime prompts are not collected here. The checked-in corpus is intentionally
+authored synthetic data.
 
 Training is GPU-only. CPU is reserved for the exported ONNX/Rust proof; the
 trainer refuses to fall back to CPU. The active reviewed training path uses the
@@ -12,12 +15,14 @@ Transformers `Trainer`. A separately authored GPU prototype remains in the
 source but is not integrated with this path; Unsloth is not currently the
 active training engine.
 
-These experiments support the assessment and routing objective in the root
-[README](../../README.md). The classifier and CPU LLM paths are exploratory;
-neither is currently the authoritative runtime encoder. The coding-oriented
-teacher and student work below also explores general model capabilities, and
-its contribution to LFG's assessment role needs to be demonstrated through
-task-specific evaluation before integration or promotion.
+This lane tunes the model behind the objective in the root
+[README](../../README.md). A trained artifact becomes the runtime encoder only
+after task-specific evaluation and the promotion policy pass; until then the
+rule-based encoder answers, and neither the classifier nor the CPU LLM path has
+been promoted. The coding-oriented teacher and student work below also
+explores general model capabilities, and its contribution to LFG's assessment
+role needs to be demonstrated through task-specific evaluation before
+integration or promotion.
 
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for

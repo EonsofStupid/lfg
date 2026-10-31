@@ -5,10 +5,10 @@ profile discovery, remote updates, or RRFlow integration is implemented.
 
 ## Assessment chain
 
-An authorized project request enters one bounded CPU analysis. LFG reports
-versioned observations (task category, capabilities, risk signals, and, when
-supported and evaluated, complexity) with the configuration and model identity
-that produced them. The result includes unknown and inconclusive states. An MCP
+An authorized project request enters one bounded CPU analysis. LFG reports a
+versioned assessment: intent, complexity, suggested models and total agents,
+together with capability and risk signals, the evidence for each, and the
+configuration and model identity that produced them. The result includes unknown and inconclusive states. An MCP
 adapter should expose the same typed result through a tool with an explicit
 input/output schema; it must not create a second classifier or convert an
 observation into permission. The local stdio transport is the first candidate;
@@ -16,9 +16,10 @@ network transport is a separate configurable integration. The [MCP tools](https:
 and [transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 specifications define those protocol boundaries.
 
-When integrated with RRFlow, LFG supplies observations. SWAG proposes a model,
-effort, or context plan, and `RrdEngine` retains authorization, admission,
-budgets, and durable state. The project configuration identifies the provider
+When integrated with RRFlow, LFG supplies its assessment as a suggestion. SWAG
+accepts it as a data point and weights it more heavily after a second
+confirmation, once LFG's suggestions are proven reliable. `RrdEngine` retains
+authorization, admission, budgets, and durable state. The project configuration identifies the provider
 bindings and subscriptions the operator has made available; a claim that a
 subscription exists is distinct from a verified usable binding. Unknown or
 stale capabilities cannot meet a hard requirement.
