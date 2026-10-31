@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import corpus_audit
 import evaluate
+import inspect_codex_inventory
 import review_corpus
 import train
 
@@ -26,11 +27,49 @@ DEFAULT_CONFIG = ROOT / 'review-web-config.v1.json'
 def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
-    if not isinstance(value, dict) or set(value) != fields | {'schema_version'} or \
+    if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
+            set(value) - (fields | {'schema_version', 'source_verification'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
+    if 'source_verification' in value:
+        limits = value['source_verification']
+        if (not isinstance(limits, dict) or set(limits) != {'max_session_bytes', 'max_line_bytes'}
+                or any(type(limit) is not int or limit < 1 for limit in limits.values())):
+            raise ValueError('invalid source verification limits')
     return value
+
+
+def verify_source(workspace: Path, identifier: str, expected_digest: str, limits: dict[str, int] | None) -> str:
+    """Check the source attached to a pending record, without changing the review."""
+    if limits is None:
+        raise ValueError('source verification is not configured')
+    plan, _, ledger = review_corpus.load_workspace(workspace)
+    item = ledger.get(identifier)
+    if item is None or item['decision'] != 'pending':
+        raise ValueError('only pending records can be checked')
+    _, rows, index, source = review_corpus.find_row(workspace, plan, identifier)
+    row = rows[index]
+    _, taxonomy_hash = evaluate.load_taxonomy(review_corpus.private_path(workspace, plan['taxonomy']))
+    current = corpus_audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)
+    if current != expected_digest or current != item['annotation_sha256'] or row['verified']:
+        raise ValueError('record changed or an earlier write was interrupted; review it again')
+    original = row.get('source')
+    if not isinstance(original, dict) or original.get('kind') != 'codex-session-user-text':
+        raise ValueError('automatic source verification is unavailable for this source type')
+    entry = {**original, 'schema_version': 'lfg.unreviewed-codex-message.v2'}
+    text = inspect_codex_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
+    if text != row['text'] or row.get('review_transforms'):
+        raise ValueError('review copy differs from the original source')
+    # Recheck the review record after the potentially lengthy file read.
+    plan_after, _, ledger_after = review_corpus.load_workspace(workspace)
+    _, rows_after, index_after, source_after = review_corpus.find_row(workspace, plan_after, identifier)
+    _, taxonomy_after = evaluate.load_taxonomy(review_corpus.private_path(workspace, plan_after['taxonomy']))
+    if (ledger_after.get(identifier) != item or taxonomy_after != taxonomy_hash
+            or corpus_audit.annotation_digest(rows_after[index_after], source_after['project'],
+                                               source_after['split'], taxonomy_after) != current):
+        raise ValueError('review record changed during source verification')
+    return 'source_prefix_and_original_text_match'
 
 
 class ReviewServer(HTTPServer):
@@ -141,7 +180,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not self.authorized(post=True):
             self.json_reply(403, {'error': 'not authorized'})
             return
-        if self.path != '/api/decision' or self.headers.get('Transfer-Encoding') or \
+        if self.path not in ('/api/decision', '/api/verify-source') or self.headers.get('Transfer-Encoding') or \
                 self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})
             return
@@ -156,6 +195,14 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
+            if self.path == '/api/verify-source':
+                if (not isinstance(value, dict) or set(value) != {'id', 'annotation_sha256'}
+                        or not isinstance(value['id'], str) or not isinstance(value['annotation_sha256'], str)):
+                    raise ValueError('invalid source verification request')
+                status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
+                                       self.server.config.get('source_verification'))
+                self.json_reply(200, {'status': status})
+                return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
             if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions'}):
                 raise ValueError('invalid decision')
