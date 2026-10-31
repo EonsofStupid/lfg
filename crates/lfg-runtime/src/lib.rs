@@ -792,6 +792,13 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             ));
         }
         if existing.iter().any(|grade| {
+            grade.outcome_id == request.outcome_id && grade.variant_id != request.variant_id
+        }) {
+            return Err(RuntimeError::InvalidRequest(
+                "an outcome cannot belong to multiple variants in one experiment".into(),
+            ));
+        }
+        if existing.iter().any(|grade| {
             grade.outcome_id == request.outcome_id && grade.grader_run_id == request.grader_run_id
         }) {
             return Err(RuntimeError::GradeExists);
@@ -839,6 +846,17 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
                 "experiment contains grades from another rubric revision".into(),
             ));
         }
+        let mut outcomes = BTreeMap::new();
+        for grade in &grades {
+            if outcomes
+                .insert(&grade.outcome_id, &grade.variant_id)
+                .is_some_and(|previous| previous != &grade.variant_id)
+            {
+                return Err(RuntimeError::InvalidRequest(
+                    "an outcome belongs to multiple variants in the experiment".into(),
+                ));
+            }
+        }
         Ok(experiment_statistics(experiment_id, &grades))
     }
 
@@ -846,6 +864,14 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
         &mut self,
         request: PromotionDecisionRequest,
     ) -> Result<PromotionDecision, RuntimeError> {
+        if request.baseline_variant_id.trim().is_empty()
+            || request.candidate_variant_id.trim().is_empty()
+            || request.baseline_variant_id == request.candidate_variant_id
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "baseline and candidate must be distinct nonempty variants".into(),
+            ));
+        }
         let statistics = self.statistics(&request.experiment_id)?;
         let policy = self.promotion_policy();
         let recommendation = promotion_recommendation(
@@ -1317,6 +1343,116 @@ mod tests {
         assert!(matches!(
             runtime.decide_promotion(request),
             Err(RuntimeError::PromotionGate)
+        ));
+    }
+
+    #[test]
+    fn grader_run_ids_do_not_satisfy_independence_and_outcomes_cannot_cross_variants() {
+        let mut runtime = LfgRuntime::new(MemorySignalStore::default());
+        runtime.promotion_policy.minimum_samples_per_arm = 1;
+        runtime.promotion_policy.min_independent_graders = 2;
+        for (variant, score) in [("baseline", 0.70), ("candidate", 0.95)] {
+            for grader in ["run-a", "run-b"] {
+                runtime
+                    .record_grade(SemanticGradeRequest {
+                        experiment_id: "exp-independence".into(),
+                        variant_id: variant.into(),
+                        outcome_id: format!("{variant}-outcome"),
+                        grader_run_id: grader.into(),
+                        scores: runtime
+                            .rubric()
+                            .criteria
+                            .keys()
+                            .map(|key| (key.clone(), score))
+                            .collect(),
+                    })
+                    .unwrap();
+            }
+        }
+        let stats = runtime.statistics("exp-independence").unwrap();
+        assert!(
+            stats
+                .variants
+                .iter()
+                .all(|v| v.grader_runs == Some(2) && v.independent_graders == 0)
+        );
+        let conflict = SemanticGradeRequest {
+            experiment_id: "exp-independence".into(),
+            variant_id: "candidate".into(),
+            outcome_id: "baseline-outcome".into(),
+            grader_run_id: "different-run".into(),
+            scores: runtime
+                .rubric()
+                .criteria
+                .keys()
+                .map(|key| (key.clone(), 0.9))
+                .collect(),
+        };
+        assert!(matches!(
+            runtime.record_grade(conflict),
+            Err(RuntimeError::InvalidRequest(_))
+        ));
+        let request = PromotionDecisionRequest {
+            experiment_id: "exp-independence".into(),
+            baseline_variant_id: "baseline".into(),
+            candidate_variant_id: "candidate".into(),
+            action: "promote".into(),
+            decided_by: ManifestRef::new("operator", "1", "test operator"),
+            reason_codes: vec![],
+        };
+        assert!(matches!(
+            runtime.decide_promotion(request.clone()),
+            Err(RuntimeError::PromotionGate)
+        ));
+        let same = PromotionDecisionRequest {
+            candidate_variant_id: "baseline".into(),
+            action: "hold".into(),
+            ..request
+        };
+        assert!(matches!(
+            runtime.decide_promotion(same),
+            Err(RuntimeError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn statistics_reject_legacy_outcomes_assigned_to_multiple_variants() {
+        let mut runtime = LfgRuntime::new(MemorySignalStore::default());
+        let rubric = runtime.rubric();
+        for variant in ["baseline", "candidate"] {
+            let grade = grade_request(
+                SemanticGradeRequest {
+                    experiment_id: "legacy-exp".into(),
+                    variant_id: variant.into(),
+                    outcome_id: "shared-outcome".into(),
+                    grader_run_id: format!("{variant}-grader"),
+                    scores: rubric
+                        .criteria
+                        .keys()
+                        .map(|key| (key.clone(), 0.9))
+                        .collect(),
+                },
+                &rubric,
+            )
+            .unwrap();
+            runtime
+                .append_draft(SignalDraft {
+                    event_type: "dev.clyffy.lfg.evaluation.grade_recorded.v1".into(),
+                    workflow_id: "experiment-legacy-exp".into(),
+                    plan_id: None,
+                    task_id: None,
+                    agent_id: None,
+                    attempt_id: None,
+                    binding_id: None,
+                    causation_id: None,
+                    payload_class: "evaluation".into(),
+                    payload: serde_json::to_value(grade).unwrap(),
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            runtime.statistics("legacy-exp"),
+            Err(RuntimeError::InvalidRequest(_))
         ));
     }
 

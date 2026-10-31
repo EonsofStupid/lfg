@@ -1178,4 +1178,34 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["code"], "promotion_gate_not_satisfied");
     }
+
+    #[tokio::test]
+    async fn evaluation_api_reports_outcome_weighting_and_unverified_graders() {
+        let app = router(AppState::new());
+        for (outcome, grader, score) in [("one", "a", 1.0), ("one", "b", 1.0), ("two", "c", 0.0)] {
+            let request = Request::builder().method("POST")
+                .uri("/api/shippin/intelligence/lfg/evaluations/grades")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({
+                    "experimentId":"api-weighting", "variantId":"candidate", "outcomeId":outcome,
+                    "graderRunId":grader, "scores":{"correctness":score,"evidence":score,"completeness":score,"safety":score}
+                }).to_string())).unwrap();
+            assert_eq!(
+                json_response(app.clone(), request).await.0,
+                StatusCode::CREATED
+            );
+        }
+        let request = Request::builder()
+            .uri("/api/shippin/intelligence/lfg/evaluations/statistics?experimentId=api-weighting")
+            .body(Body::empty())
+            .unwrap();
+        let (status, result) = json_response(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        let stats = &result["variants"][0];
+        assert_eq!(stats["samples"], 2);
+        assert_eq!(stats["graderRuns"], 3);
+        assert_eq!(stats["independentGraders"], 0);
+        assert_eq!(stats["meanScore"], 0.5);
+        assert_eq!(stats["passRate"], 0.5);
+    }
 }
