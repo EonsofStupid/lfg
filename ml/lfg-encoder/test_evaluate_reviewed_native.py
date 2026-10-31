@@ -61,10 +61,13 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         self.artifact = self.root / 'artifact'
         self.artifact.mkdir()
         (self.artifact / 'model.onnx').write_bytes(b'fixture-not-a-real-onnx')
+        (self.artifact / 'labels.json').write_bytes((self.model / 'labels.json').read_bytes())
+        (self.artifact / 'taxonomy.json').write_bytes(self.taxonomy.read_bytes())
         onnx = {'schema_version': 'lfg.encoder-onnx-artifact.v2',
                 'source_artifact_sha256': predict_model.artifact_digest(self.model),
                 'taxonomy_sha256': audit['taxonomy_sha256'],
-                'files_sha256': {'model.onnx': native.file_hash(self.artifact / 'model.onnx')}}
+                'files_sha256': {name: native.file_hash(self.artifact / name)
+                                 for name in ('model.onnx', 'labels.json', 'taxonomy.json')}}
         (self.artifact / 'manifest.json').write_text(json.dumps(onnx))
         self.binary = self.root / 'binary'
         self.binary.write_bytes(b'fixture-not-a-real-binary')
@@ -94,8 +97,12 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
             model = identity
             process = SimpleNamespace(poll=lambda: None)
             def request_prediction(self, identifier, text):
-                return 0, {'id': identifier, 'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
-                           'intents': emitted, 'capabilities': [], 'risks': []}
+                value = {'id': identifier, 'input_sha256': hashlib.sha256(text.encode()).hexdigest(),
+                         'intents': emitted, 'capabilities': [], 'risks': []}
+                if '--include-scores' in arguments:
+                    value['scores'] = {'semantics': 'sigmoid-uncalibrated-v1',
+                                       'values': {'build': 0.9, 'write': 0.1, 'sensitive': 0.1}}
+                return 0, value
             def close(self):
                 pass
         return Predictor()
@@ -151,6 +158,36 @@ class ReviewedNativeEvaluationTests(unittest.TestCase):
         with patch.object(benchmark_persistent, 'Predictor', side_effect=wrong):
             with self.assertRaisesRegex(ValueError, 'identity digest'):
                 self.compare()
+
+    def test_optional_calibration_uses_native_scores_and_stays_ineligible(self):
+        prediction = self.artifact / 'prediction-config.json'
+        prediction.write_text(json.dumps({'schema_version': 'lfg.encoder-prediction-config.v1',
+                                          'default_threshold': 0.5, 'label_thresholds': {},
+                                          'batch_size': 1, 'cpu_threads': 1, 'max_input_bytes': 1024}))
+        artifact_manifest = self.artifact / 'manifest.json'
+        value = json.loads(artifact_manifest.read_text())
+        value['prediction_config_sha256'] = native.file_hash(prediction)
+        value['files_sha256']['prediction-config.json'] = native.file_hash(prediction)
+        artifact_manifest.write_text(json.dumps(value))
+        config = Path(native.__file__).with_name('calibration.v1.json')
+        with patch.object(benchmark_persistent, 'Predictor', side_effect=self.fake_predictor):
+            report = native.compare(self.plan, self.root / 'train.jsonl', self.model, self.artifact,
+                                    self.binary, self.runtime, self.config, 'embedded', config)
+        self.assertFalse(report['promotion_eligible'])
+        self.assertEqual(report['calibration']['score_semantics'], 'sigmoid-uncalibrated-v1')
+        self.assertAlmostEqual(report['calibration']['labels']['build']['ece'], 0.1)
+        self.assertAlmostEqual(report['calibration']['labels']['write']['ece'], 0.9)
+        self.assertIsNone(report['performance_qualification'])
+
+    def test_rejects_reordered_artifact_labels_even_when_artifact_hash_is_updated(self):
+        labels = self.artifact / 'labels.json'
+        labels.write_text(json.dumps(['write', 'build', 'sensitive']))
+        path = self.artifact / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['files_sha256']['labels.json'] = native.file_hash(labels)
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'label order'):
+            self.compare()
 
 
 if __name__ == '__main__':

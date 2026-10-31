@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import benchmark_persistent
+import calibration
 import corpus_audit
 import evaluate
 import predict_model
@@ -103,12 +104,13 @@ def checked_artifact(directory: Path, source_digest: str, taxonomy_digest: str) 
 
 
 def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_dir: Path,
-            binary: Path, runtime_config: Path, benchmark_config: Path, mode: str) -> dict:
+            binary: Path, runtime_config: Path, benchmark_config: Path, mode: str,
+            calibration_config: Path | None = None) -> dict:
     if mode not in ('embedded', 'external'):
         raise ValueError('unsupported native artifact mode')
     config, config_hash = benchmark_persistent.load_config(benchmark_config)
     code_paths = [Path(__file__), Path(benchmark_persistent.__file__), Path(corpus_audit.__file__),
-                  Path(evaluate.__file__), Path(predict_model.__file__), Path(train.__file__)]
+                  Path(evaluate.__file__), Path(predict_model.__file__), Path(train.__file__), Path(calibration.__file__)]
     code_hashes = {path.name: file_hash(path) for path in code_paths}
     model_hash = predict_model.artifact_digest(model_dir)
     manifest = json.loads((model_dir / 'run-manifest.json').read_bytes())
@@ -118,7 +120,17 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
     label_file = json.loads((model_dir / 'labels.json').read_bytes())
     if not isinstance(label_file, list) or len(label_file) != len(set(label_file)) or set(label_file) != set.union(*taxonomy.values()):
         raise ValueError('trained model does not cover the complete evaluation taxonomy')
-    _, onnx_hash = checked_artifact(artifact_dir, model_hash, audit_report['taxonomy_sha256'])
+    onnx_manifest, onnx_hash = checked_artifact(artifact_dir, model_hash, audit_report['taxonomy_sha256'])
+    if (onnx_manifest['files_sha256'].get('labels.json') != file_hash(model_dir / 'labels.json')
+            or onnx_manifest['files_sha256'].get('taxonomy.json') != audit_report['taxonomy_sha256']):
+        raise ValueError('ONNX label order or taxonomy differs from the training artifacts')
+    edges = calibration_hash = decision = None
+    if calibration_config is not None:
+        edges, calibration_hash = calibration.load_config(calibration_config)
+        decision, decision_hash = predict_model.prediction_config(artifact_dir / 'prediction-config.json')
+        if (decision_hash != onnx_manifest.get('prediction_config_sha256')
+                or set(decision['label_thresholds']) - set.union(*taxonomy.values())):
+            raise ValueError('prediction thresholds differ from the native artifact or taxonomy')
     binary = binary.resolve(strict=True)
     binary_hash = file_hash(binary)
     runtime_hash = file_hash(runtime_config)
@@ -127,6 +139,8 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
     arguments = (['embedded-onnx-predict', '--runtime-config', str(runtime_config)] if mode == 'embedded'
                  else ['onnx-predict', '--artifact', str(artifact_dir), '--manifest-sha256', onnx_hash,
                        '--runtime-config', str(runtime_config)])
+    if calibration_config is not None:
+        arguments.append('--include-scores')
     processes = {}
     try:
         for name, args in (('baseline', ['baseline-predict']), ('candidate', arguments)):
@@ -150,6 +164,8 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
         if candidate.model.get('sha256') != hashlib.sha256(encoded).hexdigest():
             raise ValueError('native prediction identity digest is invalid')
         scores = {name: evaluate.score(rows, value, taxonomy) for name, value in predictions.items()}
+        calibrated_report = (calibration.calculate(rows, predictions['candidate'], taxonomy, decision, edges)
+                             if calibration_config is not None else None)
         support = {field: {label: {'positive': scores['candidate'][field]['labels'][label]['support'],
                                    'negative': len(rows) - scores['candidate'][field]['labels'][label]['support']}
                            for label in sorted(labels)} for field, labels in taxonomy.items()}
@@ -158,10 +174,11 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
                 or checked_artifact(artifact_dir, model_hash, audit_report['taxonomy_sha256'])[1] != onnx_hash
                 or {key: file_hash(path) for key, path in overrides.items()} != override_hashes
                 or {path.name: file_hash(path) for path in code_paths} != code_hashes
+                or (calibration_config is not None and file_hash(calibration_config) != calibration_hash)
                 or audited_test(plan_path, training_dataset, manifest)[0] != audit_report):
             raise ValueError('evaluation inputs changed during inference')
         return {'schema_version': 'lfg.reviewed-native-evaluation.v1', 'promotion_eligible': False,
-                'reason': 'calibration, performance qualification, and independent review remain separate',
+                'reason': 'promotion policy, performance qualification, and independent review remain separate',
                 'examples': len(rows), 'audit': audit_report, 'binary_sha256': binary_hash,
                 'source_artifact_sha256': model_hash, 'onnx_manifest_sha256': onnx_hash,
                 'runtime_config_sha256': runtime_hash, 'evaluation_config_sha256': config_hash,
@@ -171,7 +188,8 @@ def compare(plan_path: Path, training_dataset: Path, model_dir: Path, artifact_d
                 'python_version': platform.python_version(), 'logical_cpus': os.cpu_count(),
                 'models': {'baseline': baseline.model, 'candidate': candidate.model}, 'groups': scores,
                 'test_label_support': support,
-                'calibration': None, 'performance_qualification': None}
+                'calibration_config_sha256': calibration_hash,
+                'calibration': calibrated_report, 'performance_qualification': None}
     finally:
         for predictor in processes.values():
             predictor.close()
@@ -182,10 +200,11 @@ def main() -> None:
     for name in ('plan', 'training-dataset', 'model', 'artifact', 'binary', 'runtime-config', 'config', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--mode', choices=('embedded', 'external'), required=True)
+    parser.add_argument('--calibration-config', type=Path, help='optional explicit score-bin edges for uncalibrated ECE')
     args = parser.parse_args()
     try:
         result = compare(args.plan, args.training_dataset, args.model, args.artifact, args.binary,
-                         args.runtime_config, args.config, args.mode)
+                         args.runtime_config, args.config, args.mode, args.calibration_config)
         with args.output.open('x', encoding='utf-8') as output:
             json.dump(result, output, indent=2, sort_keys=True, allow_nan=False)
             output.write('\n')
