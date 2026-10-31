@@ -46,8 +46,9 @@ the review happened. The sample gate alone does not make a model promotion-ready
    requests, and security cases. Keep related examples together when splitting
    data to reduce leakage. Reserve an independently reviewed test set before
    training; do not use it to tune the model. `train.py` groups its development
-   split by the supplied `family` values; it cannot detect related records given
-   different family names or enforce a separate project-level test set.
+   split by the supplied `family` values only in development override mode. The
+   audited mode uses the plan's separate reviewed validation project; neither
+   mode can detect related records given different family names.
 3. Measure the Rust rule encoder on the same held-out examples. Compare per-label
    precision and recall, intent/capability macro F1, security recall, calibration,
    CPU latency, and memory. Define acceptable thresholds and the target hardware
@@ -56,9 +57,9 @@ the review happened. The sample gate alone does not make a model promotion-ready
    currently learn them.
 4. Train a candidate, export and benchmark it, then evaluate it independently
    against the baseline and the policy. The experimental evaluator below can
-   report classification errors, but ONNX export, CPU runtime integration,
-   calibration, independent-test qualification and promotion checks are still
-   missing. Keep the rule encoder in charge until those checks exist and pass.
+   report classification errors. ONNX export is experimental; CPU runtime
+   integration, calibration, independent-test qualification and promotion checks
+   are still missing. Keep the rule encoder in charge until those checks pass.
 
 For a local development smoke test on Windows, install Python 3.10 or newer,
 then from the repository root. Supply the full immutable commit for a test model
@@ -80,12 +81,17 @@ into the experiment. Without it, training requires the policy's minimum number
 of verified records and an audited project-separated plan with current review
 attestations for every train, validation, and test example. The input must
 exactly match its reviewed train partition and contain no unverified rows. See
-[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run
-requires at least two families and writes the seed, dataset hash, row IDs and
-family assignments to `split-manifest.json` in the ignored output directory.
-This family split is for development validation, not a final test: it is not
-stratified and can leave rare labels absent from one side. Reserve a separately
-reviewed, project-separated test set for final evaluation.
+[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run writes
+the seed, dataset hash, row IDs and family assignments to `split-manifest.json`
+in the ignored output directory. Development override requires at least two
+families.
+With `--allow-below-gate`, the family split is for development only and is not
+stratified. Without that override, the complete audited train partition trains
+the model and the separate audited validation partition selects checkpoints. The
+trainer rejects validation labels absent from the training partition instead of
+silently discarding them. A separate reviewed test project remains reserved for
+final evaluation and is not fed to the trainer. The audit still reads the test
+file; genuinely blinded evaluation needs independent access controls.
 
 ## Checkpointing and restart
 

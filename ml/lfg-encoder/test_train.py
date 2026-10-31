@@ -61,6 +61,14 @@ class DatasetGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two distinct families"):
             train.grouped_split([record(1, True), record(2, True)], 731)
 
+    def test_validation_cannot_silently_drop_a_label_absent_from_training(self):
+        training = [record(1, True)]
+        validation = [dict(record(2, True), risks=["sensitive-data"])]
+        with self.assertRaisesRegex(ValueError, "labels absent from the training partition"):
+            train.validate_validation_labels(training, validation)
+        training[0]["risks"] = ["sensitive-data"]
+        train.validate_validation_labels(training, validation)
+
     def test_run_manifest_prevents_overwrite_and_mismatched_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"

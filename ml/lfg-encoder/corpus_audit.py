@@ -183,6 +183,28 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
     return report
 
 
+def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load only the audited validation partition and bind it to the same audit."""
+    report = validate_training_corpus(records, plan_path)
+    raw_plan = plan_path.read_bytes()
+    if hashlib.sha256(raw_plan).hexdigest() != report["plan_sha256"]:
+        raise ValueError("plan changed during validation loading")
+    plan = json.loads(raw_plan)
+    validation = []
+    for source, evidence in zip(plan["sources"], report["sources"], strict=True):
+        if source["split"] != "validation":
+            continue
+        rows, digest = train.load_dataset(resolve(plan_path.parent, source["path"]))
+        if digest != evidence["sha256"]:
+            raise ValueError("validation source changed during loading")
+        validation.extend(rows)
+    if not validation:
+        raise ValueError("audited validation partition is empty")
+    if validate_training_corpus(records, plan_path) != report:
+        raise ValueError("audit inputs changed during validation loading")
+    return report, validation
+
+
 def assemble_training(plan_path: Path) -> tuple[bytes, dict[str, Any]]:
     """Build a train snapshot only when the audited input is unchanged and reviewed."""
     report, _ = audit(plan_path)
