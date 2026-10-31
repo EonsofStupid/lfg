@@ -1,0 +1,16 @@
+{
+  "lock_sha256": "85dfdbe37d6609cd7abdd9f07935d78d23fbde04163dc7d7eb2fe5d32a947e8f",
+  "installed_versions_sha256": "55047f2a9022ab8809abb65cf94e07a287fc49eb03fd71df2a5a69b7d98c73ff",
+  "allowed_extra": [
+    "pip"
+  ],
+  "installed_files_verified": false,
+  "locked_wheel_payload": {
+    "schema_version": "lfg.installed-wheel-payload.v1",
+    "files": 27325,
+    "bytes": 5107746248,
+    "payload_sha256": "78ebcf627ca3aeff25859eb26003b6432933d1f0fdf7604eb14a0801ef4fdeaf",
+    "excluded_wheel_records": 78,
+    "excluded_wheel_scripts": 3
+  }
+}

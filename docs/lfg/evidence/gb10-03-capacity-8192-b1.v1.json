@@ -1,0 +1,43 @@
+{
+  "schema_version": "lfg.model-runtime-probe.v1",
+  "model": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "manifest_sha256": "4a126906b3785c898995a2a78b0748ee84c14b3aeca157c9e943332cd61e22a6",
+    "files": 6
+  },
+  "taxonomy_sha256": "7e935b156e9eb56c5f00b7e68cbb2d0d77234f73cc8ac844abb460f19a2a9e9f",
+  "device": "cuda:0",
+  "torch": "2.11.0+cu130",
+  "cuda_runtime": "13.0",
+  "threads": 2,
+  "tokens": 8192,
+  "batch_size": 1,
+  "cuda_memory_fraction": 0.15,
+  "optimizer_step": true,
+  "optimizer_learning_rate": 5e-05,
+  "optimizer_weight_decay": 0.0,
+  "step_elapsed_seconds": 3.9793993891216815,
+  "seed": 731,
+  "output_shape": [
+    1,
+    13
+  ],
+  "finite": true,
+  "parameters": 149614861,
+  "peak_cuda_allocated_bytes": 9412456448,
+  "peak_cuda_reserved_bytes": 9669967872,
+  "cuda_device_name": "NVIDIA GB10",
+  "cgroup_limits": {
+    "memory.max": "30064771072",
+    "cpu.max": "400000 100000",
+    "pids.max": "256"
+  },
+  "generated_inputs_only": true,
+  "weights_saved": false,
+  "probe_sha256": "41c4d4b210b4d7d99899f5ae4fa2f551d4cdb435d992eed2cfcfa6833e184fc5",
+  "model_verifier_sha256": "b3f1dd0068bed83f4be63c612545afa41e2c98d31d1bb2f3224c66a9b88836c5",
+  "taxonomy_loader_sha256": "e15dabe6554e6ab7e84e1f295055871f8fb8efbc3ab5d2d9f05583d44a48f3b5",
+  "quality_evidence": false,
+  "promotion_eligible": false
+}
