@@ -133,6 +133,7 @@ Check the actual private workspaces without creating an output:
 ```powershell
 python ml/lfg-encoder/combine_reviewed_workspaces.py `
   --workspace ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
   --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
   --workspace ml/lfg-encoder/dataset/private/makers-heldout-review-draft.v4/workspace `
   --status
@@ -150,10 +151,9 @@ snapshot before it meets the training sample and label-support gates; it does
 not bypass those gates or mark the snapshot promotable. Audit currently reads the
 test records and therefore does not enforce a blinded holdout.
 
-On 2026-10-31 the status for these three workspaces was 226 train, 35 validation
-and 785 test records, all pending. The default policy required 500 reviewed
-training records: at least 274 additional candidates are needed even if every
-current training candidate is approved. Assembly correctly rejected the current
+On 2026-10-31 a status check before the additional training inventory found 226
+train, 35 validation and 785 test records, all pending. The default policy
+required 500 reviewed training records. Assembly correctly rejected those
 workspaces without creating an output. A test-only fixture exercised approved
 records through the combined plan and the existing training/validation audit;
 that fixture is not human-reviewed data or quality evidence.
@@ -292,6 +292,10 @@ are configurable with `--max-session-bytes` and `--max-line-bytes`. Output is
 created exclusively. The last command intentionally prints private text: use it
 only in a private terminal. Paths, line numbers and hashes in the inventory are
 also sensitive. Git ignore is not encryption or access control.
+Add `--exact-cwd` to select only sessions whose recorded working directory is
+exactly one of the supplied roots; without it, descendant directories match too.
+The recorded directory and message marker are source metadata, not proof of
+authorship or authorization.
 
 To prepare a separate review workspace, provide an assignments JSON file that
 explicitly chooses a group and provisional split for every included project:
@@ -384,6 +388,28 @@ project independence still need review. The combined audit does not create a
 training plan or qualify a model. The metadata-only inventory is stored at
 `dataset/private/additional-project-session-inventory.v1.jsonl` and its explicit
 candidate assignment at `dataset/private/onemanwho-validation-assignments.v1.json`.
+
+Another exact-directory inventory across selected authorized local project
+roots found 371 candidate messages in 29 sessions. The preparation step checked
+them against the initial training draft, OneManWho validation candidate, Makers
+test candidate and earlier development plan: 34 records matched reference text
+and 43 further normalized duplicates were excluded. The private workspace
+`dataset/private/additional-training-review-draft.v1/workspace` contains 294
+pending unlabeled messages. All selected projects were conservatively placed in
+the same `related-local-projects` training group as the initial draft. A second
+preparation with the same inputs produced byte-identical files on this machine.
+The corresponding private inventory and assignments are
+`dataset/private/additional-exact-training-inventory.v1.jsonl` and
+`dataset/private/additional-exact-training-assignments.v1.json`.
+
+Including this workspace, a temporary combined audit found 520 provisional
+train, 35 validation and 785 test records, no normalized exact-text duplicates
+within or across splits, and zero approvals. The default 500-example threshold
+is a minimum for reviewed training records, not a target quality guarantee: 520
+is only a candidate ceiling, and rejection, incomplete requests, related
+follow-ups, privacy redaction, source permission or label coverage can reduce
+the usable set. The OneManWho validation set still comes from one session. A
+separate diverse, reviewed validation set and genuine review remain necessary.
 
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse

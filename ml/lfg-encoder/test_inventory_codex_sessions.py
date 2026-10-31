@@ -18,6 +18,25 @@ inspect_spec.loader.exec_module(inspect_module)
 
 
 class SessionInventoryTests(unittest.TestCase):
+    def test_exact_cwd_excludes_nested_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            project = base / 'project'
+            nested = project / 'nested'
+            nested.mkdir(parents=True)
+            sessions = base / 'sessions'
+            sessions.mkdir()
+            for name, cwd in (('root', project), ('nested', nested)):
+                rows = [{'type': 'session_meta', 'payload': {'cwd': str(cwd)}},
+                        self.message(f'{name} request', ['user.text'])]
+                (sessions / f'{name}.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+            roots = {'project': module.normalize(str(project))}
+            self.assertEqual(module.inventory(sessions, roots, 100000, 100000)[0]['candidate_messages'], 2)
+            summary, rows = module.inventory(sessions, roots, 100000, 100000, exact_cwd=True)
+            self.assertEqual(summary['candidate_messages'], 1)
+            self.assertEqual(summary['file_status']['outside_scope'], 1)
+            self.assertEqual(rows[0]['text_sha256'], hashlib.sha256(b'root request').hexdigest())
+
     def test_only_explicit_user_text_in_selected_project_is_inventoried(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
