@@ -35,7 +35,7 @@ fn review_queue_uses_verified_source_without_fabricating_labels() {
     let source = dir.path().join("source.jsonl");
     let queue = dir.path().join("queue.jsonl");
     let mut child = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
-        .args(["kernel-predict", "--max-examples", "2", "--journal"])
+        .args(["kernel-predict", "--max-examples", "3", "--journal"])
         .arg(&journal)
         .args(["--journal-max-bytes", "100000"])
         .stdin(Stdio::piped())
@@ -43,7 +43,7 @@ fn review_queue_uses_verified_source_without_fabricating_labels() {
         .spawn()
         .unwrap();
     let records =
-        b"{\"id\":\"a\",\"text\":\"unmatched fixture\"}\n{\"id\":\"b\",\"text\":\"run command\"}\n";
+        b"{\"id\":\"a\",\"text\":\"unmatched fixture\"}\n{\"id\":\"b\",\"text\":\"run command\"}\n{\"id\":\"c\",\"text\":\"logout run\"}\n";
     child.stdin.take().unwrap().write_all(records).unwrap();
     assert!(child.wait().unwrap().success());
     std::fs::write(&source, records).unwrap();
@@ -78,19 +78,21 @@ fn review_queue_uses_verified_source_without_fabricating_labels() {
     );
     assert!(!String::from_utf8_lossy(&result.stdout).contains("unmatched fixture"));
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(report["items"], 2);
+    assert_eq!(report["items"], 3);
     assert_eq!(report["baselineSelected"], 1);
-    assert_eq!(report["baselineUnselected"], 1);
+    assert_eq!(report["baselineUnselected"], 2);
     let rows: Vec<serde_json::Value> = std::fs::read_to_string(&queue)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["status"], "pending_review");
     assert_eq!(rows[0]["options"], serde_json::json!(["chat", "tool_call"]));
     assert!(rows[0]["baselineChoice"].is_null());
     assert_eq!(rows[1]["baselineChoice"], "tool_call");
+    assert_eq!(rows[2]["baselineState"], "escalate");
+    assert!(rows[2]["baselineChoice"].is_null());
     assert!(rows.iter().all(|row| row["reviewedChoice"].is_null()
         && row["reviewer"].is_null()
         && row["project"].is_null()
@@ -122,7 +124,7 @@ fn review_queue_uses_verified_source_without_fabricating_labels() {
     let result = invoke(&second, "100000", true);
     assert!(result.status.success());
     let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(report["items"], 1);
+    assert_eq!(report["items"], 2);
     assert_eq!(report["alreadyCorrected"], 1);
 }
 

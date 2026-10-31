@@ -103,6 +103,11 @@ and tool hashes plus Python and Unicode versions; these hashes identify the
 bytes used, not their trustworthiness. Filesystem checks do not protect against
 hostile concurrent changes.
 
+The separate [node validation runner](NODE-VALIDATION.md) can evaluate admitted
+validation decisions against the selected deterministic kernel binary, and can
+compare supplied candidate predictions on escalations. It does not train or
+execute a candidate model.
+
 ## Actual local state
 
 On 2026-10-31, a private pending ledger was initialized from the existing 11
