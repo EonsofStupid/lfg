@@ -7,6 +7,7 @@ $settings = Get-Content -Raw -LiteralPath $Config | ConvertFrom-Json
 if ($settings.schema_version -ne 'lfg.isolated-runner-supervisor.v1' -or
     $settings.repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
     $settings.runner_label -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$' -or
+    $settings.runner_label -in @('self-hosted', 'linux', 'windows', 'macos', 'x64', 'arm64') -or
     $settings.image -notmatch '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$' -or
     $settings.runner_group_id -lt 1 -or $settings.cpus -lt 1 -or $settings.memory_mib -lt 1 -or
     $settings.pids_limit -lt 1 -or $settings.cargo_jobs -lt 1 -or $settings.retry_seconds -lt 1) {
@@ -17,7 +18,7 @@ while ($true) {
     $runnerName = 'lfg-jit-' + [guid]::NewGuid().ToString('N')
     $runnerId = $null
     $request = @{name = $runnerName; runner_group_id = [int]$settings.runner_group_id;
-                 labels = @('self-hosted', [string]$settings.runner_label); work_folder = '_work'} | ConvertTo-Json -Compress
+                 labels = @([string]$settings.runner_label); work_folder = '_work'} | ConvertTo-Json -Compress
     try {
         $response = $request | & gh api --method POST ("repos/$($settings.repository)/actions/runners/generate-jitconfig") --input -
         if ($LASTEXITCODE -ne 0) { throw 'GitHub runner registration failed.' }
