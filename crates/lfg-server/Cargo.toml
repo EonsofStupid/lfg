@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+embedded-ui = []
+onnx-shadow = ["dep:tract", "dep:tokenizers"]
+embedded-onnx = ["onnx-shadow"]
+
 [[bin]]
 name = "lfg-server"
 path = "src/main.rs"
@@ -19,11 +24,22 @@ clap.workspace = true
 lfg-core = { path = "../lfg-core" }
 lfg-codex = { path = "../lfg-codex" }
 lfg-runtime = { path = "../lfg-runtime" }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
+tract = { version = "=0.23.9", default-features = false, features = ["onnx"], optional = true }
+tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"], optional = true }
 
 [dev-dependencies]
 tower.workspace = true
+tempfile = "3"
+
+[build-dependencies]
+sha2.workspace = true

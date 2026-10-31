@@ -1,0 +1,10 @@
+{
+  "schema_version": "lfg.process-benchmark-config.v1",
+  "warmup_runs": 1,
+  "measured_runs": 5,
+  "repetitions": 1000,
+  "max_records": 1000,
+  "max_dataset_bytes": 10485760,
+  "max_batch_bytes": 16777216,
+  "timeout_seconds": 60
+}

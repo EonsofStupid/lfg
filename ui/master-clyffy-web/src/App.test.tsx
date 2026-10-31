@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
 
@@ -8,30 +8,150 @@ vi.mock('pixi.js', () => ({
 }))
 
 const preflight = {
-  schemaVersion: 'lfg.preflight.v1', sessionId: 'test', revision: 1, mode: 'cpu-rule-baseline',
+  schemaVersion: 'lfg.preflight.v2', sessionId: 'test', revision: 1, mode: 'cpu-rule-baseline',
   model: { id: 'lfg-cpu-rule-baseline', version: '1.0.0', sha256: 'a'.repeat(64) }, durationMicros: 85,
-  intents: [{ label: 'research.web', confidence: .92, source: 'cpu-rule' }], capabilities: [], risks: [],
-  rros: [{ id: 'rro-1', confidence: .92, advisory: true, lineage: ['test'], category: { id: 'research.web', version: '1.0.0', label: 'EVIDENCE', plainLabel: 'Research current evidence', capability: 'web.access', tone: 'cyan', hash: 'b'.repeat(64) } }],
-  predictedAgents: 3, predictedBranches: 2, confidence: .92, abstained: false
+  intents: [{ label: 'research.web', confidence: null, source: 'cpu-rule' }], capabilities: [], risks: [],
+  rros: [{ id: 'rro-1', confidence: null, advisory: true, lineage: ['test'], category: { id: 'research.web', version: '1.0.0', label: 'EVIDENCE', plainLabel: 'Research current evidence', capability: 'web.access', tone: 'cyan', hash: 'b'.repeat(64) } }],
+  predictedAgents: 3, predictedBranches: 2, confidence: null, abstained: true
 }
 
+const classification = {
+  schemaVersion: 'lfg.classification.v1', configRevision: 'test', configDigest: 'c'.repeat(64),
+  sessionId: 'test', revision: 1, durationMicros: 85, tokenEstimate: 8, categories: [],
+  needsBiggerModel: false, predictedSubagents: 1, routingNeed: 'balanced', project: 'test',
+  recommendedEscalation: null, escalationCatalog: [{ active: false, target: {
+    provider: 'example', model: 'example-model', role: 'test', rawCapability: 0.5,
+    toolLoopEfficiency: 0.5, costTier: 'low', subscriptionId: 'project-seat',
+    strengths: [], effortLevels: [], evidence: { source: 'fixture', basis: 'synthetic', observedAt: 'test' }
+  } }]
+}
+let appContext: { schemaVersion: string; status: string; revision: string | null; pollIntervalMs: number | null; providers: unknown[] | null }
 beforeEach(() => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'disabled', revision: null, pollIntervalMs: null, providers: null}
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session' })
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
-    if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4 }))
+    if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2, devTools: { statsEnabled: true, traceCapacity: 8, statsPollIntervalMs: 1000, debounceMinMs: 5, debounceMaxMs: 80, historyMinSamples: 1, historyMaxSamples: 8 } } }))
     if (path.endsWith('/preflight')) return new Response(JSON.stringify(preflight))
+    if (path.endsWith('/classify')) return new Response(JSON.stringify({ ...classification, revision: JSON.parse(String(init?.body)).revision }))
+    if (path.endsWith('/intake/app-context')) return new Response(JSON.stringify(appContext))
+    if (path.endsWith('/intake/preview')) {
+      const body = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({schemaVersion: 'lfg.intake-preview.v1', templateRevision: 'test', templateDigest: 'e'.repeat(64), sourceApp: body.sourceApp, missingRequired: 1,
+        answers: [{id: 'user_request', question: 'What is the user asking to do?', required: true, status: body.facts.request.text ? 'filled' : 'missing', value: body.facts.request.text || null}]}))
+    }
+    if (path.endsWith('/dev-stats')) return new Response(JSON.stringify({schemaVersion: 'lfg.dev-stats.v1', enabled: true, capacity: 8, totalRecorded: 1, evicted: 0, cpuTimeMicros: null, operationsDigest: 'd'.repeat(64), encoderDigest: 'a'.repeat(64), classifierDigest: 'c'.repeat(64), summaries: [{operation: 'preflight', samples: 1, errors: 0, p50TotalMicros: 100, p95TotalMicros: 100}], traces: [{sequence: 1, recordedAt: '2026-01-01T00:00:00Z', operation: 'preflight', outcome: 'ok', totalMicros: 100, queueMicros: 10, workMicros: 80}]}))
     return new Response('{}', { status: 404 })
   }))
 })
 
-afterEach(() => vi.unstubAllGlobals())
+test('uses the live host roster and preserves qualified capabilities in intake', async () => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'ready', revision: 'host-test', pollIntervalMs: 5000,
+    providers: [{id: 'provider-id', activated: true, capabilities: ['read-sessions']}]}
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText(/Activation can mean history-only access/)).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => {
+    if (!String(url).endsWith('/intake/preview')) return false
+    const facts = JSON.parse(String(init?.body)).facts
+    return facts.providers?.[0]?.id === 'provider-id' && facts.providers[0].capabilities.includes('read-sessions')
+  })).toBe(true))
+})
 
-test('shows measured CPU predictions separately from committed tallies', async () => {
+test('does not replace unavailable host facts with declared subscription availability', async () => {
+  appContext = {schemaVersion: 'lfg.app-context.v1', status: 'unavailable', revision: 'host-test', pollIntervalMs: 5000, providers: null}
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText(/DevPulse context is unavailable/)).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => {
+    if (!String(url).endsWith('/intake/preview')) return false
+    const facts = JSON.parse(String(init?.body)).facts
+    return facts.request?.text === 'Implement my feature and run tests' && !('providers' in facts)
+  })).toBe(true))
+})
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+function enterPrompt(value = 'Implement my feature and run tests') {
+  fireEvent.change(screen.getByRole('textbox', { name: 'Prompt to route' }), { target: { value } })
+}
+
+test('shows measured elapsed time separately from committed tallies', async () => {
   render(<App />)
   expect(screen.getByRole('heading', { name: /watch a team compile itself/i })).toBeInTheDocument()
-  await waitFor(() => expect(screen.getByText('0.085ms')).toBeInTheDocument())
+  expect(screen.getByRole('textbox', { name: 'Prompt to route' })).toHaveValue('')
+  enterPrompt()
+  await waitFor(() => expect(screen.getByText('0.085 ms elapsed')).toBeInTheDocument())
   expect(screen.getByText('3')).toBeInTheDocument()
-  expect(screen.getByText(/nothing has been committed/i)).toBeInTheDocument()
+  expect(screen.getByText('Committed')).toBeInTheDocument()
+})
+
+test('uses configured subscription IDs instead of a built-in provider roster', async () => {
+  render(<App />)
+  enterPrompt()
+  const configured = await screen.findByRole('button', { name: 'project-seat' })
+  expect(screen.queryByRole('button', { name: 'Claude' })).not.toBeInTheDocument()
+  fireEvent.click(configured)
+  await waitFor(() => expect(configured).toHaveClass('is-active'))
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+    String(url).endsWith('/classify') && JSON.parse(String(init?.body)).activeSubscriptions.includes('project-seat')
+  )).toBe(true))
+})
+
+test('uses the configured UTF-8 byte limit for multibyte input', async () => {
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  const prompt = screen.getByRole('textbox', { name: 'Prompt to route' })
+  fireEvent.change(prompt, { target: { value: 'é'.repeat(61) } })
+  expect(screen.getByText('122 / 120 UTF-8 bytes')).toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('exceeds the configured UTF-8 byte limit')
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).toBeDisabled()
+  expect(prompt).toHaveAttribute('aria-invalid', 'true')
+  fireEvent.change(prompt, { target: { value: 'é'.repeat(60) } })
+  expect(screen.getByText('120 / 120 UTF-8 bytes')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).not.toBeDisabled()
+})
+
+test('schedules analysis using the server-configured debounce', async () => {
+  const timer = vi.spyOn(window, 'setTimeout')
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  expect(timer.mock.calls.some(([, delay]) => delay === 10)).toBe(true)
+})
+
+test('does not send prompts when server configuration is incompatible', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ phase: 'old-server' }))))
+  render(<App />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Server operational configuration is missing or incompatible')
+  expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).toBeDisabled()
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).endsWith('/status'))).toBe(true)
+})
+
+test('shows local traces and applies browser-only tuning', async () => {
+  const timer = vi.spyOn(window, 'setTimeout')
+  const { container } = render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  await waitFor(() => expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1))
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(await screen.findByText('Implement my feature and run tests')).toBeInTheDocument()
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+    String(url).endsWith('/intake/preview') && JSON.parse(String(init?.body)).facts.request.text === 'Implement my feature and run tests'
+  )).toBe(true))
+  expect(await screen.findByText(/1 traces recorded/)).toHaveTextContent('CPU time unavailable')
+  expect(screen.getByText('0.010 ms')).toBeInTheDocument()
+  fireEvent.change(screen.getByRole('slider', { name: 'Browser debounce' }), { target: { value: '25' } })
+  await waitFor(() => expect(timer.mock.calls.some(([, delay]) => delay === 25)).toBe(true))
+  fireEvent.change(screen.getByRole('slider', { name: 'Displayed history' }), { target: { value: '3' } })
+  expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1)
+  expect(screen.getByText(/server configuration is unchanged/i)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Use server defaults' }))
+  expect(screen.getByRole('slider', { name: 'Browser debounce' })).toHaveValue('10')
 })

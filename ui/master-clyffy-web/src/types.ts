@@ -1,6 +1,6 @@
 export type ManifestRef = { id: string; version: string; sha256: string }
 
-export type Prediction = { label: string; confidence: number; source: string }
+export type Prediction = { label: string; confidence: number | null; source: string }
 
 export type RroCategory = {
   id: string
@@ -15,7 +15,7 @@ export type RroCategory = {
 export type ReasonReadyObject = {
   id: string
   category: RroCategory
-  confidence: number
+  confidence: number | null
   advisory: boolean
   lineage: string[]
 }
@@ -33,7 +33,7 @@ export type PreflightSnapshot = {
   rros: ReasonReadyObject[]
   predictedAgents: number
   predictedBranches: number
-  confidence: number
+  confidence: number | null
   abstained: boolean
 }
 
@@ -91,6 +91,9 @@ export type EscalationTarget = {
   toolLoopEfficiency: number
   costTier: 'low' | 'medium' | 'high' | string
   subscriptionId: string
+  strengths: string[]
+  effortLevels: string[]
+  evidence: { source: string; basis: string; observedAt: string }
 }
 
 export type EscalationCandidate = { target: EscalationTarget; active: boolean }
@@ -99,6 +102,8 @@ export type RoutingNeed = 'balanced' | 'capability' | 'efficiency' | 'cost'
 
 export type ClassificationSnapshot = {
   schemaVersion: string
+  configRevision: string
+  configDigest: string
   sessionId: string
   revision: number
   durationMicros: number
@@ -123,4 +128,58 @@ export type RuntimeStatus = {
   liveProviders: number
   configuredProviders: number
   fixtureProviders: number
+  operationsDigest: string
+  operations: {
+    schemaVersion: string
+    revision: string
+    maxPromptBytes: number
+    maxHttpBodyBytes: number
+    defaultSignalPageSize: number
+    maxSignalPageSize: number
+    eventBufferCapacity: number
+    streamKeepaliveSeconds: number
+    uiDebounceMs: number
+    uiTimingHistorySamples: number
+    devTools?: {
+      statsEnabled: boolean
+      traceCapacity: number
+      statsPollIntervalMs: number
+      debounceMinMs: number
+      debounceMaxMs: number
+      historyMinSamples: number
+      historyMaxSamples: number
+    }
+  }
+}
+
+export type DevStats = {
+  schemaVersion: string
+  enabled: boolean
+  capacity: number
+  totalRecorded: number
+  evicted: number
+  cpuTimeMicros: number | null
+  operationsDigest: string
+  encoderDigest: string
+  classifierDigest: string
+  summaries: Array<{ operation: 'preflight' | 'classification'; samples: number; errors: number; p50TotalMicros: number | null; p95TotalMicros: number | null }>
+  traces: Array<{ sequence: number; recordedAt: string; operation: string; outcome: string; totalMicros: number; queueMicros: number | null; workMicros: number | null }>
+}
+
+export type IntakePreview = {
+  schemaVersion: 'lfg.intake-preview.v1'
+  templateRevision: string
+  templateDigest: string
+  sourceApp: string
+  missingRequired: number
+  answers: Array<{ id: string; question: string; required: boolean; status: 'filled' | 'missing' | 'invalid'; value: unknown }>
+}
+
+export type AppContext = {
+  schemaVersion: 'lfg.app-context.v1'
+  status: 'disabled' | 'ready' | 'unavailable'
+  revision: string | null
+  configDigest?: string | null
+  pollIntervalMs: number | null
+  providers: Array<{ id: string; activated: boolean; capabilities: string[] }> | null
 }

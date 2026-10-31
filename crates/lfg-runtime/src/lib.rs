@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -252,26 +252,258 @@ pub struct RuntimeStatus {
     pub live_providers: usize,
     pub configured_providers: usize,
     pub fixture_providers: usize,
+    pub operations: OperationsConfig,
+    pub operations_digest: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationsConfig {
+    schema_version: String,
+    revision: String,
+    default_listen_address: String,
+    benchmark_default_iterations: usize,
+    benchmark_max_iterations: usize,
+    max_prompt_bytes: usize,
+    max_http_body_bytes: usize,
+    default_signal_page_size: usize,
+    max_signal_page_size: usize,
+    event_buffer_capacity: usize,
+    stream_keepalive_seconds: u64,
+    ui_debounce_ms: u32,
+    ui_timing_history_samples: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dev_tools: Option<DevToolsConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevToolsConfig {
+    pub stats_enabled: bool,
+    pub trace_capacity: u32,
+    pub stats_poll_interval_ms: u32,
+    pub debounce_min_ms: u32,
+    pub debounce_max_ms: u32,
+    pub history_min_samples: u32,
+    pub history_max_samples: u32,
+}
+
+impl OperationsConfig {
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let value: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if value.schema_version != "lfg.operations.v1"
+            || value.revision.trim().is_empty()
+            || value
+                .default_listen_address
+                .parse::<std::net::SocketAddr>()
+                .is_err()
+            || value.benchmark_default_iterations == 0
+            || value.benchmark_max_iterations < value.benchmark_default_iterations
+            || value.max_prompt_bytes == 0
+            || value.max_http_body_bytes < value.max_prompt_bytes
+            || value.default_signal_page_size == 0
+            || value.max_signal_page_size < value.default_signal_page_size
+            || value.event_buffer_capacity == 0
+            || value
+                .event_buffer_capacity
+                .checked_next_power_of_two()
+                .is_none_or(|n| n > isize::MAX as usize)
+            || value.stream_keepalive_seconds == 0
+            || value.stream_keepalive_seconds > 9_007_199_254_740_991u64
+            || value.ui_debounce_ms == 0
+            || value.ui_debounce_ms > i32::MAX as u32
+            || value.ui_timing_history_samples == 0
+            || std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(
+                    value.stream_keepalive_seconds,
+                ))
+                .is_none()
+            || [
+                value.benchmark_default_iterations,
+                value.benchmark_max_iterations,
+                value.max_prompt_bytes,
+                value.max_http_body_bytes,
+                value.default_signal_page_size,
+                value.max_signal_page_size,
+                value.event_buffer_capacity,
+            ]
+            .iter()
+            .any(|n| (*n as u128) > 9_007_199_254_740_991u128)
+        {
+            return Err("invalid operational configuration".into());
+        }
+        if let Some(dev) = &value.dev_tools
+            && (dev.trace_capacity == 0
+                || dev.stats_poll_interval_ms == 0
+                || dev.stats_poll_interval_ms > i32::MAX as u32
+                || dev.debounce_min_ms == 0
+                || dev.debounce_max_ms > i32::MAX as u32
+                || !(dev.debounce_min_ms..=dev.debounce_max_ms).contains(&value.ui_debounce_ms)
+                || dev.history_min_samples == 0
+                || !(dev.history_min_samples..=dev.history_max_samples)
+                    .contains(&value.ui_timing_history_samples))
+        {
+            return Err("invalid development tools configuration".into());
+        }
+        Ok(value)
+    }
+
+    pub fn max_prompt_bytes(&self) -> usize {
+        self.max_prompt_bytes
+    }
+    pub fn default_listen_address(&self) -> std::net::SocketAddr {
+        self.default_listen_address
+            .parse()
+            .expect("validated listen address")
+    }
+    pub fn benchmark_default_iterations(&self) -> usize {
+        self.benchmark_default_iterations
+    }
+    pub fn benchmark_max_iterations(&self) -> usize {
+        self.benchmark_max_iterations
+    }
+    pub fn max_http_body_bytes(&self) -> usize {
+        self.max_http_body_bytes
+    }
+    pub fn default_signal_page_size(&self) -> usize {
+        self.default_signal_page_size
+    }
+    pub fn max_signal_page_size(&self) -> usize {
+        self.max_signal_page_size
+    }
+    pub fn event_buffer_capacity(&self) -> usize {
+        self.event_buffer_capacity
+    }
+    pub fn stream_keepalive_seconds(&self) -> u64 {
+        self.stream_keepalive_seconds
+    }
+
+    pub fn dev_tools(&self) -> Option<&DevToolsConfig> {
+        self.dev_tools.as_ref()
+    }
+
+    pub fn validate_prompt(&self, session_id: &str, text: &str) -> Result<(), RuntimeError> {
+        if session_id.trim().is_empty()
+            || text.trim().is_empty()
+            || text.len() > self.max_prompt_bytes
+        {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "sessionId and nonempty text of at most {} UTF-8 bytes are required",
+                self.max_prompt_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for OperationsConfig {
+    fn default() -> Self {
+        Self::from_json_str(include_str!("../config/operations.v1.json"))
+            .expect("bundled operational configuration is valid")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInventoryConfig {
+    schema_version: String,
+    revision: String,
+    providers: Vec<ProviderTarget>,
+}
+
+impl ProviderInventoryConfig {
+    pub fn from_json_str(text: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if config.schema_version != "lfg.provider-inventory.v1" || config.revision.trim().is_empty()
+        {
+            return Err("invalid provider inventory schema or revision".into());
+        }
+        let mut ids = BTreeSet::new();
+        for p in &config.providers {
+            let fields = [
+                &p.target_id,
+                &p.display_name,
+                &p.provider,
+                &p.adapter_id,
+                &p.model,
+            ];
+            if fields.iter().any(|value| value.trim().is_empty())
+                || !ids.insert(&p.target_id)
+                || p.capabilities.iter().any(|value| value.trim().is_empty())
+                || !matches!(
+                    (p.provenance.as_str(), p.availability.as_str()),
+                    ("configured", "configured") | ("fixture", "replay-only")
+                )
+            {
+                return Err("invalid provider inventory entry".into());
+            }
+        }
+        Ok(config)
+    }
+}
+
+impl Default for ProviderInventoryConfig {
+    fn default() -> Self {
+        Self::from_json_str(include_str!("../config/providers.v1.json"))
+            .expect("bundled provider inventory is valid")
+    }
 }
 
 pub struct LfgRuntime<S, E = CpuRuleEncoder> {
     store: S,
     encoder: E,
     providers: Vec<ProviderTarget>,
+    rubric: EvaluationRubric,
+    promotion_policy: PromotionPolicy,
+    operations: OperationsConfig,
+    operations_digest: String,
 }
 
 impl<S: SignalStore> LfgRuntime<S, CpuRuleEncoder> {
     pub fn new(store: S) -> Self {
-        Self::with_encoder(store, CpuRuleEncoder)
+        Self::with_encoder(store, CpuRuleEncoder::default())
     }
 }
 
 impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     pub fn with_encoder(store: S, encoder: E) -> Self {
+        Self::with_encoder_and_inventory(store, encoder, ProviderInventoryConfig::default())
+    }
+
+    pub fn with_encoder_and_inventory(
+        store: S,
+        encoder: E,
+        inventory: ProviderInventoryConfig,
+    ) -> Self {
+        Self::with_configuration(
+            store,
+            encoder,
+            inventory,
+            EvaluationRubric::default_alpha(),
+            PromotionPolicy::default_alpha(),
+            OperationsConfig::default(),
+        )
+    }
+
+    pub fn with_configuration(
+        store: S,
+        encoder: E,
+        inventory: ProviderInventoryConfig,
+        rubric: EvaluationRubric,
+        promotion_policy: PromotionPolicy,
+        operations: OperationsConfig,
+    ) -> Self {
+        let operations_digest = lfg_core::digest_value(
+            &serde_json::to_value(&operations).expect("operations serialize"),
+        );
         Self {
             store,
             encoder,
-            providers: default_provider_targets(),
+            providers: inventory.providers,
+            rubric,
+            promotion_policy,
+            operations,
+            operations_digest,
         }
     }
 
@@ -284,6 +516,8 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             encoder: self.encoder.manifest(),
             signal_mode: "validated append-only hash-chain",
             content_policy: "raw prompts are process-memory-only",
+            operations: self.operations.clone(),
+            operations_digest: self.operations_digest.clone(),
             live_providers: self
                 .providers
                 .iter()
@@ -314,14 +548,8 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn preflight(&self, request: &PreflightRequest) -> Result<PreflightSnapshot, RuntimeError> {
-        if request.session_id.trim().is_empty()
-            || request.text.trim().is_empty()
-            || request.text.len() > 12_000
-        {
-            return Err(RuntimeError::InvalidRequest(
-                "sessionId and 1-12000 characters of text are required".into(),
-            ));
-        }
+        self.operations
+            .validate_prompt(&request.session_id, &request.text)?;
         Ok(self.encoder.encode(request))
     }
 
@@ -365,7 +593,11 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
                 let Some(task) = plan.tasks.iter().find(|task| task.agent_id == agent.id) else {
                     continue;
                 };
-                let target = select_target(&self.providers, &task.required_capabilities, index);
+                let Some(target) =
+                    select_target(&self.providers, &task.required_capabilities, index)
+                else {
+                    continue;
+                };
                 let attempt_id = format!("attempt-{}", Uuid::new_v4());
                 let mut binding = ProviderBinding {
                     id: format!("binding-{}", Uuid::new_v4()),
@@ -522,7 +754,7 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
             .workflow(workflow_id)?
             .into_iter()
             .filter(|signal| signal.data.sequence > after_sequence)
-            .take(limit.clamp(1, 500))
+            .take(limit.clamp(1, self.operations.max_signal_page_size))
             .collect())
     }
 
@@ -539,11 +771,11 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn rubric(&self) -> EvaluationRubric {
-        EvaluationRubric::default_alpha()
+        self.rubric.clone()
     }
 
     pub fn promotion_policy(&self) -> PromotionPolicy {
-        PromotionPolicy::default_alpha()
+        self.promotion_policy.clone()
     }
 
     pub fn record_grade(
@@ -551,6 +783,14 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
         request: SemanticGradeRequest,
     ) -> Result<SemanticGrade, RuntimeError> {
         let existing = self.grades(Some(&request.experiment_id))?;
+        if existing
+            .iter()
+            .any(|grade| grade.rubric.sha256 != self.rubric.hash)
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "experiment contains grades from another rubric revision".into(),
+            ));
+        }
         if existing.iter().any(|grade| {
             grade.outcome_id == request.outcome_id && grade.grader_run_id == request.grader_run_id
         }) {
@@ -590,10 +830,16 @@ impl<S: SignalStore, E: PreflightEncoder> LfgRuntime<S, E> {
     }
 
     pub fn statistics(&self, experiment_id: &str) -> Result<ExperimentStatistics, RuntimeError> {
-        Ok(experiment_statistics(
-            experiment_id,
-            &self.grades(Some(experiment_id))?,
-        ))
+        let grades = self.grades(Some(experiment_id))?;
+        if grades
+            .iter()
+            .any(|grade| grade.rubric.sha256 != self.rubric.hash)
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "experiment contains grades from another rubric revision".into(),
+            ));
+        }
+        Ok(experiment_statistics(experiment_id, &grades))
     }
 
     pub fn decide_promotion(
@@ -795,87 +1041,21 @@ fn select_target(
     providers: &[ProviderTarget],
     required: &[String],
     offset: usize,
-) -> ProviderTarget {
+) -> Option<ProviderTarget> {
     let eligible = providers
         .iter()
         .filter(|provider| {
-            required
-                .iter()
-                .all(|required| provider.capabilities.contains(required))
+            provider.provenance == "fixture"
+                && required
+                    .iter()
+                    .all(|required| provider.capabilities.contains(required))
         })
         .collect::<Vec<_>>();
     if eligible.is_empty() {
-        providers
-            .first()
-            .expect("default providers are non-empty")
-            .clone()
+        None
     } else {
-        (*eligible[offset % eligible.len()]).clone()
+        Some((*eligible[offset % eligible.len()]).clone())
     }
-}
-
-fn default_provider_targets() -> Vec<ProviderTarget> {
-    vec![
-        ProviderTarget {
-            target_id: "openai-codex-seat".into(),
-            display_name: "Codex subscription".into(),
-            provider: "openai".into(),
-            adapter_id: "openai.codex-cli".into(),
-            model: "provider-default".into(),
-            provenance: "configured".into(),
-            availability: "configured".into(),
-            capabilities: vec![
-                "text.generate".into(),
-                "filesystem.write".into(),
-                "test.execute".into(),
-                "web.access".into(),
-            ],
-        },
-        ProviderTarget {
-            target_id: "fixture-anthropic".into(),
-            display_name: "Claude fixture".into(),
-            provider: "anthropic".into(),
-            adapter_id: "anthropic.messages.fixture".into(),
-            model: "sonnet-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec![
-                "text.generate".into(),
-                "web.access".into(),
-                "evaluation.grade".into(),
-            ],
-        },
-        ProviderTarget {
-            target_id: "fixture-google".into(),
-            display_name: "Gemini fixture".into(),
-            provider: "google".into(),
-            adapter_id: "google.gemini.fixture".into(),
-            model: "gemini-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["text.generate".into(), "image.generate".into()],
-        },
-        ProviderTarget {
-            target_id: "fixture-xai".into(),
-            display_name: "Grok fixture".into(),
-            provider: "xai".into(),
-            adapter_id: "xai.responses.fixture".into(),
-            model: "grok-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["text.generate".into(), "web.access".into()],
-        },
-        ProviderTarget {
-            target_id: "fixture-cursor".into(),
-            display_name: "Cursor fixture".into(),
-            provider: "cursor".into(),
-            adapter_id: "cursor.agent.fixture".into(),
-            model: "cursor-fixture".into(),
-            provenance: "fixture".into(),
-            availability: "replay-only".into(),
-            capabilities: vec!["filesystem.write".into(), "test.execute".into()],
-        },
-    ]
 }
 
 fn execution_draft(
@@ -902,6 +1082,120 @@ fn execution_draft(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn operations_config_validates_limits_and_enforces_utf8_bytes_and_page_size() {
+        let mut settings = serde_json::to_value(OperationsConfig::default()).unwrap();
+        let mut legacy = settings.clone();
+        legacy.as_object_mut().unwrap().remove("devTools");
+        assert!(
+            OperationsConfig::from_json_str(&legacy.to_string())
+                .unwrap()
+                .dev_tools()
+                .is_none()
+        );
+        let mut invalid_dev = settings.clone();
+        invalid_dev["devTools"]["debounceMinMs"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&invalid_dev.to_string()).is_err());
+        settings["maxPromptBytes"] = serde_json::json!(3);
+        settings["defaultSignalPageSize"] = serde_json::json!(1);
+        settings["maxSignalPageSize"] = serde_json::json!(1);
+        let operations = OperationsConfig::from_json_str(&settings.to_string()).unwrap();
+        let mut runtime = LfgRuntime::with_configuration(
+            MemorySignalStore::default(),
+            CpuRuleEncoder::default(),
+            ProviderInventoryConfig::default(),
+            EvaluationRubric::default_alpha(),
+            PromotionPolicy::default_alpha(),
+            operations,
+        );
+        let request = |text: &str| PreflightRequest {
+            session_id: "test".into(),
+            revision: 1,
+            text: text.into(),
+        };
+        assert!(runtime.preflight(&request("é")).is_ok());
+        assert!(runtime.preflight(&request("éé")).is_err());
+        let plan = runtime
+            .commit_plan(CommitPlanRequest {
+                session_id: "test".into(),
+                revision: 1,
+                text: "é".into(),
+                include_fixture_bindings: false,
+            })
+            .unwrap();
+        assert!(plan.committed_signals >= 2);
+        assert_eq!(runtime.replay(&plan.workflow_id, 0, 100).unwrap().len(), 1);
+        settings["maxSignalPageSize"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&settings.to_string()).is_err());
+        settings["maxSignalPageSize"] = serde_json::json!(1);
+        settings["eventBufferCapacity"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&settings.to_string()).is_err());
+    }
+
+    #[test]
+    fn provider_inventory_is_configurable_and_does_not_forge_bindings() {
+        let empty = ProviderInventoryConfig::from_json_str(
+            r#"{"schemaVersion":"lfg.provider-inventory.v1","revision":"project-a","providers":[]}"#,
+        ).unwrap();
+        let runtime = LfgRuntime::with_encoder_and_inventory(
+            MemorySignalStore::default(),
+            CpuRuleEncoder::default(),
+            empty,
+        );
+        assert_eq!(runtime.status().fixture_providers, 0);
+        assert!(select_target(&runtime.providers, &["image.generate".into()], 0).is_none());
+        let fixture = ProviderInventoryConfig::default();
+        assert!(select_target(&fixture.providers, &["unknown.capability".into()], 0).is_none());
+        let mut spoofed = fixture;
+        spoofed.providers[0].availability = "active".into();
+        assert!(
+            ProviderInventoryConfig::from_json_str(&serde_json::to_string(&spoofed).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn changed_rubric_cannot_mix_with_existing_experiment_grades() {
+        let mut runtime = LfgRuntime::new(MemorySignalStore::default());
+        let scores = runtime
+            .rubric()
+            .criteria
+            .keys()
+            .map(|key| (key.clone(), 0.9))
+            .collect();
+        runtime
+            .record_grade(SemanticGradeRequest {
+                experiment_id: "experiment".into(),
+                variant_id: "a".into(),
+                outcome_id: "outcome".into(),
+                grader_run_id: "grader".into(),
+                scores,
+            })
+            .unwrap();
+        let mut changed = runtime.rubric();
+        changed.pass_threshold = 0.95;
+        runtime.rubric =
+            EvaluationRubric::from_json_str(&serde_json::to_string(&changed).unwrap()).unwrap();
+        assert!(runtime.statistics("experiment").is_err());
+        let scores = runtime
+            .rubric()
+            .criteria
+            .keys()
+            .map(|key| (key.clone(), 0.9))
+            .collect();
+        assert!(
+            runtime
+                .record_grade(SemanticGradeRequest {
+                    experiment_id: "experiment".into(),
+                    variant_id: "b".into(),
+                    outcome_id: "other".into(),
+                    grader_run_id: "grader".into(),
+                    scores
+                })
+                .is_err()
+        );
+    }
 
     #[test]
     fn incremental_append_rejects_bad_continuation_and_tracks_tails_per_workflow() {

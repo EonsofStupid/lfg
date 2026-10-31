@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import type { ClassificationSnapshot, EscalationTarget, RoutingNeed } from './types'
 
@@ -8,23 +8,31 @@ const sameTarget = (a: EscalationTarget | null, b: EscalationTarget) => a !== nu
 
 export function PromptBranchView({
   snapshot,
+  historyLimit,
   routingNeed,
   onRoutingNeedChange,
   overrideTarget,
   onOverride
 }: {
   snapshot: ClassificationSnapshot | null
-  routingNeed: RoutingNeed
+  historyLimit: number | undefined
+  routingNeed: RoutingNeed | null
   onRoutingNeedChange: (need: RoutingNeed) => void
   overrideTarget: EscalationTarget | null
   onOverride: (target: EscalationTarget | null) => void
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [burst, setBurst] = useState<number[]>([])
+  const historyLimitRef = useRef(historyLimit)
 
   useEffect(() => {
-    if (!snapshot) return
-    setBurst((current) => [...current, snapshot.durationMicros].slice(-14))
+    historyLimitRef.current = historyLimit
+    if (historyLimit) setBurst((current) => current.slice(-historyLimit))
+  }, [historyLimit])
+
+  useEffect(() => {
+    if (!snapshot || !historyLimitRef.current) return
+    setBurst((current) => [...current, snapshot.durationMicros].slice(-historyLimitRef.current!))
   }, [snapshot?.revision, snapshot?.durationMicros])
 
   if (!snapshot) return <div className="empty-graph">Begin typing to activate the CPU signal field.</div>
@@ -36,8 +44,8 @@ export function PromptBranchView({
 
   return (
     <div className="branch-view">
-      <div className="cpu-burst" title="Real measured CPU time per classification pass, most recent on the right">
-        <span className="eyebrow">CPU · live poll</span>
+      <div className="cpu-burst" title="Elapsed wall time per classification pass, most recent on the right">
+        <span className="eyebrow">Elapsed · live poll</span>
         <div className="cpu-burst-bars">
           {burst.map((value, index) => (
             <motion.span
@@ -49,7 +57,7 @@ export function PromptBranchView({
             />
           ))}
         </div>
-        <span className="cpu-burst-value">{(snapshot.durationMicros / 1000).toFixed(2)} ms · rev {snapshot.revision} · {snapshot.tokenEstimate} tok</span>
+        <span className="cpu-burst-value">{(snapshot.durationMicros / 1000).toFixed(2)} ms · rev {snapshot.revision} · {snapshot.tokenEstimate} words</span>
       </div>
 
       <div className="branch-stage">
@@ -108,7 +116,7 @@ export function PromptBranchView({
                   {NEEDS.map((need) => (
                     <button
                       key={need}
-                      className={routingNeed === need ? 'is-active' : ''}
+                      className={(routingNeed ?? snapshot.routingNeed) === need ? 'is-active' : ''}
                       onClick={() => onRoutingNeedChange(need)}
                       title={need === 'balanced' ? 'weighted happy medium of capability and tool-loop efficiency' : `optimize purely for ${need}`}
                     >
@@ -122,8 +130,8 @@ export function PromptBranchView({
                 {overrideTarget
                   ? <>Zero-shot override: <code>{overrideTarget.provider}/{overrideTarget.model}</code><button className="clear-override" onClick={() => onOverride(null)}>use recommendation</button></>
                   : snapshot.recommendedEscalation
-                    ? <>Recommended ({routingNeed}): <code>{snapshot.recommendedEscalation.provider}/{snapshot.recommendedEscalation.model}</code></>
-                    : 'No active subscription covers this task yet — activate one above to get a recommendation.'}
+                    ? <>Recommended ({routingNeed ?? snapshot.routingNeed}): <code>{snapshot.recommendedEscalation.provider}/{snapshot.recommendedEscalation.model}</code></>
+                    : 'No recommendation is available for the configured models and selected subscriptions.'}
               </p>
 
               <div className="branch-escalation-targets">
@@ -141,7 +149,7 @@ export function PromptBranchView({
                       disabled={!candidate.active}
                       title={
                         candidate.active
-                          ? `capability ${(candidate.target.rawCapability * 100).toFixed(0)}% · efficiency ${(candidate.target.toolLoopEfficiency * 100).toFixed(0)}% · ${candidate.target.costTier} cost — click to zero-shot override`
+                          ? `configured capability ${(candidate.target.rawCapability * 100).toFixed(0)} · efficiency ${(candidate.target.toolLoopEfficiency * 100).toFixed(0)} · ${candidate.target.costTier} cost — these scores are not independently verified`
                           : `activate ${candidate.target.subscriptionId} to unlock this model`
                       }
                       onClick={() => onOverride(isOverride ? null : candidate.target)}
@@ -173,7 +181,7 @@ export function PromptBranchView({
             <p className="eyebrow">CATEGORY EVIDENCE</p>
             <h2>{selected.label}</h2>
             <dl>
-              <div><dt>Score</dt><dd>{selected.percent.toFixed(2)}%</dd></div>
+              <div><dt>Relative rule score</dt><dd>{selected.percent.toFixed(2)}% (not a probability)</dd></div>
               <div>
                 <dt>Matched</dt>
                 <dd>

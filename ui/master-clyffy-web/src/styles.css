@@ -122,6 +122,19 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 
 .branch-view { position: relative; z-index: 4; height: 100%; overflow: auto; padding: 1.4rem clamp(1rem, 3vw, 2.4rem); display: grid; align-content: start; gap: 1.1rem; }
 
+.dev-panel { margin-top: 1rem; padding: 1.25rem; border: 1px solid oklch(0.7 0.14 160 / .38); background: oklch(0.15 0.028 159); }
+.dev-panel h2 { margin: .25rem 0; }
+.dev-panel p { color: oklch(0.83 0.04 160); line-height: 1.45; }
+.dev-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.dev-heading > span { font-size: .8rem; overflow-wrap: anywhere; }
+.dev-controls { display: flex; align-items: end; gap: 1rem; flex-wrap: wrap; }
+.dev-controls label { display: grid; gap: .4rem; min-width: 12rem; flex: 1; }
+.dev-controls input { width: 100%; }
+.dev-controls button { padding: .5rem .8rem; }
+.dev-table-wrap { overflow-x: auto; }
+.dev-panel table { border-collapse: collapse; width: 100%; text-align: left; }
+.dev-panel th, .dev-panel td { padding: .5rem .65rem; border-bottom: 1px solid oklch(0.7 0.04 160 / .25); white-space: nowrap; }
+
 .cpu-burst { display: flex; align-items: center; gap: .9rem; border: 1px solid var(--line); background: oklch(0.11 0.014 159 / .82); padding: .55rem .8rem; }
 .cpu-burst-bars { display: flex; align-items: flex-end; gap: 2px; height: 28px; flex: 0 0 auto; }
 .cpu-burst-bar { display: block; width: 3px; background: var(--cyan); box-shadow: 0 0 .5rem var(--cyan); }
@@ -168,6 +181,11 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 .subscription-row button { background: none; border: 1px solid var(--line); color: var(--muted); padding: .3rem .7rem; font-size: .72rem; }
 .subscription-row button.is-active { color: #07100d; background: var(--cyan); border-color: var(--cyan); }
 .subscription-row-note { margin-left: auto; color: var(--muted); font-size: .62rem; font-style: italic; }
+.intake-list { display: grid; gap: .8rem; }
+.intake-list > div { border-top: 1px solid var(--line); padding-top: .6rem; }
+.intake-list dt { color: var(--muted); font-size: .8rem; }
+.intake-list dd { margin: .4rem 0 0; }
+.intake-list pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: inherit; }
 
 .branch-inspector { top: 5.7rem; }
 .keyword-chip { display: inline-block; margin: 0 .3rem .3rem 0; padding: .12rem .4rem; border: 1px solid var(--lime); color: var(--lime); font-size: .7rem; }

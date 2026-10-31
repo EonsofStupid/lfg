@@ -1,0 +1,11 @@
+{
+  "schema_version": "lfg.encoder-training-config.v1",
+  "base_model": "answerdotai/ModernBERT-base",
+  "seed": 731,
+  "epochs": 3.0,
+  "max_length": 512,
+  "batch_size": 8,
+  "device": "auto",
+  "checkpoint_steps": 100,
+  "allow_mismatched_sizes": false
+}

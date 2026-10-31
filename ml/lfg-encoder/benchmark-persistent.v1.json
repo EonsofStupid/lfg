@@ -1,0 +1,9 @@
+{
+  "schema_version": "lfg.persistent-benchmark-config.v1",
+  "warmup_rounds": 1,
+  "measured_rounds": 10,
+  "max_records": 1000,
+  "max_dataset_bytes": 10485760,
+  "max_response_bytes": 65536,
+  "timeout_seconds": 30
+}
