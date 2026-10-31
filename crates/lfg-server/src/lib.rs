@@ -30,7 +30,11 @@ mod dev_stats;
 mod devpulse_context;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
+#[cfg(feature = "onnx-shadow")]
+pub mod exemplar_suggest;
 mod intake;
+#[cfg(feature = "onnx-shadow")]
+pub mod onnx_embedding;
 mod project_attunement;
 use dev_stats::{DevStats, Operation};
 

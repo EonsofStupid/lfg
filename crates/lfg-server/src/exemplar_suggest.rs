@@ -9,7 +9,8 @@ use lfg_core::kernel::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::onnx_embedding::{self, Source};
+use crate::onnx_embedding::{self, Encoder, Source};
+use lfg_runtime::OperationsConfig;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -249,25 +250,135 @@ struct Prediction<'a> {
     choice: Option<&'a str>,
 }
 
-pub(crate) struct Options<'a> {
+pub struct Options<'a> {
     pub artifact: &'a Path,
     pub manifest_sha256: &'a str,
     pub runtime_config: &'a Path,
     pub exemplar_pack: &'a Path,
     pub pack_sha256: &'a str,
     pub exemplar_config: &'a Path,
-    pub prediction_only: bool,
 }
 
-pub(crate) fn run(args: Options<'_>, engine: &Engine) -> Result<()> {
-    let config_raw = std::fs::read(args.exemplar_config)?;
-    let config = Config::parse(&config_raw)?;
-    let source = Source::open(args.artifact, args.manifest_sha256, args.runtime_config)?;
-    let raw_pack = onnx_embedding::bounded_file(args.exemplar_pack, config.max_pack_bytes)?;
-    let pack = Pack::parse(&raw_pack, args.pack_sha256, &config, &source, engine)?;
-    let config_sha = onnx_embedding::hash(&config_raw);
-    let operations = lfg_server::configured_operations()?;
-    let mut encoder = None;
+/// An unpromoted suggestion and the deterministic result it extends.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeResponse {
+    pub schema_version: &'static str,
+    pub input_sha256: String,
+    pub snapshot_sha256: String,
+    pub encoder_manifest_sha256: String,
+    pub pack_sha256: String,
+    pub exemplar_config_sha256: String,
+    pub runtime_config_sha256: String,
+    pub promotion_eligible: bool,
+    pub baseline: Value,
+    pub extension_status: &'static str,
+    pub suggestion: Option<Suggestion>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    pub choice: String,
+    pub similarity: f64,
+    pub margin: f64,
+    pub source: &'static str,
+}
+
+/// Snapshot-bound experimental extension. The encoder loads only on escalation.
+pub struct NodeSuggester<'a> {
+    engine: &'a Engine,
+    config: Config,
+    source: Source,
+    pack: Pack,
+    operations: OperationsConfig,
+    config_sha: String,
+    pack_sha: String,
+    encoder: Option<Encoder>,
+}
+
+impl<'a> NodeSuggester<'a> {
+    /// Open the small manifests and pack; model weights remain unloaded.
+    pub fn open(
+        args: &Options<'_>,
+        engine: &'a Engine,
+        operations: OperationsConfig,
+    ) -> Result<Self> {
+        let config_raw = std::fs::read(args.exemplar_config)?;
+        let config = Config::parse(&config_raw)?;
+        let source = Source::open(args.artifact, args.manifest_sha256, args.runtime_config)?;
+        let raw_pack = onnx_embedding::bounded_file(args.exemplar_pack, config.max_pack_bytes)?;
+        let pack = Pack::parse(&raw_pack, args.pack_sha256, &config, &source, engine)?;
+        Ok(Self {
+            engine,
+            config,
+            source,
+            pack,
+            operations,
+            config_sha: onnx_embedding::hash(&config_raw),
+            pack_sha: args.pack_sha256.to_owned(),
+            encoder: None,
+        })
+    }
+
+    /// Evaluate one request; suggestions are advisory and never replace the baseline.
+    pub fn suggest(&mut self, text: &str) -> Result<NodeResponse> {
+        self.operations
+            .validate_prompt("node-suggestion-probe", text)?;
+        let baseline = serde_json::to_value(
+            self.engine
+                .evaluate(&BTreeMap::from([("prompt".into(), text.to_owned())]))?,
+        )?;
+        let eligible = baseline["state"] == "escalate" && baseline["atNode"] == self.pack.node;
+        let suggestion = if eligible {
+            if text.len() > self.config.max_text_bytes
+                || text.len() > self.source.config.max_prompt_bytes
+            {
+                return Err("input exceeds exemplar text limit".into());
+            }
+            if self.encoder.is_none() {
+                self.encoder = Some(self.source.load()?);
+            }
+            let vector = self
+                .encoder
+                .as_ref()
+                .expect("encoder was initialized")
+                .embed(text)?;
+            self.pack
+                .choose(&vector, &self.config)?
+                .map(|(choice, similarity, margin)| Suggestion {
+                    choice,
+                    similarity,
+                    margin,
+                    source: "exemplar",
+                })
+        } else {
+            None
+        };
+        Ok(NodeResponse {
+            schema_version: "lfg.node-suggestion.v1",
+            input_sha256: lfg_core::digest_text(text),
+            snapshot_sha256: self.engine.snapshot_digest().to_owned(),
+            encoder_manifest_sha256: self.source.manifest_sha.clone(),
+            pack_sha256: self.pack_sha.clone(),
+            exemplar_config_sha256: self.config_sha.clone(),
+            runtime_config_sha256: self.source.config_sha.clone(),
+            promotion_eligible: false,
+            baseline,
+            extension_status: if !eligible {
+                "not_applicable"
+            } else if suggestion.is_some() {
+                "suggested"
+            } else {
+                "abstained"
+            },
+            suggestion,
+        })
+    }
+}
+
+pub fn run(args: Options<'_>, engine: &Engine, prediction_only: bool) -> Result<()> {
+    let mut suggester = NodeSuggester::open(&args, engine, crate::configured_operations()?)?;
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
@@ -279,12 +390,12 @@ pub(crate) fn run(args: Options<'_>, engine: &Engine) -> Result<()> {
         line.clear();
         let read = reader
             .by_ref()
-            .take((operations.max_http_body_bytes() as u64).saturating_add(1))
+            .take((suggester.operations.max_http_body_bytes() as u64).saturating_add(1))
             .read_line(&mut line)?;
         if read == 0 {
             break;
         }
-        if read > operations.max_http_body_bytes() {
+        if read > suggester.operations.max_http_body_bytes() {
             return Err("input line exceeds configured limit".into());
         }
         if line.trim().is_empty() {
@@ -293,35 +404,17 @@ pub(crate) fn run(args: Options<'_>, engine: &Engine) -> Result<()> {
         let input: Input = serde_json::from_str(&line)?;
         if input.id.trim().is_empty()
             || !seen.insert(input.id.clone())
-            || seen.len() > source.config.max_examples
-            || seen.len() > config.max_validation_items
+            || seen.len() > suggester.source.config.max_examples
+            || seen.len() > suggester.config.max_validation_items
         {
             return Err("empty or duplicate ID, or example limit exceeded".into());
         }
-        operations.validate_prompt("node-suggestion-probe", &input.text)?;
-        let baseline = serde_json::to_value(
-            engine.evaluate(&BTreeMap::from([("prompt".into(), input.text.clone())]))?,
-        )?;
-        let eligible = baseline["state"] == "escalate" && baseline["atNode"] == pack.node;
-        let suggestion = if eligible {
-            if input.text.len() > config.max_text_bytes
-                || input.text.len() > source.config.max_prompt_bytes
-            {
-                return Err("input exceeds exemplar text limit".into());
-            }
-            if encoder.is_none() {
-                encoder = Some(source.load()?);
-            }
-            let vector = encoder
-                .as_ref()
-                .expect("encoder was initialized")
-                .embed(&input.text)?;
-            pack.choose(&vector, &config)?
-        } else {
-            None
-        };
-        let choice = suggestion.as_ref().map(|item| item.0.as_str());
-        let row = if args.prediction_only {
+        let response = suggester.suggest(&input.text)?;
+        let choice = response
+            .suggestion
+            .as_ref()
+            .map(|item| item.choice.as_str());
+        let row = if prediction_only {
             serde_json::to_value(Prediction {
                 schema_version: "lfg.node-prediction.v1",
                 item_sha256: &input.id,
@@ -332,10 +425,10 @@ pub(crate) fn run(args: Options<'_>, engine: &Engine) -> Result<()> {
         } else {
             json!({"schemaVersion":"lfg.node-suggestion-probe.v1","id":input.id,
                 "inputSha256":lfg_core::digest_text(&input.text),"snapshotSha256":engine.snapshot_digest(),
-                "encoderManifestSha256":source.manifest_sha,"packSha256":args.pack_sha256,
-                "exemplarConfigSha256":config_sha,"runtimeConfigSha256":source.config_sha,
-                "baseline":baseline,"extensionStatus":if !eligible {"not_applicable"} else if suggestion.is_some() {"suggested"} else {"abstained"},
-                "suggestion":suggestion.map(|(choice, similarity, margin)| json!({"choice":choice,"similarity":similarity,"margin":margin,"source":"exemplar"})),
+                "encoderManifestSha256":suggester.source.manifest_sha,"packSha256":args.pack_sha256,
+                "exemplarConfigSha256":suggester.config_sha,"runtimeConfigSha256":suggester.source.config_sha,
+                "baseline":response.baseline,"extensionStatus":response.extension_status,
+                "suggestion":response.suggestion,
                 "promotionEligible":false})
         };
         let mut encoded = serde_json::to_vec(&row)?;
@@ -343,7 +436,7 @@ pub(crate) fn run(args: Options<'_>, engine: &Engine) -> Result<()> {
         output_bytes = output_bytes
             .checked_add(encoded.len())
             .ok_or("output byte count overflow")?;
-        if output_bytes > config.max_prediction_bytes {
+        if output_bytes > suggester.config.max_prediction_bytes {
             return Err("prediction output exceeds configured limit".into());
         }
         output.write_all(&encoded)?;

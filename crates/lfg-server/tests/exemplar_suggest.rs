@@ -58,6 +58,29 @@ fn resolved_kernel_paths_do_not_load_the_encoder_and_escalations_fail_closed() {
     let pack_raw = serde_json::to_vec(&pack).unwrap();
     let pack_path = dir.path().join("pack.json");
     std::fs::write(&pack_path, &pack_raw).unwrap();
+    let manifest_sha = digest(&manifest_raw);
+    let pack_sha = digest(&pack_raw);
+    let options = lfg_server::exemplar_suggest::Options {
+        artifact: &artifact,
+        manifest_sha256: &manifest_sha,
+        runtime_config: &runtime,
+        exemplar_pack: &pack_path,
+        pack_sha256: &pack_sha,
+        exemplar_config: &config_path,
+    };
+    let mut library = lfg_server::exemplar_suggest::NodeSuggester::open(
+        &options,
+        &engine,
+        lfg_runtime::OperationsConfig::default(),
+    )
+    .unwrap();
+    let library_result = library.suggest("run command").unwrap();
+    assert_eq!(library_result.extension_status, "not_applicable");
+    assert!(library_result.suggestion.is_none());
+    assert_eq!(library_result.snapshot_sha256, engine.snapshot_digest());
+    assert_eq!(library_result.pack_sha256, pack_sha);
+    assert!(!library_result.promotion_eligible);
+    assert!(library.suggest("ordinary unmatched fixture").is_err());
     let invoke = |text: &str, experimental: bool, prediction_only: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lfg-server"));
         command
@@ -100,6 +123,7 @@ fn resolved_kernel_paths_do_not_load_the_encoder_and_escalations_fail_closed() {
     );
     let row: Value = serde_json::from_slice(&resolved.stdout).unwrap();
     assert_eq!(row["extensionStatus"], "not_applicable");
+    assert_eq!(row["baseline"], library_result.baseline);
     assert!(row["suggestion"].is_null());
     assert_eq!(row["promotionEligible"], false);
     let compact = invoke("run command", true, true);
@@ -110,4 +134,78 @@ fn resolved_kernel_paths_do_not_load_the_encoder_and_escalations_fail_closed() {
     let escalated = invoke("ordinary unmatched fixture", true, false);
     assert!(!escalated.status.success());
     assert!(escalated.stdout.is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly selected test-only model and simulated-review pack"]
+fn actual_encoder_library_matches_cli_for_escalation() {
+    let artifact = std::path::PathBuf::from(std::env::var_os("LFG_TEST_NODE_ARTIFACT").unwrap());
+    let pack_path = std::path::PathBuf::from(std::env::var_os("LFG_TEST_NODE_PACK").unwrap());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runtime = root.join("config/node-onnx-runtime.example.json");
+    let config = root.join("../../ml/lfg-encoder/node-exemplar-config.example.json");
+    let manifest_sha = digest(&std::fs::read(artifact.join("manifest.json")).unwrap());
+    let pack_sha = digest(&std::fs::read(&pack_path).unwrap());
+    let engine = lfg_core::kernel::Engine::bundled().unwrap();
+    let options = lfg_server::exemplar_suggest::Options {
+        artifact: &artifact,
+        manifest_sha256: &manifest_sha,
+        runtime_config: &runtime,
+        exemplar_pack: &pack_path,
+        pack_sha256: &pack_sha,
+        exemplar_config: &config,
+    };
+    let mut suggester = lfg_server::exemplar_suggest::NodeSuggester::open(
+        &options,
+        &engine,
+        lfg_runtime::OperationsConfig::default(),
+    )
+    .unwrap();
+    let result = suggester.suggest("fixture unknown").unwrap();
+    assert_ne!(result.extension_status, "not_applicable");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+        .args(["onnx-node-suggest", "--artifact"])
+        .arg(&artifact)
+        .args(["--manifest-sha256", &manifest_sha, "--runtime-config"])
+        .arg(&runtime)
+        .arg("--exemplar-pack")
+        .arg(&pack_path)
+        .args(["--pack-sha256", &pack_sha, "--exemplar-config"])
+        .arg(&config)
+        .arg("--experimental")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        json!({"id":"fixture","text":"fixture unknown"})
+    )
+    .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let row: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(row["baseline"], result.baseline);
+    assert_eq!(row["extensionStatus"], result.extension_status);
+    match &result.suggestion {
+        Some(suggestion) => {
+            assert_eq!(row["suggestion"]["choice"], suggestion.choice);
+            assert_eq!(row["suggestion"]["source"], suggestion.source);
+            for (key, expected) in [
+                ("similarity", suggestion.similarity),
+                ("margin", suggestion.margin),
+            ] {
+                assert!((row["suggestion"][key].as_f64().unwrap() - expected).abs() < 1e-6);
+            }
+        }
+        None => assert!(row["suggestion"].is_null()),
+    }
+    assert_eq!(row["inputSha256"], result.input_sha256);
+    assert_eq!(row["packSha256"], result.pack_sha256);
 }

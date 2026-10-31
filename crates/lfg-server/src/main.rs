@@ -10,9 +10,7 @@ mod kernel_journal;
 mod kernel_predict;
 use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
-mod exemplar_suggest;
-#[cfg(feature = "onnx-shadow")]
-mod onnx_embedding;
+use lfg_server::{exemplar_suggest, onnx_embedding};
 #[cfg(feature = "onnx-shadow")]
 mod onnx_predict;
 
@@ -381,9 +379,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     exemplar_pack: &exemplar_pack,
                     pack_sha256: &pack_sha256,
                     exemplar_config: &exemplar_config,
-                    prediction_only,
                 },
                 &engine,
+                prediction_only,
             )?;
         }
         #[cfg(feature = "onnx-shadow")]

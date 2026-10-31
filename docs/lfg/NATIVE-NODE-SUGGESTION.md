@@ -38,6 +38,17 @@ the pack**. A hash identifies bytes only when its expected value was obtained
 from a trusted source. Anyone able to forge a pack and supply its hash can forge
 its provenance. Keep packs, source data and expected digests access-controlled.
 
+With the `onnx-shadow` feature, Rust callers can use
+`lfg_server::exemplar_suggest::NodeSuggester` in-process. Construct `Options`
+with the selected artifact, hashes and configuration files, provide a borrowed
+`lfg_core::kernel::Engine` and an `OperationsConfig` to `open`, then call
+`suggest` with request text. The instance stays bound to that engine and loads
+the encoder lazily on the first eligible escalation. Its response retains the
+kernel result, extension status, optional suggestion, input and artifact hashes,
+and `promotionEligible: false`. The command uses this same path. This is an
+experimental library seam in the server crate, not yet an RRFlow integration,
+the final engine packaging, or an authenticated artifact distribution system.
+
 Similarity and margin thresholds come from the selected exemplar configuration
 and can change without rebuilding vectors. Encoder settings that affect vectors
 must still match the pack and ONNX artifact. Limits in the selected runtime and
