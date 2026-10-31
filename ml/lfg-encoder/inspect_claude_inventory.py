@@ -67,10 +67,12 @@ def prior_user_context(record: dict, max_bytes: int, max_line_bytes: int,
     offset = 0
     selected = {}
 
+    missing_parent = object()
+
     def signature(row):
         if not isinstance(row, dict):
             return None
-        uid, parent, session = row.get('uuid'), row.get('parentUuid'), row.get('sessionId')
+        uid, parent, session = row.get('uuid'), row.get('parentUuid', missing_parent), row.get('sessionId')
         if not isinstance(uid, str) or not uid:
             return None
         text = inventory_claude_sessions.message_text(row, record['project_root'])
