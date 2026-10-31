@@ -71,6 +71,10 @@ produce candidate prediction files after the review and admission gate passes.
 It remains an offline Python path and has not been qualified for release.
 The separate [native evaluation runner](NATIVE-NODE-SUGGESTION.md) can invoke
 the experimental Rust candidate directly after re-auditing the same inputs.
+For a physically separate test source, the experimental
+[frozen embedded holdout workflow](FROZEN-EMBEDDED-HOLDOUT.md) commits test-file
+identities before freezing a candidate and performs a later aggregate comparison.
+Its commitments do not themselves prove independent handling or qualify a model.
 
 ## Local evidence
 

@@ -7,6 +7,7 @@ ml/lfg-encoder/node_evaluate.py text eol=lf
 ml/lfg-encoder/node_review.py text eol=lf
 ml/lfg-encoder/node_exemplars.py text eol=lf
 ml/lfg-encoder/evaluate_native_exemplars.py text eol=lf
+ml/lfg-encoder/evaluate_embedded_holdout.py text eol=lf
 ml/lfg-encoder/training_inputs.py text eol=lf
 ml/lfg-encoder/node-admission-policy.example.json text eol=lf
 ml/lfg-encoder/node-development-policy.example.json text eol=lf
