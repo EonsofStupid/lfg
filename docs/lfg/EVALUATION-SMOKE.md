@@ -45,3 +45,27 @@ the baseline's intent and capability macro F1 were 0.2 and 0.4; the tiny test
 model scored 0 for both. These five examples share a family, were already
 inspected, and cannot serve as a blinded final test. No private prompt text or
 individual prediction records are included in this document.
+
+## Real-source DevPulse diagnostic
+
+On 2026-10-30, a Windows x86-64 release binary built from commit `36166d2`
+ran the deterministic baseline on 12 attributed DevPulse excerpts. Their
+source spans were verified against pinned project documents, but all reference
+labels were proposed by an AI and remain unreviewed. All 12 were provisionally
+labeled `build.software` and `filesystem.write`; the baseline returned each of
+those labels for two of them. This is a disagreement with a provisional draft,
+not a measured error rate or model-quality claim. No positive security-risk
+examples were present. Predictions and the report remain in the ignored
+private dataset directory.
+
+The baseline configuration digest was
+`7302d5e88738ab686f98e17c701303ee5020aa343007aa1eb3bf6bdf5af4e032`; the
+dataset digest was `e62fc45f55eabaac8b253fa0935c4bcb36e1debf964a0b37f8f6eb2c08a6425a`.
+The executable digest was
+`42b096f319f1a5143c6eb0760121e3f516bf1de9371f8e13e9a642e809067a84`.
+It was built offline with the lockfile, embedded UI, `+crt-static`, and `/Brepro`
+flags after building the UI with the existing local Node dependencies. A copy
+of the 4,994,560-byte executable started from a separate local directory and
+served its embedded UI and intake template. This is a local smoke check, not a
+clean-machine installation, reproducible-build comparison, performance
+benchmark, trained-model integration, or hosted security qualification.
