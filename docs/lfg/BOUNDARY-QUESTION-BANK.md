@@ -82,8 +82,12 @@ lfg-server boundary-project --root D:\projects\lfg --config crates/lfg-server/co
 ```
 
 Copy and adapt that configuration for another project. Each source maps a
-catalog binding to either an inventory of files below a named directory or a
-JSON pointer in a named file. Paths are relative to the selected root. An
+catalog binding to an inventory of files below a named directory, a JSON
+pointer, or the complete UTF-8 text of an explicitly selected file. For example,
+`{"kind":"text","binding":"workspace layout","path":"Cargo.toml"}` attaches
+the workspace manifest to the corresponding authored Rust question. The AI or
+reviewer still needs to interpret that evidence; the manifest is not an answer.
+Paths are relative to the selected root. An
 inventory extension list of `[]` includes every file; otherwise list extensions
 without dots. Set `recursive` and the entry, depth, and JSON file byte limits
 deliberately. Entry limits are shared across inventories and count directories
@@ -93,11 +97,13 @@ pointer stays missing. A JSON file is read in full to select the pointer, but
 only the selected value is returned.
 
 The result includes the catalog digest, configuration digest, source paths,
-inventory path-list digests or JSON file SHA-256 hashes, and the ordinary
+inventory path-list digests or file SHA-256 hashes, and the ordinary
 attunement preview. An inventory digest covers names, not file contents. The
 command writes the preview to standard output and does not persist it; paths
-and selected values may themselves be sensitive. Existing credential-shaped
-checks reject some inputs but cannot detect all secrets. The configured root,
+and selected values may themselves be sensitive. A text source includes the
+entire file, not an excerpt; only select files whose complete contents may be
+included in the preview. Existing credential-shaped checks reject some inputs
+but cannot detect secrets embedded inside text. The configured root,
 files and local machine must be trusted: the path checks are not a sandbox
 against concurrent filesystem changes. No automatic stack detection or
 judgment of question answers is performed.
@@ -113,9 +119,16 @@ The same binary was also run against the authorized RRFlow checkout with a
 separate configuration selecting `crates/kernel/rrd-core/src` and
 `crates/kernel`. It collected 14 Rust module paths and 31 file paths and
 attached the two scoped inventories to three questions; the other nine binding
-names remained missing. This reads project paths only, not the file contents,
+names remained missing. That earlier run read project paths only, not the file contents,
 and does not establish an integrated RRFlow deployment. The adaptable example
 is `crates/lfg-server/config/project-attunement.rrflow.example.json`.
+
+After adding the text source, a local debug build ran that RRFlow configuration
+again. It attached the selected checkout's `Cargo.toml` to the Rust workspace
+question; both its returned UTF-8 content and reported SHA-256 matched the
+file. Eight distinct bindings remained missing among the 120 selected
+questions. This supplies evidence only; it does not assess the question,
+establish deployed integration, or provide reviewed training examples.
 
 Bank and section selection is explicit. Automatic stack detection, broad project
 artifact discovery, maturity gating, question execution, yes/no or inconclusive

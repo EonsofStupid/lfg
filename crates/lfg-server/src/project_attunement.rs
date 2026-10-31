@@ -47,17 +47,25 @@ enum Source {
         path: String,
         pointer: String,
     },
+    Text {
+        binding: String,
+        path: String,
+    },
 }
 
 impl Source {
     fn binding(&self) -> &str {
         match self {
-            Self::Inventory { binding, .. } | Self::Json { binding, .. } => binding,
+            Self::Inventory { binding, .. }
+            | Self::Json { binding, .. }
+            | Self::Text { binding, .. } => binding,
         }
     }
     fn path(&self) -> &str {
         match self {
-            Self::Inventory { path, .. } | Self::Json { path, .. } => path,
+            Self::Inventory { path, .. } | Self::Json { path, .. } | Self::Text { path, .. } => {
+                path
+            }
         }
     }
 }
@@ -163,6 +171,24 @@ pub(crate) fn run(
                 if let Some(value) = value {
                     artifacts.insert(binding.clone(), value.clone());
                 }
+            }
+            Source::Text { binding, .. } => {
+                if !path.is_file() {
+                    return Err(format!("text source is not a file: {}", source.path()));
+                }
+                let mut bytes = Vec::new();
+                fs::File::open(&path)
+                    .map_err(|e| e.to_string())?
+                    .take(config.limits.max_file_bytes.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() as u64 > config.limits.max_file_bytes {
+                    return Err("text source exceeds maxFileBytes".into());
+                }
+                let content = std::str::from_utf8(&bytes)
+                    .map_err(|_| format!("text source is not UTF-8: {}", source.path()))?;
+                provenance.push(json!({"binding":binding,"path":source.path(),"kind":"text","status":"collected","sha256":format!("{:x}",Sha256::digest(&bytes))}));
+                artifacts.insert(binding.clone(), Value::String(content.to_owned()));
             }
         }
     }
