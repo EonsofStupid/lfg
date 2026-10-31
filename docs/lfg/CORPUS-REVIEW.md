@@ -193,6 +193,8 @@ their bytes changes the recorded code identities and can prevent resuming or
 evaluating an earlier run. Preserve the exact scripts for existing experiments.
 
 The reviewed trainer accepts the v2 development plan and records its scope.
+Use `--development-plan-only` to reject a legacy complete plan before the audit
+opens its sources. The supervised training launcher always supplies this flag.
 The existing complete-plan evaluator rejects it; the separate experimental
 [controlled classifier holdout workflow](REVIEWED-NATIVE-EVALUATION.md#controlled-classifier-holdout)
 can bind it to a separately committed test set after the candidate is frozen.

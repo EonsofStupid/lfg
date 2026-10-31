@@ -77,11 +77,13 @@ def approved(item: dict[str, Any] | None, digest: str) -> bool:
         return False
 
 
-def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     raw_plan = plan_path.read_bytes()
     plan = json.loads(raw_plan)
     if not isinstance(plan, dict) or plan.get("schema_version") not in (PLAN_SCHEMA, DEVELOPMENT_PLAN_SCHEMA):
         raise ValueError("unsupported corpus plan")
+    if development_only and plan["schema_version"] != DEVELOPMENT_PLAN_SCHEMA:
+        raise ValueError("development-only training requires a development corpus plan")
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("corpus plan requires sources")
@@ -176,9 +178,10 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return report, queue
 
 
-def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> dict[str, Any]:
+def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path,
+                             development_only: bool = False) -> dict[str, Any]:
     """Require the input to be exactly the reviewed train partition of this plan."""
-    report, queue = audit(plan_path)
+    report, queue = audit(plan_path, development_only=development_only)
     if not report["review_ledger_sha256"]:
         raise ValueError("audited training requires a review ledger")
     if report["duplicate_within_split"]:
@@ -204,9 +207,10 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
     return report
 
 
-def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path,
+                             development_only: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Load only the audited validation partition and bind it to the same audit."""
-    report = validate_training_corpus(records, plan_path)
+    report = validate_training_corpus(records, plan_path, development_only=development_only)
     raw_plan = plan_path.read_bytes()
     if hashlib.sha256(raw_plan).hexdigest() != report["plan_sha256"]:
         raise ValueError("plan changed during validation loading")
@@ -221,7 +225,7 @@ def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path) -> 
         validation.extend(rows)
     if not validation:
         raise ValueError("audited validation partition is empty")
-    if validate_training_corpus(records, plan_path) != report:
+    if validate_training_corpus(records, plan_path, development_only=development_only) != report:
         raise ValueError("audit inputs changed during validation loading")
     return report, validation
 
