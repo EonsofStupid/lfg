@@ -205,6 +205,45 @@ workspace was supplied. Those counts are candidates, not usable reviewed
 training examples; the single-session validation source remains inadequate for
 broad qualification.
 
+### Triage before review
+
+`triage_review_workspaces.py` scans pending records in explicitly selected
+**training-only** workspaces for configurable markers. It checks all workspace
+plans before opening record sources, locks the workspaces while scanning, and
+creates a new private report without changing any record or decision. The
+[example configuration](../../ml/lfg-encoder/review-triage.example.json) flags
+specific tool-reply wrappers, ambient browser context, short acknowledgements
+and a work-duration marker; copy and adjust it for the actual sources. Regular
+expressions and local inputs must be trusted. The configured text-size limit
+flags records too large to scan rather than treating them as clean.
+
+```powershell
+python ml/lfg-encoder/triage_review_workspaces.py `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-ai-draft.v2/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
+  --config ml/lfg-encoder/review-triage.example.json --output NEW_PRIVATE_REPORT.json
+```
+
+The report gives record IDs, workspace indexes, annotation digests and reason
+IDs, without request text. Project names, IDs and hashes can still be sensitive;
+keep the report private. Its pending offsets describe the state at scan time and
+can move after decisions. In the review screen, use **Find** with the record ID
+in the corresponding workspace. Markers identify material to inspect, not
+automatic exclusions or proof of contamination; their absence does not prove a
+record is complete, safe, independent or correctly labeled. Reviewers can
+reject an unsuitable item, or use the existing redaction controls when a
+transformation preserves the request and is appropriate for the data-use terms.
+
+On this machine the example configuration flagged 83 of 520 pending training
+candidates: 52 ambient browser blocks, 26 tool-reply wrappers, four short
+acknowledgements and one work-duration marker. Counts are nonexclusive in
+general. The private report is `dataset/private/training-triage.v1.json`.
+These 520 records remain unapproved. If all 83 flagged records were rejected,
+at most 437 candidates would remain before reviewing the others; some flagged
+records may instead be appropriately transformed. The existing 500-record
+sample threshold, label support and independent validation requirements still
+apply. This scan does not inspect the test workspace.
+
 ### AI-drafted label workspace
 
 `draft_review_workspace.py` can create a separate pending-only review workspace

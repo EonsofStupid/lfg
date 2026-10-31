@@ -218,11 +218,19 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == '/api/item':
                 query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-                if set(query) != {'offset'} or len(query['offset']) != 1 or not query['offset'][0].isdigit():
+                if (set(query) not in ({'offset'}, {'id'}) or len(next(iter(query.values()))) != 1
+                        or ('offset' in query and not query['offset'][0].isdigit())
+                        or ('id' in query and not query['id'][0].strip())):
                     raise ValueError('invalid pending-record offset')
-                offset = int(query['offset'][0])
                 plan, _, ledger = review_corpus.load_workspace(self.server.workspace)
                 pending = [identifier for identifier, item in ledger.items() if item['decision'] == 'pending']
+                if 'id' in query:
+                    if query['id'][0] not in pending:
+                        self.json_reply(200, {'item': None, 'pending': len(pending), 'offset': 0, 'missing_id': True})
+                        return
+                    offset = pending.index(query['id'][0])
+                else:
+                    offset = int(query['offset'][0])
                 if offset >= len(pending):
                     self.json_reply(200, {'item': None, 'pending': len(pending), 'offset': offset})
                     return
