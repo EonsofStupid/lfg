@@ -66,7 +66,8 @@ def load_config(path: Path) -> dict[str, Any]:
     if 'source_context' in value:
         limits = value['source_context']
         if ('source_verification' not in value or not isinstance(limits, dict)
-                or set(limits) != {'max_messages', 'max_context_bytes'}
+                or not {'max_messages', 'max_context_bytes'} <= set(limits)
+                or set(limits) - {'max_messages', 'max_context_bytes', 'max_ancestry_records'}
                 or any(type(limit) is not int or limit < 1 for limit in limits.values())):
             raise ValueError('invalid source context limits')
     if 'checkpoint_verification' in value:
@@ -146,9 +147,12 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
         if context_limits is None:
             text = inspect_claude_inventory.verify(entry, limits['max_session_bytes'], limits['max_line_bytes'])
         else:
+            if 'max_ancestry_records' not in context_limits:
+                raise ValueError('Claude context requires a configured max_ancestry_records limit')
             text, messages, truncated = inspect_claude_inventory.prior_user_context(
                 entry, limits['max_session_bytes'], limits['max_line_bytes'],
-                context_limits['max_messages'], context_limits['max_context_bytes'])
+                context_limits['max_messages'], context_limits['max_context_bytes'],
+                context_limits['max_ancestry_records'])
         status = 'source_prefix_and_original_text_match'
     elif original.get('kind') == 'git-checkpoint-user-prompt' and context_limits is None:
         if checkpoint_limits is None:
@@ -185,7 +189,7 @@ def verify_source(workspace: Path, identifier: str, expected_digest: str, limits
     if context_limits is not None:
         result = {'status': 'source_prefix_and_original_text_match', 'messages': messages, 'truncated': truncated}
         if original.get('kind') == 'claude-session-human-text':
-            result['context_scope'] = 'same_file_order_not_verified_conversation_ancestry'
+            result['context_scope'] = 'same_session_source_parent_chain'
         return result
     return status
 
