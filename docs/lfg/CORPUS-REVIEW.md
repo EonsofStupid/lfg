@@ -186,6 +186,63 @@ classification head. This proves the split wiring, not model quality.
 
 ## Current local inventory
 
+### Local Codex project-session messages
+
+The local session history is another possible source of original requests. The
+`inventory_codex_sessions.py` tool selects session files only when their
+`session_meta` working directory falls within an explicitly supplied project
+root. Within those files it inventories only single-text user messages whose
+record metadata explicitly identifies the content kind as `user.text`. It
+does not copy message text, assign labels, approve records, or choose splits. It
+skips an entire selected file if its JSON is malformed, the configured byte
+limits are exceeded, or the file changes while being scanned. The file is read
+in bounded lines, including for large sessions. A working directory and the
+`user.text` marker are source claims, not independent proof of authorship,
+project ownership, data rights, safety, or representativeness. Messages may be
+follow-ups, duplicates, or include private data and secrets.
+
+The inventory records the original session file's full SHA-256 at scan time,
+plus the SHA-256 and byte length of the source prefix through each selected
+message and the individual line and text hashes. The prefix lets an inspector
+verify an earlier message after an ordinary append; it does not assert that the
+file's later content is unchanged. A rewritten prefix or changed line fails
+inspection. The inspector checks the marker and hashes before displaying the
+text, but does not verify labels, attribution, context, or data rights.
+
+For example, from the repository root, choose the session directory, explicit
+project roots, and a new private output file (the CLI accepts multiple
+`--project-root` arguments):
+
+```powershell
+python ml/lfg-encoder/inventory_codex_sessions.py --sessions-root SESSION_DIR --project-root project=PROJECT_DIR --output PRIVATE_NEW_INVENTORY.jsonl
+python ml/lfg-encoder/inspect_codex_inventory.py --inventory PRIVATE_NEW_INVENTORY.jsonl --record 1
+python ml/lfg-encoder/inspect_codex_inventory.py --inventory PRIVATE_NEW_INVENTORY.jsonl --record 1 --show-text
+```
+
+Paths must be absolute for project roots; project roots cannot overlap. Limits
+are configurable with `--max-session-bytes` and `--max-line-bytes`. Output is
+created exclusively. The last command intentionally prints private text: use it
+only in a private terminal. Paths, line numbers and hashes in the inventory are
+also sensitive. Git ignore is not encryption or access control. The tool does
+not yet convert entries into the labeling workspace; source and surrounding
+context must be inspected, and records must be sanitized and labeled before
+the existing audited review and training workflow can use them.
+
+On 2026-10-31 a scan scoped to the local LFG, RRFlow and DevPulse directories
+created `dataset/private/codex-project-session-inventory.v4.jsonl`. It scanned
+26 selected session files and excluded 46 outside the configured roots. It
+identified 271 candidate messages: 198 RRFlow, 43 DevPulse and 30 LFG, with 44
+exact text repetitions across the total. Per project, the corresponding unique
+exact-text counts are 192, 10 and 28; the RRFlow candidates came from two
+sessions, DevPulse from fourteen and LFG from one. These counts do not establish
+independence: some messages are short follow-ups, conversations can overlap, and
+LFG and RRFlow work may be related. None of these inventory entries has been
+approved, labeled, sanitized or assigned a split. One entry from each project
+passed prefix verification locally. Some messages may overlap the 38 pending
+records or earlier experiments; reconcile them before any training or holdout
+assignment. Makers Impulse remains a candidate external-project holdout and
+was not included in this scan.
+
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
 commit-message prompts. All 34 are unverified, and this plan references no

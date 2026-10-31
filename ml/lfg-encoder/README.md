@@ -12,6 +12,8 @@ promotion.
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for
 human review; their constructed examples are not a training-ready corpus.
+The [corpus review guide](../../docs/lfg/CORPUS-REVIEW.md#local-codex-project-session-messages)
+also documents an inventory of real project-session messages awaiting review.
 The separate [PR review batch](dataset/rrflow-pr-review.v1.jsonl) contains
 actual PR titles and excerpts linked to outcome journals, not original prompts.
 For a bounded real-corpus measurement of the baseline process, including
