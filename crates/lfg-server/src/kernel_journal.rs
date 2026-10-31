@@ -472,6 +472,13 @@ impl JsonlJournal {
                     already_corrected += 1;
                     continue;
                 }
+                // A choice hop is recorded before threshold and ambiguity checks.
+                // A top-ranked option at the node that escalated was not committed.
+                let baseline = if observation.state == "escalate" && node == observation.at_node {
+                    None
+                } else {
+                    baseline
+                };
                 let options = engine
                     .choice_options(node)
                     .ok_or("observation node is not a choice")?;

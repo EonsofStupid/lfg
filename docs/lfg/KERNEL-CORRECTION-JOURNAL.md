@@ -86,6 +86,13 @@ family and split are all unset. A snapshot option is not evidence that it is
 an appropriate label for a request: review its meaning and the original context,
 and skip an item if the option set is inadequate or the decision is uncertain.
 
+The kernel may record a provisional top-ranked choice in its observation before
+the node's threshold or ambiguity check escalates. Current queue generation
+sets `baselineChoice` to null in that case, because the choice was not committed.
+Queues produced before this correction can instead show that provisional value;
+recreate affected queues before relying on their baseline fields. The existing
+11-item LFG queue was checked and has no affected rows.
+
 The queue is a point-in-time display aid, not a ledger. Editing it does not
 record a correction. After examining an item and its source, an actual reviewer
 can use its observation sequence and node with `kernel-correct` above; the
@@ -152,6 +159,10 @@ sanitized. The bundled two-option example snapshot is not a validated labeling
 guide. These records still need source/context review, useful per-node label
 definitions, decisions, project/family and split assignment, and a per-node
 training and evaluation gate before they can support model development.
+The separate [per-node review and admission workflow](NODE-REVIEW-AND-ADMISSION.md)
+can bind explicit human decisions to this queue, audit declared split
+separation and support, and export admitted train/validation inputs. It does not
+train or qualify a model.
 The journal unit tests and CLI/locking tests also passed in a separate offline
 ARM64 Spark build using test fixtures only. This does not establish production
 durability or authenticate reviewers.

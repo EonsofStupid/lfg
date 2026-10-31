@@ -10,6 +10,8 @@ mod kernel_journal;
 mod kernel_predict;
 use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
+mod onnx_embedding;
+#[cfg(feature = "onnx-shadow")]
 mod onnx_predict;
 
 #[derive(Debug, Parser)]
@@ -148,6 +150,19 @@ enum Command {
     },
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
+    /// Probe an unpromoted frozen node encoder offline.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxNodeEmbedding {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        /// Return sensitive derived vectors for a local parity check.
+        #[arg(long)]
+        include_embedding: bool,
+    },
     /// Run an unpromoted ONNX artifact for offline comparison only.
     #[cfg(feature = "onnx-shadow")]
     OnnxPredict {
@@ -304,6 +319,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::BaselinePredict => baseline_predict::run()?,
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxNodeEmbedding {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            include_embedding,
+        } => onnx_embedding::run(
+            &artifact,
+            &manifest_sha256,
+            &runtime_config,
+            include_embedding,
+        )?,
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxPredict {
             artifact,
