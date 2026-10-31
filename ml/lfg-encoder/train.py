@@ -65,30 +65,29 @@ def validate_training_config(config: dict[str, Any]) -> None:
         raise ValueError("invalid epochs")
     if type(config.get("allow_mismatched_sizes")) is not bool:
         raise ValueError("invalid allow_mismatched_sizes")
-    if config.get("device", "auto") not in ("auto", "cpu", "cuda"):
-        raise ValueError("device must be auto, cpu, or cuda")
+    if config.get("device", "auto") not in ("auto", "cuda"):
+        raise ValueError("device must be auto or cuda; training is GPU-only")
 
 
 def verify_training_device(requested: str, selected: str, cuda_available: bool) -> None:
     """Fail closed when an explicit training target is unavailable or ignored."""
-    if requested not in ("auto", "cpu", "cuda"):
+    if requested not in ("auto", "cuda"):
         raise ValueError("invalid requested training device")
-    if requested == "cuda" and not cuda_available:
-        raise ValueError("CUDA training requested but CUDA is unavailable")
-    if requested != "auto" and selected != requested:
+    if not cuda_available:
+        raise ValueError("CUDA is unavailable; GPU-only training cannot fall back to CPU")
+    if selected != "cuda":
         raise ValueError(f"training device mismatch: requested {requested}, selected {selected}")
 
 
 def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_class: Any) -> tuple[Any, bool]:
     cuda_available = torch.cuda.is_available()
-    if args.device == "cuda" and not cuda_available:
-        raise ValueError("CUDA training requested but CUDA is unavailable")
+    verify_training_device(args.device, "cuda", cuda_available)
     result = arguments_class(
         output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=args.batch_size,
         eval_strategy="steps", eval_steps=args.checkpoint_steps, save_strategy="steps",
         save_steps=args.checkpoint_steps, load_best_model_at_end=True, save_only_model=False,
-        use_cpu=args.device == "cpu", report_to="none")
+        use_cpu=False, report_to="none")
     verify_training_device(args.device, result.device.type, cuda_available)
     return result, cuda_available
 
@@ -356,13 +355,10 @@ def train(args: argparse.Namespace) -> None:
             "Install the locked LFG training dependencies before training."
         ) from error
 
-    if not torch.cuda.is_available():
-        raise SystemExit(
-            "CUDA GPU not detected. LFG training never falls back to CPU; CPU is "
-            "reserved for the post-export proof."
-        )
-
-    training_arguments, cuda_available = make_training_arguments(args, torch, TrainingArguments)
+    try:
+        training_arguments, cuda_available = make_training_arguments(args, torch, TrainingArguments)
+    except ValueError as error:
+        raise SystemExit(f"training device rejected: {error}") from error
     selected_device = training_arguments.device
 
     combined = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in records]
@@ -936,8 +932,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--checkpoint-steps", type=int)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"),
-                        help="training compute target; cuda refuses CPU fallback")
+    parser.add_argument("--device", choices=("auto", "cuda"),
+                        help="GPU training target; neither option permits CPU fallback")
     parser.add_argument("--allow-mismatched-sizes", action=argparse.BooleanOptionalAction, default=None,
                         help="permit reinitialization of mismatched weights (review model loading warnings)")
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
