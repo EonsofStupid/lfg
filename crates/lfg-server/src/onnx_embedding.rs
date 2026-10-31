@@ -269,7 +269,7 @@ pub fn run(
 ) -> Result<()> {
     let source = Source::open(root, expected_manifest, config_path)?;
     let encoder = source.load()?;
-    let operations = lfg_server::configured_operations()?;
+    let operations = crate::configured_operations()?;
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
