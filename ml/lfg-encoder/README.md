@@ -59,9 +59,11 @@ the review happened. The sample gate alone does not make a model promotion-ready
    currently learn them.
 4. Train a candidate, export and benchmark it, then evaluate it independently
    against the baseline and the policy. The experimental evaluator below can
-   report classification errors. ONNX export is experimental; CPU runtime
-   integration, calibration, independent-test qualification and promotion checks
-   are still missing. Keep the rule encoder in charge until those checks pass.
+   report classification errors. ONNX export and the optional
+   [native CPU shadow command](../../docs/lfg/ONNX-CPU-SHADOW.md) are experimental;
+   live routing integration, calibration, independent-test qualification and
+   promotion checks are still missing. Keep the rule encoder in charge until
+   those checks pass.
 
 For a local development smoke test on Windows, install Python 3.10 or newer,
 then from the repository root. Supply the full immutable commit for a test model

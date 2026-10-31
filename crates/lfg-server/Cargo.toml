@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [features]
 embedded-ui = []
+onnx-shadow = ["dep:tract", "dep:tokenizers"]
 
 [[bin]]
 name = "lfg-server"
@@ -32,6 +33,8 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower-http.workspace = true
+tract = { version = "=0.23.9", default-features = false, features = ["onnx"], optional = true }
+tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"], optional = true }
 
 [dev-dependencies]
 tower.workspace = true

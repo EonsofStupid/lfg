@@ -6,6 +6,8 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 mod baseline_predict;
+#[cfg(feature = "onnx-shadow")]
+mod onnx_predict;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -21,6 +23,16 @@ struct Cli {
 enum Command {
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
+    /// Run an unpromoted ONNX artifact for offline comparison only.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxPredict {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+    },
     LfgBench {
         #[arg(long)]
         iterations: Option<usize>,
@@ -37,6 +49,12 @@ enum Command {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::BaselinePredict => baseline_predict::run()?,
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxPredict {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+        } => onnx_predict::run(&artifact, &manifest_sha256, &runtime_config)?,
         Command::LfgBench {
             iterations,
             prompt_file,
