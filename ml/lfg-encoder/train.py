@@ -356,6 +356,35 @@ def validate_input_options(development: bool, environment_lock: Path | None, whe
         raise ValueError("reviewed training requires an environment lock, wheelhouse, and local model manifest")
 
 
+def token_coverage(rows: list[dict[str, Any]], tokenizer: Any, maximum: int, split: str) -> dict[str, int]:
+    """Measure complete inputs, including special tokens, without recording their text."""
+    if type(maximum) is not int or maximum < 1 or not rows:
+        raise ValueError("token coverage requires a positive limit and nonempty split")
+    lengths = []
+    for row in rows:
+        encoded = tokenizer(row["text"], add_special_tokens=True, truncation=False, padding=False)
+        ids = encoded.get("input_ids")
+        if not isinstance(ids, list) or not ids or any(type(token) is not int for token in ids):
+            raise ValueError(f"invalid tokenizer output for {split}")
+        lengths.append(len(ids))
+    over = sum(length > maximum for length in lengths)
+    result = {"examples": len(lengths), "maximum_tokens": max(lengths), "over_limit": over}
+    if over:
+        raise ValueError(f"{split} token coverage gate blocked: {over} of {len(lengths)} examples "
+                         f"exceed configured maximum {maximum}; longest has {max(lengths)} tokens")
+    return result
+
+
+def tokenize_complete_batch(batch: dict[str, Any], tokenizer: Any, maximum: int) -> dict[str, Any]:
+    encoded = tokenizer(batch["text"], add_special_tokens=True, truncation=False, padding=False)
+    ids = encoded.get("input_ids")
+    if (not isinstance(ids, list) or len(ids) != len(batch["text"])
+            or any(not isinstance(tokens, list) or not tokens or len(tokens) > maximum
+                   or any(type(token) is not int for token in tokens) for tokens in ids)):
+        raise ValueError("tokenizer batch is invalid or exceeds the configured maximum")
+    return encoded
+
+
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
     policy_path = getattr(args, "promotion_policy", POLICY)
@@ -440,6 +469,19 @@ def train(args: argparse.Namespace) -> None:
     # than silently dropping labels that happen to be absent from the data.
     classes = sorted(set.union(*taxonomy.values())) if taxonomy else None
     binarizer = MultiLabelBinarizer(classes=classes).fit(combined)
+    def check_model_snapshot() -> None:
+        if model_manifest and training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision) != model_evidence:
+            raise ValueError("model snapshot evidence changed")
+
+    check_model_snapshot()
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision,
+                                               local_files_only=bool(model_manifest))
+    try:
+        coverage = {"train": token_coverage(train_rows, tokenizer, args.max_length, "train"),
+                    "validation": token_coverage(validation_rows, tokenizer, args.max_length, "validation")}
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    check_model_snapshot()
     split = {
         "schema_version": "lfg.encoder-development-split.v1",
         "dataset_sha256": dataset_digest,
@@ -466,6 +508,7 @@ def train(args: argparse.Namespace) -> None:
         "training_inputs_sha256": hashlib.sha256(Path(training_inputs.__file__).read_bytes()).hexdigest() if environment_lock or model_manifest else None,
         "wheelhouse_verifier_sha256": hashlib.sha256(Path(training_inputs.lock_wheelhouse.__file__).read_bytes()).hexdigest() if environment_lock else None,
         "seed": args.seed, "epochs": args.epochs, "max_length": args.max_length,
+        "token_coverage": coverage,
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,
         "development_override": args.allow_below_gate,
@@ -493,23 +536,13 @@ def train(args: argparse.Namespace) -> None:
     if not args.resume:
         (args.output / "split-manifest.json").write_text(json.dumps(split, indent=2) + "\n", encoding="utf-8")
 
-    def check_model_snapshot() -> None:
-        if model_manifest and training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision) != model_evidence:
-            raise ValueError("model snapshot evidence changed")
-
     check_model_snapshot()
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision,
-                                               local_files_only=bool(model_manifest))
     def make_dataset(rows: list[dict[str, Any]]) -> Any:
         labels = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in rows]
         return Dataset.from_dict({"text": [row["text"] for row in rows], "labels": binarizer.transform(labels).astype(np.float32)})
 
     def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
-        return tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=args.max_length,
-        )
+        return tokenize_complete_batch(batch, tokenizer, args.max_length)
 
     train_data = make_dataset(train_rows).map(tokenize, batched=True)
     validation_data = make_dataset(validation_rows).map(tokenize, batched=True)

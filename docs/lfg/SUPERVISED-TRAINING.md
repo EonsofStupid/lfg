@@ -129,3 +129,32 @@ were unverified, so the 500-record gate stopped it before output creation.
 This check mocked the Linux cgroup verification because it ran on Windows;
 its other model and environment paths were unused placeholders. It did not
 train a model or establish a reviewed corpus.
+
+## Complete-input training gate
+
+Before creating a run directory, the trainer tokenizes every selected training
+and validation request with the chosen tokenizer, special tokens enabled and
+truncation disabled. It rejects either split if any input exceeds the configured
+`max_length`, and reports aggregate counts and the longest length without
+printing request text. The command can still create its parent directory and
+the persistent sibling lock marker before the check. The run manifest records
+the successful coverage counts.
+The actual training batches also disable truncation and check their lengths.
+This applies to development overrides as well as reviewed runs. A successful
+check establishes token coverage only; it does not establish model quality.
+
+On 2026-10-31, an offline local check used tokenizer files verified against the
+pinned ModernBERT snapshot and 422 real, **unreviewed** training-source
+requests. At the configured 512-token limit, three requests exceeded the limit;
+the longest was 4,353 tokens including special tokens. The new gate rejected
+that set. The private input file SHA-256 was
+`96516c50e388af6eed399c3b0cf6a995de779c81918a7064edaab7e9ea87b5ea`;
+the tokenizer JSON SHA-256 was
+`9fd55248d51d33976b324fc11592e28071da7d41e0e9401dfb7082e30574b7b1`.
+The check used Transformers 4.57.6 on Windows. This is an input-coverage
+observation, not a reviewed corpus or a
+training run. The 422 requests are not necessarily the final training set, and
+held-out data were not inspected for this check. An operator must review the
+long requests and select a suitable model and length or create separately
+reviewed, correctly labeled examples. Raising the length may increase memory
+and compute substantially and has not been capacity-tested for this workload.
