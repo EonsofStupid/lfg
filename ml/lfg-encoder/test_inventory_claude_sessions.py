@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import inspect_claude_inventory
+import inspect_review_context
 import inventory_claude_sessions as inventory
 import corpus_audit
 import prepare_codex_review
@@ -128,6 +129,19 @@ class ClaudeInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ancestry record limit'):
             inspect_claude_inventory.prior_user_context(records[-1], 100000, 10000, 5, 1000, 1)
 
+    def test_missing_parent_field_is_not_treated_as_an_explicit_root(self):
+        root = {**self.row('root'), 'uuid': 'root', 'sessionId': 'session'}
+        selected = {**self.row('selected'), 'uuid': 'selected', 'parentUuid': 'root', 'sessionId': 'session'}
+        self.write([root, selected])
+        _, records = self.inspect()
+        with self.assertRaisesRegex(ValueError, 'invalid or cyclic'):
+            inspect_claude_inventory.prior_user_context(records[-1], 100000, 10000, 5, 1000, 100)
+        selected.pop('parentUuid')
+        self.write([selected])
+        _, records = self.inspect()
+        with self.assertRaisesRegex(ValueError, 'invalid or cyclic'):
+            inspect_claude_inventory.prior_user_context(records[-1], 100000, 10000, 5, 1000, 100)
+
     def test_inventory_prepares_pending_workspace_and_verifies_original_source(self):
         self.write([{**self.row('first request'), 'uuid': 'u1', 'parentUuid': None, 'sessionId': 'session'},
                     {**self.row('second request'), 'uuid': 'u2', 'parentUuid': 'u1', 'sessionId': 'session'},
@@ -167,6 +181,15 @@ class ClaudeInventoryTests(unittest.TestCase):
         token = secrets.token_urlsafe(32)
         config = review_web.load_config(review_web.DEFAULT_CONFIG)
         config['source_verification'] = limits
+        config_path = self.root / 'review-config.json'
+        config_path.write_text(json.dumps(config), encoding='utf-8')
+        with train.run_lock(workspace / 'review'):
+            summary = inspect_review_context.inspect(workspace, second['id'], config_path)
+            self.assertNotIn('messages', summary)
+            self.assertEqual(summary['prior_messages'], 1)
+            detailed = inspect_review_context.inspect(workspace, second['id'], config_path, show_context=True)
+            self.assertEqual([item['text'] for item in detailed['messages']], ['first request'])
+        self.assertEqual(review_corpus.status(workspace)['decisions'], {'pending': 2, 'approved': 0, 'rejected': 0})
         server = review_web.ReviewServer(workspace, 'fixture-reviewer', 0, config, token)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()

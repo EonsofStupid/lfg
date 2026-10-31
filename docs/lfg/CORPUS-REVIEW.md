@@ -658,6 +658,23 @@ assistant output and later messages are excluded. A prefix match does not establ
 context, privacy, rights, label correctness or project independence. A source
 may be appended after inventory; the selected prefix must remain unchanged.
 
+If a review server is already running older code, the read-only context command
+can inspect a pending record without stopping that server. Copy its record ID
+from the screen and use a private config with source-verification and context
+limits (including `max_ancestry_records` for Claude):
+
+```powershell
+python ml/lfg-encoder/inspect_review_context.py --workspace PRIVATE_WORKSPACE `
+  --record-id PENDING_RECORD_ID --config PRIVATE_REVIEW_CONFIG.json --show-context
+```
+
+`--show-context` prints private prior messages to the terminal; omit it for
+counts only. The command makes no decisions or writes, and rechecks the pending
+record after reading the source. It does not take over the running server's
+workspace lock: concurrent review may cause inspection to fail, in which case
+retry against the current record. Terminal output may be retained by the shell
+or other local tooling.
+
 On 2026-10-31, an explicitly scoped scan of the owner's LFG, RRFlow and
 DevPulse Claude session directories found 112 human-marked text records across
 three session files. All 112 selected prefixes verified. The 86 distinct exact
