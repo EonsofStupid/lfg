@@ -8,6 +8,7 @@ rust-version.workspace = true
 [features]
 embedded-ui = []
 onnx-shadow = ["dep:tract", "dep:tokenizers"]
+embedded-onnx = ["onnx-shadow"]
 
 [[bin]]
 name = "lfg-server"
@@ -39,3 +40,6 @@ tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy
 [dev-dependencies]
 tower.workspace = true
 tempfile = "3"
+
+[build-dependencies]
+sha2.workspace = true

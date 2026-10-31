@@ -89,6 +89,10 @@ rule-based. `ml/lfg-encoder/` is the offline training lane for a future
 ONNX-exported encoder (see its own README for the promotion order). It is not
 yet wired into `lfg-runtime`.
 
+For offline comparison, an optional build can embed a selected experimental
+ONNX artifact in the executable. See [native CPU shadow inference](docs/lfg/ONNX-CPU-SHADOW.md);
+this does not enable live model routing or qualify an artifact for release.
+
 Benchmark the current encoder:
 
 ```powershell
