@@ -51,6 +51,14 @@ initialized. The [aggregate probe report](evidence/modernbert-gb10-runtime-probe
 contains its identities. This is neither training nor a 512-token performance
 measurement, and the untrained head cannot make qualified predictions.
 
+On 2026-10-31, the trainer's explicit device selection was also checked in the
+locked Spark environment without loading training examples or starting a run.
+With the GB10 visible, `cuda` selected `cuda:0` and `cpu` selected `cpu`; with
+CUDA hidden, an explicit `cuda` request failed before creating its output
+directory. This checks target selection, not a completed training job or GPU
+memory capacity. The selected target is a configurable run input documented in
+the [trainer instructions](../../ml/lfg-encoder/README.md#checkpointing-and-restart).
+
 Re-run the probe with the copied scripts and selected files in the isolated
 directory, changing paths and settings as appropriate:
 
