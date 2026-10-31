@@ -10,6 +10,8 @@ mod kernel_journal;
 mod kernel_predict;
 use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
+mod exemplar_suggest;
+#[cfg(feature = "onnx-shadow")]
 mod onnx_embedding;
 #[cfg(feature = "onnx-shadow")]
 mod onnx_predict;
@@ -162,6 +164,30 @@ enum Command {
         /// Return sensitive derived vectors for a local parity check.
         #[arg(long)]
         include_embedding: bool,
+    },
+    /// Produce unpromoted exemplar suggestions only for LFG kernel escalations.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxNodeSuggest {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        exemplar_pack: PathBuf,
+        #[arg(long)]
+        pack_sha256: String,
+        #[arg(long)]
+        exemplar_config: PathBuf,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Emit node-validation prediction records instead of detailed results.
+        #[arg(long)]
+        prediction_only: bool,
+        /// Explicitly enable the unqualified experimental path.
+        #[arg(long)]
+        experimental: bool,
     },
     /// Run an unpromoted ONNX artifact for offline comparison only.
     #[cfg(feature = "onnx-shadow")]
@@ -331,6 +357,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &runtime_config,
             include_embedding,
         )?,
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxNodeSuggest {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            exemplar_pack,
+            pack_sha256,
+            exemplar_config,
+            snapshot,
+            prediction_only,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("node suggestions require explicit --experimental".into());
+            }
+            let engine = load_kernel(snapshot)?;
+            exemplar_suggest::run(
+                exemplar_suggest::Options {
+                    artifact: &artifact,
+                    manifest_sha256: &manifest_sha256,
+                    runtime_config: &runtime_config,
+                    exemplar_pack: &exemplar_pack,
+                    pack_sha256: &pack_sha256,
+                    exemplar_config: &exemplar_config,
+                    prediction_only,
+                },
+                &engine,
+            )?;
+        }
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxPredict {
             artifact,

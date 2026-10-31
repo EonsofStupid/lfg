@@ -67,6 +67,8 @@ held-out evaluation remain required before promotion.
 An [experimental per-node exemplar builder](NODE-EXEMPLAR-EXTENSION.md) can
 produce candidate prediction files after the review and admission gate passes.
 It remains an offline Python path and has not been qualified for release.
+The separate [native evaluation runner](NATIVE-NODE-SUGGESTION.md) can invoke
+the experimental Rust candidate directly after re-auditing the same inputs.
 
 ## Local evidence
 
