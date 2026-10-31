@@ -429,6 +429,61 @@ records, then have a human review authorized examples under the labeling guide.
 The four skipped messages need separate format inspection. A separate diverse,
 reviewed training corpus is still required.
 
+On 2026-10-31 `prepare_checkpoint_review.py` re-extracted the pinned primary
+Makers history and compared it with the saved inventory. It excluded the session
+containing the five previously inspected prompts (126 records), then excluded
+seven records matching the normalized text of either the current Codex review
+draft or the earlier LFG/DevPulse development plan and 23 further normalized
+duplicates. The resulting private review workspace is
+`dataset/private/makers-heldout-review-draft.v4/workspace`: 785 pending unlabeled
+records, zero approvals, provisionally assigned to test. The earlier `.v1`
+workspace was checked only against the Codex draft; `.v2` and `.v3` predate the
+preparation manifest. Use `.v4`. The counts are
+records, not independent tasks. A temporary combined audit with the 226-record
+Codex draft found no normalized exact overlap and no within-split duplicates;
+it contained no validation partition and did not qualify either set.
+Repeating the preparation with the same inputs in `.v5` produced a byte-identical
+manifest, plan, taxonomy, candidate records and pending ledger on this machine.
+This checks repeatability, not labeling or independence.
+
+The preparation tool takes one or more explicit reference plans. It excludes
+entire recorded sessions associated with an operator-provided list of previously
+inspected commits, their normalized text wherever repeated, normalized matches
+to all reference-plan records, and remaining normalized duplicates. It requires
+the candidate project and group to be absent from those plans and the taxonomy
+to match. The output is a new private, pending-only review workspace; it does
+not add the test data to the training plan, approve records, or assign labels.
+Its preparation manifest binds the source and review inputs, audit and code
+digests, workspace files, size limit, and aggregate exclusion counts; retain the
+original private inputs to reproduce or investigate it.
+The exclusions are only as complete as the supplied inspection list and reference
+plans. Shared context, paraphrases, related conversations, previous unseen
+exposure, source authorship and rights are not proven by these checks. This
+workspace is a candidate for a future holdout, not evidence of a blinded or
+independent test. Keep it out of model development and tuning; a separate
+validation group and actual human review are still required.
+
+For example, the local candidate was prepared with:
+
+```powershell
+python ml/lfg-encoder/prepare_checkpoint_review.py `
+  --repo 'D:\dev\dev-and-sort\Makers-Impulse\Makers-Impulse' `
+  --revision f92162507e421c2c9a4cb971329a35c0e095b5c0 `
+  --project Makers-Impulse --project-group makers-impulse `
+  --source-inventory ml/lfg-encoder/dataset/private/makers-checkpoint-inventory.f9216250.jsonl `
+  --exclusions ml/lfg-encoder/dataset/private/makers-impulse-review.v1.jsonl `
+  --reference-plan ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace/plan.json `
+  --reference-plan ml/lfg-encoder/dataset/private/real-requests-review.plan.v1.json `
+  --taxonomy ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace/taxonomy.json `
+  --output NEW_PRIVATE_DIRECTORY --max-history-bytes 104857600
+```
+
+The new directory must not exist. It and its workspace contain private original
+prompts; Git ignore is not encryption. The browser review command above accepts
+the workspace path. Its automatic source-check button currently supports Codex
+session records only, not these Git checkpoint records. Review their source
+commits and surrounding context separately before making any decision.
+
 A second local checkout, `D:/dev/dev-and-sort/makers (2)/makers`, at commit
 `ee9831d27407258865ff3676ed8f702e2770e6ff`, contains 19 strictly extracted
 checkpoint prompts in one recorded session, with one exact repetition. Its
