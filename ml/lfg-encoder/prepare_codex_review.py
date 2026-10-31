@@ -9,7 +9,9 @@ import os
 from pathlib import Path
 
 import corpus_audit
+import inspect_claude_inventory
 import inspect_codex_inventory
+import inventory_claude_sessions
 import review_corpus
 import train
 
@@ -20,7 +22,7 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
     assignment_raw = assignments.read_bytes()
     config = json.loads(assignment_raw)
     if not isinstance(config, dict) or set(config) != {'schema_version', 'projects'} or \
-            config['schema_version'] != 'lfg.codex-review-assignments.v1' or not isinstance(config['projects'], dict) or not config['projects']:
+            config['schema_version'] not in ('lfg.codex-review-assignments.v1', 'lfg.claude-review-assignments.v1') or not isinstance(config['projects'], dict) or not config['projects']:
         raise ValueError('invalid project assignments')
     settings = config['projects']
     groups = {}
@@ -38,7 +40,12 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
     selected = [row for row in rows if isinstance(row, dict) and row.get('project') in settings]
     if not selected:
         raise ValueError('no records match the assigned projects')
-    texts = inspect_codex_inventory.verify_many(selected, max_bytes, max_line_bytes)
+    claude = config['schema_version'] == 'lfg.claude-review-assignments.v1'
+    expected_schema = inventory_claude_sessions.SCHEMA if claude else 'lfg.unreviewed-codex-message.v2'
+    if any(item.get('schema_version') != expected_schema for item in selected):
+        raise ValueError('inventory source type does not match assignments')
+    verifier = inspect_claude_inventory if claude else inspect_codex_inventory
+    texts = verifier.verify_many(selected, max_bytes, max_line_bytes)
     if inventory.read_bytes() != raw:
         raise ValueError('inventory changed during verification')
     inventory_hash = hashlib.sha256(raw).hexdigest()
@@ -77,7 +84,7 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
         project = item['project']
         split = settings[project]['split']
         session = hashlib.sha256(os.fsencode(item['source_file'])).hexdigest()
-        family = f'codex-session-{session}'
+        family = f'{"claude" if claude else "codex"}-session-{session}'
         if family in reference_families and reference_families[family] != {split}:
             raise ValueError('candidate session crosses a reference split')
         normalized = corpus_audit.text_key(text)
@@ -91,12 +98,14 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
             continue
         seen[normalized] = split
         identifier = hashlib.sha256((item['source_prefix_sha256'] + ':' + str(item['source_line'])).encode()).hexdigest()
-        source = {'project': project, 'kind': 'codex-session-user-text',
+        source = {'project': project, 'kind': 'claude-session-human-text' if claude else 'codex-session-user-text',
                   'inventory_sha256': inventory_hash, **{key: item[key] for key in (
                       'source_file', 'source_file_sha256', 'source_line', 'source_line_sha256',
                       'source_prefix_sha256', 'source_prefix_bytes', 'text_sha256')}}
+        if claude:
+            source['project_root'] = item['project_root']
         by_project.setdefault(project, []).append({
-            'id': f'codex-{identifier}', 'text': text, 'family': family,
+            'id': f'{"claude" if claude else "codex"}-{identifier}', 'text': text, 'family': family,
             'intents': [], 'capabilities': [], 'risks': [], 'labels_pending': True,
             'verified': False, 'source': source,
             'review_note': 'No labels proposed. Verify source, surrounding context, privacy, and every label.'})
@@ -122,7 +131,7 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
                'pending_review': workspace['examples'], 'pending_by_project': {k: len(v) for k, v in by_project.items()},
                'approved': 0, 'promotion_eligible': False}
     names = ['plan.json', 'taxonomy.json', 'reviews.jsonl'] + [source['path'] for source in sources]
-    manifest = {'schema_version': 'lfg.codex-review-preparation.v1',
+    manifest = {'schema_version': 'lfg.claude-review-preparation.v1' if claude else 'lfg.codex-review-preparation.v1',
                 'inventory_sha256': hashlib.sha256(raw).hexdigest(),
                 'assignments_sha256': hashlib.sha256(assignment_raw).hexdigest(),
                 'max_session_bytes': max_bytes, 'max_line_bytes': max_line_bytes,
@@ -130,9 +139,13 @@ def prepare(inventory: Path, assignments: Path, taxonomy: Path, output: Path,
                                                                      allow_nan=False).encode()).hexdigest()
                                            for report in reference_reports],
                 'preparer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                'source_verifier_sha256': hashlib.sha256(Path(inspect_codex_inventory.__file__).read_bytes()).hexdigest(),
+                'source_verifier_sha256': hashlib.sha256(Path(verifier.__file__).read_bytes()).hexdigest(),
                 'workspace_sha256': {name: hashlib.sha256((output / 'workspace' / name).read_bytes()).hexdigest()
                                      for name in names}, 'summary': summary}
+    if claude:
+        manifest['source_verifier_dependencies_sha256'] = {
+            Path(module.__file__).name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+            for module in (inventory_claude_sessions, inspect_codex_inventory)}
     review_corpus.new_file(output / 'preparation-manifest.json',
                            (json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + '\n').encode())
     return summary

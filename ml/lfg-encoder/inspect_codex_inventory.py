@@ -39,7 +39,7 @@ def verify_many(records: list[dict], max_bytes: int, max_line_bytes: int) -> lis
 
 
 def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, max_line_bytes: int,
-                 on_prior_line=None) -> list[tuple[int, str]]:
+                 on_prior_line=None, parse_message=None) -> list[tuple[int, str]]:
     before = path.stat()
     if any(record['source_prefix_bytes'] > max_bytes or before.st_size < record['source_prefix_bytes']
            for _, record in ordered):
@@ -72,7 +72,7 @@ def verify_group(path: Path, ordered: list[tuple[int, dict]], max_bytes: int, ma
                     raise ValueError('source prefix no longer matches the inventory')
                 if hashlib.sha256(selected).hexdigest() != record['source_line_sha256']:
                     raise ValueError('source line does not match the inventory')
-                found.append((index, message_text(selected, record)))
+                found.append((index, (parse_message or message_text)(selected, record)))
                 current = next(pending, None)
                 if current is None:
                     break
