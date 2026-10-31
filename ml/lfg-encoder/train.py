@@ -246,6 +246,14 @@ def training_support(training: list[dict[str, Any]], validation: list[dict[str, 
             "counts": result}
 
 
+def validate_input_options(development: bool, environment_lock: Path | None, wheelhouse: Path | None,
+                           model_manifest: Path | None, allowed_extra: list[str]) -> None:
+    if bool(environment_lock) != bool(wheelhouse) or (allowed_extra and not environment_lock):
+        raise ValueError("environment lock and wheelhouse must be supplied together")
+    if not development and not (environment_lock and wheelhouse and model_manifest):
+        raise ValueError("reviewed training requires an environment lock, wheelhouse, and local model manifest")
+
+
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
     policy_path = getattr(args, "promotion_policy", POLICY)
@@ -286,6 +294,18 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
     if not re.fullmatch(r"[0-9a-f]{40}", args.model_revision or ""):
         raise SystemExit("training requires --model-revision as a full 40-character lowercase commit hash")
+    environment_lock = getattr(args, "environment_lock", None)
+    wheelhouse = getattr(args, "wheelhouse", None)
+    model_manifest = getattr(args, "model_manifest", None)
+    allowed_extra = getattr(args, "environment_allowed_extra", [])
+    validate_input_options(args.allow_below_gate, environment_lock, wheelhouse, model_manifest, allowed_extra)
+    environment_evidence = model_evidence = None
+    if environment_lock or model_manifest:
+        import training_inputs
+        if environment_lock:
+            environment_evidence = training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra)
+        if model_manifest:
+            model_evidence = training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision)
     try:
         import numpy as np
         import torch
@@ -322,6 +342,10 @@ def train(args: argparse.Namespace) -> None:
         "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "training_config_sha256": args.training_config_sha256,
+        "environment_evidence": environment_evidence,
+        "model_snapshot_evidence": model_evidence,
+        "training_inputs_sha256": hashlib.sha256(Path(training_inputs.__file__).read_bytes()).hexdigest() if environment_lock or model_manifest else None,
+        "wheelhouse_verifier_sha256": hashlib.sha256(Path(training_inputs.lock_wheelhouse.__file__).read_bytes()).hexdigest() if environment_lock else None,
         "seed": args.seed, "epochs": args.epochs, "max_length": args.max_length,
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,
@@ -347,7 +371,13 @@ def train(args: argparse.Namespace) -> None:
     if not args.resume:
         (args.output / "split-manifest.json").write_text(json.dumps(split, indent=2) + "\n", encoding="utf-8")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision)
+    def check_model_snapshot() -> None:
+        if model_manifest and training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision) != model_evidence:
+            raise ValueError("model snapshot evidence changed")
+
+    check_model_snapshot()
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision,
+                                               local_files_only=bool(model_manifest))
     def make_dataset(rows: list[dict[str, Any]]) -> Any:
         labels = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in rows]
         return Dataset.from_dict({"text": [row["text"] for row in rows], "labels": binarizer.transform(labels).astype(np.float32)})
@@ -358,9 +388,11 @@ def train(args: argparse.Namespace) -> None:
     train_data = make_dataset(train_rows).map(tokenize, batched=True)
     validation_data = make_dataset(validation_rows).map(tokenize, batched=True)
     def model_init() -> Any:
+        check_model_snapshot()
         return AutoModelForSequenceClassification.from_pretrained(
             args.base_model, revision=args.model_revision, num_labels=len(binarizer.classes_),
-            problem_type="multi_label_classification", ignore_mismatched_sizes=args.allow_mismatched_sizes)
+            problem_type="multi_label_classification", ignore_mismatched_sizes=args.allow_mismatched_sizes,
+            local_files_only=bool(model_manifest))
     trainer = Trainer(model_init=model_init, args=TrainingArguments(
         output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=args.batch_size,
@@ -368,6 +400,7 @@ def train(args: argparse.Namespace) -> None:
         save_steps=args.checkpoint_steps, load_best_model_at_end=True, save_only_model=False,
         report_to="none"), train_dataset=train_data, eval_dataset=validation_data)
     trainer.train(resume_from_checkpoint=checkpoint)
+    check_model_snapshot()
     trainer.save_model(args.output)
     tokenizer.save_pretrained(args.output)
     (args.output / "labels.json").write_text(json.dumps(binarizer.classes_.tolist(), indent=2), encoding="utf-8")
@@ -384,6 +417,11 @@ def main() -> None:
                         help="reviewed train/validation positive and negative support requirements")
     parser.add_argument("--base-model")
     parser.add_argument("--model-revision", help="full immutable Hugging Face commit hash")
+    parser.add_argument("--model-manifest", type=Path, help="manifest for a local, link-free base-model directory")
+    parser.add_argument("--environment-lock", type=Path, help="hash-locked wheelhouse requirements")
+    parser.add_argument("--wheelhouse", type=Path, help="exact wheelhouse used to build the environment")
+    parser.add_argument("--environment-allowed-extra", action="append", default=[], metavar="DISTRIBUTION",
+                        help="explicit installed bootstrap distribution not present in the wheel lock")
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / "experimental")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--epochs", type=float)
@@ -415,7 +453,7 @@ def main() -> None:
         try:
             with run_lock(args.output):
                 train(args)
-        except ValueError as error:
+        except (OSError, ValueError, UnicodeError) as error:
             raise SystemExit(str(error)) from error
 
 

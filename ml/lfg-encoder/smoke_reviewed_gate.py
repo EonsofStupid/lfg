@@ -12,6 +12,10 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--base-model", required=True)
 parser.add_argument("--model-revision", required=True)
+parser.add_argument("--model-manifest", required=True)
+parser.add_argument("--environment-lock", required=True)
+parser.add_argument("--wheelhouse", required=True)
+parser.add_argument("--environment-allowed-extra", action="append", default=[])
 parser.add_argument("--output", required=True, type=Path, help="new fixture-only directory")
 parser.add_argument("--epochs", required=True)
 parser.add_argument("--max-length", required=True)
@@ -70,10 +74,13 @@ cmd = [sys.executable, "ml/lfg-encoder/train.py", "train", "--dataset", str(work
        "--promotion-policy", str(work / "fixture-policy.json"),
        "--audited-plan", str(plan_path),
        "--base-model", args.base_model, "--model-revision", args.model_revision, "--output", str(work / "model"),
+       "--model-manifest", args.model_manifest, "--environment-lock", args.environment_lock, "--wheelhouse", args.wheelhouse,
        "--epochs", args.epochs, "--max-length", args.max_length, "--batch-size", args.batch_size,
        "--checkpoint-steps", args.checkpoint_steps]
 if args.allow_mismatched_sizes:
     cmd.append("--allow-mismatched-sizes")
+for extra in args.environment_allowed_extra:
+    cmd.extend(["--environment-allowed-extra", extra])
 env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 result = subprocess.run(cmd, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 if result.returncode:

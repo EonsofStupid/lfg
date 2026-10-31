@@ -163,14 +163,14 @@ may access private data; this is not a hosted authentication boundary.
 
 `smoke_reviewed_gate.py` tests the gate through an actual short model-training
 call using invented fixture records and simulated approvals. It creates a new
-output directory, requires an explicitly chosen cached model and immutable
-revision, and disables Hugging Face network access. It deliberately lowers a
+output directory, requires an explicitly chosen local model snapshot, immutable
+revision and bound environment inputs, and disables Hugging Face network access. It deliberately lowers a
 copy of the policy's sample threshold for its two training fixtures; its
 output must never be used as a release candidate or as evidence of human
-review. For example, with a compatible test model already cached:
+review. For example, with a compatible local model snapshot and environment:
 
 ```powershell
-.\.venv\Scripts\python.exe ml/lfg-encoder/smoke_reviewed_gate.py --base-model MODEL --model-revision COMMIT --output target/review-gate-smoke --epochs 1 --max-length 32 --batch-size 1 --checkpoint-steps 1
+.\.venv\Scripts\python.exe ml/lfg-encoder/smoke_reviewed_gate.py --base-model LOCAL_MODEL_DIR --model-revision COMMIT --model-manifest MODEL_MANIFEST --environment-lock LOCK_FILE --wheelhouse WHEELHOUSE --environment-allowed-extra pip --output target/review-gate-smoke --epochs 1 --max-length 32 --batch-size 1 --checkpoint-steps 1
 ```
 
 The requested output directory must not exist. A model that already has a
@@ -181,6 +181,9 @@ they cannot be confused with the actual project review ledger.
 The current fixture deliberately assigns artificial labels to exercise both
 positive and negative support for all taxonomy labels in its two training and
 two validation records; those labels make no semantic claims.
+On 2026-10-31, the fixture-only audited path also completed with the new
+wheelhouse and local-model input checks. Its simulated approvals and output
+remain test fixtures, not evidence of a reviewed corpus.
 
 On 2026-10-30, this smoke command completed offline on the Windows development
 machine using the cached tiny random BERT revision recorded in the

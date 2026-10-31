@@ -38,6 +38,8 @@ The promotion order is fixed:
 
 Training requires `requirements.txt`. Validation uses only the Python standard
 library and does not download a model.
+Reviewed training also requires an operator-selected wheel lock, matching
+wheelhouse and local model snapshot manifest. See the [bound training inputs](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md#bound-training-inputs).
 
 ## Starting a reproducible classifier experiment
 
