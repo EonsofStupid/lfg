@@ -33,3 +33,4 @@ removes three unused SDK directories from the disposable hosted runner only.
 This leaves the image's dependencies and security checks intact; it does not
 prove that the available space is sufficient or qualify the image. A
 non-hosted runner skips this cleanup.
+The SBOM baseline review image job uses the same guarded cleanup script.

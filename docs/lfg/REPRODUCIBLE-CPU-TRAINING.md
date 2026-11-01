@@ -1,5 +1,10 @@
 # Reproducing the real-request CPU development run
 
+**Historical environment:** The lock used for this experiment includes
+`fsspec 2026.2.0` and `transformers 4.57.6`, which a later container scan
+flagged for high-severity vulnerabilities. Do not use it for real training or
+untrusted inputs; retain it only to identify the historical experiment.
+
 This experiment checks repeatability of the existing below-gate run on one
 Windows machine. It does not qualify the model, its unreviewed labels, or a
 release. It does not use or modify the 226 pending review records.

@@ -76,9 +76,20 @@ def _artifact_should_be_ignored(
 
 
 def _collect_package_kinds(
-    sbom: dict[str, Any], ignored_location_patterns: list[str]
+    sbom: dict[str, Any], ignored_location_patterns: list[str],
+    allowed_document_roots: dict[str, set[str]] | None = None,
 ) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
+    allowed_document_roots = allowed_document_roots or {}
+    document_id = sbom.get("SPDXID")
+    descriptions = [relationship.get("relatedSpdxElement") for relationship in sbom.get("relationships", [])
+                    if isinstance(relationship, dict) and relationship.get("spdxElementId") == document_id
+                    and relationship.get("relationshipType") == "DESCRIBES"]
+    root_id = descriptions[0] if document_id == "SPDXRef-DOCUMENT" and len(descriptions) == 1 else None
+    packages = sbom.get("packages")
+    if (root_id is not None and (not isinstance(packages, list)
+            or sum(isinstance(item, dict) and item.get("SPDXID") == root_id for item in packages) != 1)):
+        root_id = None
     artifacts = sbom.get("artifacts")
     if isinstance(artifacts, list):
         for artifact in artifacts:
@@ -89,12 +100,11 @@ def _collect_package_kinds(
             pkg_type = str(artifact.get("type", "unknown")).strip() or "unknown"
             namespace = _normalize_namespace(artifact.get("namespace"))
             found.append((pkg_type, namespace))
-    packages = sbom.get("packages")
     if isinstance(packages, list):
         for package in packages:
             if not isinstance(package, dict):
                 continue
-            purl = ""
+            purls = []
             refs = package.get("externalRefs")
             if isinstance(refs, list):
                 for ref in refs:
@@ -102,11 +112,16 @@ def _collect_package_kinds(
                         continue
                     locator = ref.get("referenceLocator")
                     if isinstance(locator, str) and locator.startswith("pkg:"):
-                        purl = locator
-                        break
-            if not purl:
+                        purls.append(locator)
+            if not purls:
                 continue
-            found.append(_parse_purl(purl))
+            kind = _parse_purl(purls[0])
+            if (root_id is not None and package.get("SPDXID") == root_id
+                    and package.get("primaryPackagePurpose") == "CONTAINER"
+                    and len(purls) == 1
+                    and kind[1] in allowed_document_roots.get(kind[0], set())):
+                continue
+            found.append(kind)
     return found
 
 
@@ -150,12 +165,18 @@ def main() -> None:
     ignored_location_patterns = [
         str(value) for value in policy.get("ignoredLocationPatterns", [])
     ]
+    roots = policy.get("allowedDocumentRootNamespacesByType", {})
+    if (not isinstance(roots, dict) or any(not isinstance(key, str) or not key.strip()
+            or not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values)
+            for key, values in roots.items())):
+        raise SystemExit("invalid allowed document root namespaces")
+    allowed_document_roots = {key: set(values) for key, values in roots.items()}
 
     package_count = _count_packages(sbom)
     growth = package_count - baseline
     allowed_growth_percent = int(round((baseline * max_growth_percent) / 100.0))
     allowed_growth = max(max_growth_absolute, allowed_growth_percent)
-    kinds = _collect_package_kinds(sbom, ignored_location_patterns)
+    kinds = _collect_package_kinds(sbom, ignored_location_patterns, allowed_document_roots)
     observed_types = sorted({pkg_type for pkg_type, _ in kinds})
     unexpected_types = sorted([pkg_type for pkg_type in observed_types if pkg_type not in allowed_types])
 
@@ -186,6 +207,7 @@ def main() -> None:
         "unexpectedPackageTypes": unexpected_types,
         "unexpectedNamespacesByType": unexpected_namespaces,
         "ignoredLocationPatterns": ignored_location_patterns,
+        "allowedDocumentRootNamespacesByType": {key: sorted(values) for key, values in allowed_document_roots.items()},
     }
     print(json.dumps(report, indent=2))
 
