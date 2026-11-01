@@ -74,12 +74,12 @@ the review happened. The sample gate alone does not make a model promotion-ready
 The separate `distill.py` utility can validate trace syntax and create a clearly
 marked placeholder template. A `checksPassed` value is a supplied claim, not an
 executed or verified check; the v2 validation report calls it
-`declaredChecksPassed`. `build-sft` is disabled until trace provenance, data-use
-authorization, review evidence and independent split admission are implemented.
-Neither the placeholder nor the classifier fixture is an approved training set.
-The owner has authorized distillation from their own projects and chats;
-enabling `build-sft` for those sources is the next required step (see
-[model and distillation](../../docs/lfg/MODEL-AND-DISTILLATION.md#what-blocks-this-today)).
+`declaredChecksPassed`. The separate plan-driven `build-sft` path can now prepare
+explicitly selected owner-project or chat teacher traces without requiring a
+reviewed validation set. See [assessment distillation preparation](../../docs/lfg/ASSESSMENT-DISTILLATION.md).
+It records provenance and review as supplied claims; it does not collect teacher
+answers, prove redaction, train a model, or qualify a dataset. Neither the
+placeholder nor the classifier fixture is an approved training set.
 
 1. Agree on a versioned label guide: define each label, positive and negative
    examples, and how to handle multiple intents and uncertain cases. Record who

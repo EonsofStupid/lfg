@@ -12,7 +12,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TRACES = ROOT / "dataset" / "teacher-traces.v1.jsonl"
-DEFAULT_OUTPUT = ROOT / "dataset" / "sft-train.v1.jsonl"
 
 
 @dataclass(frozen=True)
@@ -126,24 +125,6 @@ def command_validate(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2))
 
 
-def _to_sft_row(trace: TeacherTrace) -> dict[str, Any]:
-    return {
-        "id": trace.trace_id,
-        "messages": [
-            {"role": "system", "content": "You are LFG-Code, a precise software engineering assistant."},
-            {"role": "user", "content": trace.prompt},
-            {"role": "assistant", "content": trace.response},
-        ],
-        "metadata": {
-            "language": trace.language,
-            "difficulty": trace.difficulty,
-            "sourceModel": trace.source_model,
-            "checksPassed": trace.checks_passed,
-            "tags": list(trace.tags),
-        },
-    }
-
-
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as fh:
@@ -153,10 +134,11 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def command_build_sft(args: argparse.Namespace) -> None:
-    raise SystemExit(
-        "SFT dataset generation is unavailable: trace provenance, authorization, "
-        "review evidence and independent split admission are not implemented"
-    )
+    import assessment_distill
+    try:
+        print(json.dumps(assessment_distill.build(args.plan, args.output_dir), sort_keys=True))
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+        raise SystemExit(f'SFT preparation rejected: {error}') from error
 
 
 def command_init_template(args: argparse.Namespace) -> None:
@@ -186,13 +168,9 @@ def main() -> None:
     validate.add_argument("--traces", type=Path, default=DEFAULT_TRACES)
     validate.set_defaults(func=command_validate)
 
-    build = sub.add_parser("build-sft", help="unavailable until reviewed trace admission is implemented")
-    build.add_argument("--traces", type=Path, default=DEFAULT_TRACES)
-    build.add_argument("--train-output", type=Path, default=DEFAULT_OUTPUT)
-    build.add_argument("--eval-output", type=Path, default=ROOT / "dataset" / "sft-eval.v1.jsonl")
-    build.add_argument("--train-ratio", type=float, default=0.9)
-    build.add_argument("--seed", type=int, default=731)
-    build.add_argument("--include-failed", action="store_true")
+    build = sub.add_parser("build-sft", help="prepare private selected assessment teacher traces")
+    build.add_argument("--plan", type=Path, required=True)
+    build.add_argument("--output-dir", type=Path, required=True)
     build.set_defaults(func=command_build_sft)
 
     template = sub.add_parser("init-template", help="write a starter teacher-traces JSONL file")

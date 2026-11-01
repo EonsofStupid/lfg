@@ -54,7 +54,9 @@ ml-distill-validate:
 	$(PYTHON) ml/lfg-encoder/distill.py validate-traces --traces ml/lfg-encoder/dataset/teacher-traces.v1.jsonl
 
 ml-distill-build:
-	$(PYTHON) ml/lfg-encoder/distill.py build-sft --traces ml/lfg-encoder/dataset/teacher-traces.v1.jsonl
+	$(if $(strip $(DISTILL_PLAN)),,$(error Set DISTILL_PLAN to the private plan path))
+	$(if $(strip $(DISTILL_OUTPUT_DIR)),,$(error Set DISTILL_OUTPUT_DIR to a new private output directory))
+	$(PYTHON) ml/lfg-encoder/distill.py build-sft --plan "$(DISTILL_PLAN)" --output-dir "$(DISTILL_OUTPUT_DIR)"
 
 image-build:
 	docker build \
