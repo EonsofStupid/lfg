@@ -1,7 +1,8 @@
 # LFG prompt-recipe encoder
 
-This is the training lane for LFG's model, exported for the Rust MasterClyffy
-CPU runtime. Its target is the four results LFG reports: intent, complexity,
+This is where LFG's own model is distilled from the owner's projects and chats
+and exported for the Rust MasterClyffy CPU runtime; see
+[model and distillation](../../docs/lfg/MODEL-AND-DISTILLATION.md). Its target is the four results LFG reports: intent, complexity,
 suggested models and total agents. The current label set covers only intent,
 capability and risk; complexity, model and agent-count labels still need to be
 defined in the [label guide](LABELING.md) and in reviewed data. It is not the
@@ -73,12 +74,16 @@ executed or verified check; the v2 validation report calls it
 `declaredChecksPassed`. `build-sft` is disabled until trace provenance, data-use
 authorization, review evidence and independent split admission are implemented.
 Neither the placeholder nor the classifier fixture is an approved training set.
+The owner has authorized distillation from their own projects and chats;
+enabling `build-sft` for those sources is the next required step (see
+[model and distillation](../../docs/lfg/MODEL-AND-DISTILLATION.md#what-blocks-this-today)).
 
 1. Agree on a versioned label guide: define each label, positive and negative
    examples, and how to handle multiple intents and uncertain cases. Record who
    reviewed each example outside this minimal schema. Only mark `verified` true
-   after human review. Use synthetic or explicitly authorized, sanitized prompts;
-   do not commit private prompts or secrets.
+   after human review. The owner's own projects and chats are explicitly
+   authorized; keep them local and redact secrets. Do not commit private
+   prompts or secrets.
 2. Assemble a representative corpus with hard negatives, paraphrases, multi-step
    requests, and security cases. Keep related examples together when splitting
    data to reduce leakage. Reserve an independently reviewed test set before

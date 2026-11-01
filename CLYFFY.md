@@ -8,11 +8,14 @@ self-contained, CPU-oriented binary and UI that, for each prompt, report the
 intent, complexity, suggested models and total agents, with the evidence behind
 each. It is useful on its own and can be combined with SWAG and RRFlow. SWAG
 accepts LFG's assessment as a suggestion and weights it more heavily after a
-second confirmation, once LFG's suggestions are proven reliable. LFG does not
-grant authorization or produce the final answer.
+configurable confirmation, once LFG's suggestions are proven reliable. LFG does
+not grant authorization or produce the final answer.
 
-The current encoder is rule-based, and the training lane labels only intent,
-capability and risk. Tuning LFG's model toward all four results and shipping it
-as the binary product are the main lines of work; evaluation gates decide when
-a tuned version is trusted. See the project objective and current status in
-[README.md](README.md).
+LFG's model is our own: distilled and fine-tuned on the owner's projects and
+chats, about 650 MB, and bound into one binary that runs locally or as a
+network service. It is built by applying Liquid AI's published efficiency
+research rather than adopting their models. Users start from LFG's baseline and
+can train custom weights on their own successful chats and projects. The
+current encoder is rule-based and the training lane does not yet do this; see
+[model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md) and the current
+status in [README.md](README.md).

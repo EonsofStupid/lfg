@@ -12,10 +12,27 @@ results: the **intent**, the **complexity**, the **models** suggested, and the
 self-contained, CPU-oriented binary with its own UI. It is useful on its own
 and can be combined with SWAG and RRFlow.
 
-When combined, SWAG accepts LFG's assessment as a data-point suggestion. After
-a suggestion receives a second confirmation, SWAG can apply it with more
-weight, but only once LFG's suggestions have been shown to be reliable on real
-tasks. RRFlow keeps authorization and budgets; an LFG suggestion never grants
+LFG's model is our own. It is distilled and fine-tuned on the owner's real
+projects and chats, targets about 650 MB, and is bound with the runtime and UI
+into one clean binary. We apply Liquid AI's published efficiency research
+(hardware-in-the-loop architecture search, short-convolution hybrids, Top-K
+distillation, RIPL's real-time latency targets) to build our own model rather
+than adopting theirs. The same binary runs locally on the user's machine or as
+a network service that clients ping. It hits above its weight by
+incorporating organizational data over time: relationships between projects,
+prompts, models, agents and outcomes, held in organized cache shards and folded
+into its weights by fine-tuning. See
+[model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md).
+
+Every user gets LFG's suggestion baseline. In their spare time they can have
+LFG train on their own chats and projects that they mark as successful, so it
+adapts and creates custom weights for itself. Both the baseline and the
+adaptation are configurable.
+
+When combined, SWAG accepts LFG's assessment as a data-point suggestion. What
+counts as a confirmation, and how much extra weight a confirmed suggestion
+earns, are configurable. The extra weight applies only once LFG's suggestions
+have been shown to be reliable on real tasks. RRFlow keeps authorization and budgets; an LFG suggestion never grants
 permission or dispatches work by itself, and LFG does not produce the final
 answer.
 
@@ -37,11 +54,14 @@ design and the gap between it and the current implementation.
   from a configured catalog (empty by default) exist, but they are split across
   the preflight and category classifiers, whose agent estimates use different
   formulas. No single output yet carries all four results.
-- **Tuning the model:** the training lane in `ml/lfg-encoder/` tunes LFG's
-  model. Its labels currently cover intent, capability and risk only;
-  complexity, model and agent-count labels are needed before tuning can improve
-  all four results. A tuned version replaces or extends the rules only after
-  evaluation gates show its suggestions are reliable.
+- **Building the model:** `ml/lfg-encoder/` is where LFG's model is
+  distilled. Today it fine-tunes off-the-shelf encoders on intent, capability
+  and risk labels only. The trainer is GPU-only, and distillation dataset
+  building (`distill.py build-sft`) is disabled. The
+  [model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md#what-blocks-this-today)
+  direction lists what must change. Evaluation gates decide when a model
+  version is trusted; they do not block training on the owner's authorized
+  projects.
 - **Product:** the self-contained binary, embedded UI, configuration and
   integrations are tracked in the [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md).
 

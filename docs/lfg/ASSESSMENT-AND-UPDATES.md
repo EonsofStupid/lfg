@@ -17,8 +17,9 @@ and [transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/t
 specifications define those protocol boundaries.
 
 When integrated with RRFlow, LFG supplies its assessment as a suggestion. SWAG
-accepts it as a data point and weights it more heavily after a second
-confirmation, once LFG's suggestions are proven reliable. `RrdEngine` retains
+accepts it as a data point and weights it more heavily after a confirmation
+whose sources and weight are configurable, once LFG's suggestions are proven
+reliable. `RrdEngine` retains
 authorization, admission, budgets, and durable state. The project configuration identifies the provider
 bindings and subscriptions the operator has made available; a claim that a
 subscription exists is distinct from a verified usable binding. Unknown or
