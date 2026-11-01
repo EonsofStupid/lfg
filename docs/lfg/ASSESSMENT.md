@@ -67,9 +67,12 @@ Prompts are selected by the same rules as the private inventories in
 
 ## Privacy
 
-Prompt text is scored in memory and dropped. Only model names, dates and counts
-are kept, in memory, and nothing leaves the machine. From `~/.claude.json` LFG
-uses only the plan and model option fields, and it does not open credential files.
+Prompt text is scored in memory and dropped. Model and subscription metadata,
+dates and counts are kept in memory; this collection does not transmit them.
+LFG parses `~/.claude.json`
+while retaining only the plan and model option fields; the whole file is read by
+the parser, but other account fields are not retained. It does not open separate
+credential files.
 Traces record the IDs of the rules that fired, never prompt words.
 
 Learning starts with `lfg-server serve`. `LFG_LEARNING=off` disables it. A server

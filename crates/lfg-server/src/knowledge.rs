@@ -16,6 +16,7 @@ use lfg_core::assessment::{
     AssessmentConfig, BracketUsage, Knowledge, KnowledgeSource, KnownModel, ObservedSubscription,
     bracket_for,
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
@@ -360,33 +361,57 @@ fn title_words(value: &str) -> String {
         .join(" ")
 }
 
-/// Claude's plan and extra model options. Reads only those fields; the account's
-/// identity fields and any tokens are never touched or kept.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeConfigProjection {
+    oauth_account: Option<ClaudePlanProjection>,
+    additional_model_options_cache: Option<Vec<ClaudeModelProjection>>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudePlanProjection {
+    organization_type: Option<String>,
+    organization_rate_limit_tier: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeModelProjection {
+    value: Option<String>,
+    label: Option<String>,
+    description: Option<String>,
+}
+
+/// Stream the config while retaining only the plan and model-option fields.
+/// The parser still reads the file, but does not retain other account fields.
 fn read_claude_account(path: &Path) -> Option<ClaudeAccount> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    let account = &value["oauthAccount"];
-    let plan = account["organizationType"].as_str().map(|kind| {
+    let reader = BufReader::new(File::open(path).ok()?);
+    let value: ClaudeConfigProjection = serde_json::from_reader(reader).ok()?;
+    let account = value.oauth_account.unwrap_or_default();
+    let plan = account.organization_type.as_deref().map(|kind| {
         let name = title_words(kind);
-        let multiplier = account["organizationRateLimitTier"]
-            .as_str()
+        let multiplier = account
+            .organization_rate_limit_tier
+            .as_deref()
             .and_then(|tier| tier.rsplit('_').next())
             .filter(|word| word.ends_with('x') && word[..word.len() - 1].parse::<u32>().is_ok());
         multiplier.map_or(name.clone(), |value| format!("{name} {value}"))
     });
-    let models = value["additionalModelOptionsCache"]
-        .as_array()
+    let models = value
+        .additional_model_options_cache
+        .as_deref()
         .map(|options| {
             options
                 .iter()
                 .filter_map(|option| {
-                    let model = clean_model(option["value"].as_str()?)?;
+                    let model = clean_model(option.value.as_deref()?)?;
                     Some(KnownModel {
                         subscription_id: CLAUDE.into(),
                         model: model.to_string(),
-                        label: option["label"].as_str().unwrap_or(model).to_string(),
-                        description: option["description"]
-                            .as_str()
+                        label: option.label.as_deref().unwrap_or(model).to_string(),
+                        description: option
+                            .description
+                            .as_deref()
                             .unwrap_or_default()
                             .to_string(),
                         origin: "provider-list".into(),
@@ -873,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_lists_decide_what_is_offered_and_identity_is_never_read() {
+    fn provider_lists_decide_what_is_offered_and_identity_is_not_retained() {
         let root = scratch("lists");
         std::fs::create_dir_all(root.join("codex")).unwrap();
         std::fs::write(
