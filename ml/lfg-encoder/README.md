@@ -3,18 +3,21 @@
 This is where LFG's own model is distilled from the owner's projects and chats
 and exported for the Rust MasterClyffy CPU runtime; see
 [model and distillation](../../docs/lfg/MODEL-AND-DISTILLATION.md). Its target is the four results LFG reports: intent, complexity,
-suggested models and total agents. The current label set covers only intent,
-capability and risk; complexity, model and agent-count labels still need to be
-defined in the [label guide](LABELING.md) and in reviewed data. It is not the
+suggested models and total agents. The original label set covers intent,
+capability and risk. A separate project-profile assessment schema defines
+complexity, model, effort and agent-count judgments, but the local workspace
+does not yet contain reviewed assessment targets. It is not the
 Jina/GTE retrieval lesson and it does not write the final CoSTAR packet.
 Runtime prompts are not collected here. The checked-in corpus is intentionally
 authored synthetic data.
 
-Training is GPU-only. CPU is reserved for the exported ONNX/Rust proof; the
-trainer refuses to fall back to CPU. The active reviewed training path uses the
+The intent/capability/risk fine-tuner requires a GPU and refuses to fall back to
+CPU. That reviewed training path uses the
 Transformers `Trainer`. A separately authored GPU prototype remains in the
 source but is not integrated with this path; Unsloth is not currently the
-active training engine.
+active training engine. The experimental [assessment-head trainer](../../docs/lfg/ASSESSMENT-TRAINING.md)
+separately supports CPU or CUDA with a frozen encoder. It produces an
+unqualified offline weight pack and does not yet run inside the binary.
 
 This lane tunes the model behind the objective in the root
 [README](../../README.md). A trained artifact becomes the runtime encoder only

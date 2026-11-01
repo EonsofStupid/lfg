@@ -54,14 +54,17 @@ design and the gap between it and the current implementation.
   from a configured catalog (empty by default) exist, but they are split across
   the preflight and category classifiers, whose agent estimates use different
   formulas. No single output yet carries all four results.
-- **Building the model:** `ml/lfg-encoder/` is where LFG's model is
-  distilled. Today it fine-tunes off-the-shelf encoders on intent, capability
-  and risk labels only. The trainer is GPU-only, and distillation dataset
-  building (`distill.py build-sft`) is disabled. The
+- **Building the model:** `ml/lfg-encoder/` contains experimental training
+  tools. The intent, capability and risk fine-tuner requires a GPU; an offline
+  experimental assessment-head trainer can use CPU or CUDA with a frozen
+  locally supplied encoder. Its weight pack has not been trained on reviewed
+  user assessments and cannot yet produce runtime predictions. Distillation
+  dataset building (`distill.py build-sft`) is disabled. The
   [model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md#what-blocks-this-today)
-  direction lists what must change. Evaluation gates decide when a model
-  version is trusted; they do not block training on the owner's authorized
-  projects.
+  direction lists what must change. The assessment-head trainer currently
+  requires reviewed train and validation records; support for exploratory
+  training on other authorized data remains work to be done. Evaluation gates
+  decide when a model version is trusted.
 - **Product:** the self-contained binary, embedded UI, configuration and
   integrations are tracked in the [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md).
 

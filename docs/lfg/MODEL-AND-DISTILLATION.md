@@ -153,13 +153,16 @@ As of 2026-10-31:
    authorization; enable it for the owner's projects.
 2. The label guide limits training data to synthetic or explicitly authorized
    prompts. The owner's projects are now explicitly authorized.
-3. Training labels cover intent, capability and risk only. Complexity, models
-   and agent counts are missing.
+3. The original labels cover intent, capability and risk. A separate assessment
+   schema supports complexity, models, effort and agent counts, but the local
+   review workspace has no reviewed targets for them.
 4. The trainer fine-tunes off-the-shelf encoders (MiniLM, ModernBERT). There is
    no architecture of our own, no hardware-in-the-loop search and no 650 MB
    budget.
-5. The trainer is GPU-only, so there is no CPU path for user-side custom
-   weights, and no network-service mode exists.
+5. The fine-tuner is GPU-only. An experimental offline assessment-head trainer
+   supports CPU and CUDA, but its weights cannot yet be used by the runtime;
+   there is no complete user-side custom-weight training path. The intended
+   learned network-service mode does not yet exist.
 6. The runtime's answers come from rules split across two classifiers. No
    distilled model is bound into the binary.
 7. There is no organizational relationship record, cache-shard store, or
