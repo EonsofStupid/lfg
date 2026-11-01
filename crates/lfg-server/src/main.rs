@@ -6,6 +6,7 @@ use lfg_server::{AppState, router_with_ui};
 use tokio::net::TcpListener;
 
 mod baseline_predict;
+mod dev_log;
 mod kernel_journal;
 mod kernel_predict;
 use kernel_journal::Journal;
@@ -232,6 +233,23 @@ enum Command {
         #[arg(long)]
         bind: Option<SocketAddr>,
     },
+    /// Record bounded, prompt-free developer statistics from a local server.
+    DevLog {
+        /// Loopback address of the LFG server, for example 127.0.0.1:4317.
+        #[arg(long)]
+        server: SocketAddr,
+        /// New file to create; existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_ms: u64,
+        #[arg(long)]
+        max_response_bytes: usize,
+        #[arg(long)]
+        max_bytes: u64,
+    },
 }
 
 #[tokio::main]
@@ -429,6 +447,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             prompt_file,
         } => lfg_bench(iterations, prompt_file)?,
         Command::Serve { bind } => serve(bind).await?,
+        Command::DevLog {
+            server,
+            output,
+            interval_ms,
+            timeout_ms,
+            max_response_bytes,
+            max_bytes,
+        } => {
+            dev_log::run(
+                server,
+                output,
+                interval_ms,
+                timeout_ms,
+                max_response_bytes,
+                max_bytes,
+            )
+            .await?
+        }
     }
     Ok(())
 }

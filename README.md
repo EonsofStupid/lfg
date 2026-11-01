@@ -111,6 +111,11 @@ For a release build that embeds the browser assets in the executable, see
 [bundled UI builds](docs/lfg/BUNDLED-UI.md). The UI build is a build-time
 prerequisite, not a runtime Node.js requirement.
 
+Inspector can download its current diagnostic snapshot. To keep bounded local
+timing and outcome logs in a second process, see
+[developer observability](docs/lfg/DEVELOPER-OBSERVABILITY.md#keep-local-diagnostics).
+These diagnostics do not include prompts or establish model quality.
+
 Check activation without consuming a model run:
 
 ```bash
