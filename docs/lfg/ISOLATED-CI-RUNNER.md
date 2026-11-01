@@ -1,7 +1,7 @@
 # Disposable checked-merge runner
 
 The checked-merge workflow can use a repository-configured runner for the
-explicitly labeled `codex/` pull requests it is allowed to merge. Without the
+explicitly labeled same-repository pull requests it is allowed to merge. Without the
 `LFG_CHECKED_MERGE_RUNNER` repository variable it continues to use
 `ubuntu-latest`. The ordinary CI, release and SBOM workflows remain on their
 existing runners; configuring this runner does not make those checks pass.
@@ -29,7 +29,7 @@ The host must have Docker Desktop running and a GitHub CLI login with repository
 administration access. Set the repository variable to a JSON runner selection,
 for example `["lfg-checked-merge"]`, and choose the same label in
 the supervisor configuration. The checked-merge workflow selects that runner
-only for a same-repository, non-draft `codex/` PR marked
+only for a same-repository, non-draft PR marked
 `ready-to-auto-merge`. It tests the checkout and, after verification, checks
 that both head and base still match before requesting the merge. Branch rules
 and GitHub permissions still apply. A changed head or base requires a new run.

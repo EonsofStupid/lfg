@@ -118,7 +118,9 @@ inputs were blinded, authenticate reviewers, or qualify an artifact. Producer
 and artifact hashes in the prediction file are claims; the report binds the
 file bytes but cannot establish how they were produced. It does not assess the
 held-out test split, set promotion thresholds, train these targets or provide
-their native runtime inference. Those remain separate work.
+their native runtime inference. An experimental offline trainer now exists;
+see [assessment training](ASSESSMENT-TRAINING.md). It produces a private
+weight pack, but does not yet generate predictions or provide native inference.
 
 On 2026-11-01 UTC, an optimistic read-only audit of the local training review
 workspace found 598 candidates, 569 without even draft labels, and zero current

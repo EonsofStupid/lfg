@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'codex/') && contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge') && vars.LFG_CHECKED_MERGE_RUNNER) || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge') && vars.LFG_CHECKED_MERGE_RUNNER) || '"ubuntu-latest"') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,6 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.event.pull_request.head.ref, 'codex/') &&
       contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge')
     runs-on: ${{ fromJSON(vars.LFG_CHECKED_MERGE_RUNNER || '"ubuntu-latest"') }}
     timeout-minutes: 5
@@ -83,7 +82,7 @@ jobs:
           live_base=$(gh api "repos/$REPOSITORY/branches/main" --jq '.commit.sha')
           jq -e --arg repo "$REPOSITORY" '
             .state == "open" and .draft == false and .base.ref == "main" and
-            .head.repo.full_name == $repo and (.head.ref | startswith("codex/")) and
+            .head.repo.full_name == $repo and
             any(.labels[]; .name == "ready-to-auto-merge")
           ' <<< "$pr" >/dev/null
           if [[ "$live_head" != "$TESTED_HEAD" || "$live_base" != "$TESTED_BASE" ]]; then
