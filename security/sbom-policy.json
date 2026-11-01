@@ -15,6 +15,9 @@
     "pypi": ["<none>"],
     "rpm": ["almalinux"]
   },
+  "allowedDocumentRootNamespacesByType": {
+    "oci": ["<none>"]
+  },
   "ignoredLocationPatterns": [
     ".dist-info/sboms/",
     "auditwheel.cdx.json"

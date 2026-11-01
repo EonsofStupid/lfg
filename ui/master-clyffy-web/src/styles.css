@@ -124,6 +124,14 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 
 .dev-panel { margin-top: 1rem; padding: 1.25rem; border: 1px solid oklch(0.7 0.14 160 / .38); background: oklch(0.15 0.028 159); }
 .dev-panel h2 { margin: .25rem 0; }
+.supervision-connect { display: grid; gap: .4rem; max-width: 48rem; margin: 1rem 0; }
+.supervision-connect input { padding: .65rem; color: inherit; background: #10251d; border: 1px solid #688b78; }
+.supervision-counts { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1rem 0; }
+.supervision-counts div { display: grid; gap: .3rem; flex: 1 1 10rem; padding: .8rem; border: 1px solid #688b78; }
+.supervision-counts strong { font-size: 1.8rem; }
+.supervision-actions { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; }
+.supervision-actions a { color: #baf5cf; }
+.classification-explainer { margin: .5rem 1rem; color: oklch(0.83 0.04 160); font-size: .85rem; }
 .dev-panel p { color: oklch(0.83 0.04 160); line-height: 1.45; }
 .dev-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .dev-heading > span { font-size: .8rem; overflow-wrap: anywhere; }

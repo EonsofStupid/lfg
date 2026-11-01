@@ -405,8 +405,7 @@ Python code; use a new process with an explicitly supplied profile after safely
 handling any work in the existing session.
 
 The same workspace can be reviewed in a browser using the Python training
-tools. This is a local corpus-review interface, not the server's developer UI
-or an LLM configuration editor:
+tools. It is a local corpus-review interface, not an LLM configuration editor:
 
 ```powershell
 python ml/lfg-encoder/review_web.py --workspace ml/lfg-encoder/dataset/private/real-request-review-workspace.v1 --reviewer REVIEWER_ID
@@ -426,6 +425,36 @@ the printed URL's fragment. The page removes both the token and record ID from
 the address bar after reading them. This is a local bearer link: anyone who
 obtains it while the server is running can access the review workspace. The
 reviewer name is a local assertion, not authenticated identity.
+
+### Connect review progress to Inspector
+
+For a local developer UI, copy `review-web-config.v1.json` to a private
+configuration file and add `"developer_ui_origins": ["http://127.0.0.1:5174"]`,
+replacing the example with the **exact** loopback HTTP origin displayed in
+Inspector. Use that file with `--config`. Start the review server as above with
+the appropriate `--assessment-profile` when assessment targets are configured.
+Only one server can hold a workspace lock; stop an existing review session
+before starting another. In Inspector, paste the complete URL printed by the
+review server. The panel displays real pending, approved, and rejected counts
+and opens the full review interface for source verification, redaction, target
+selection and explicit human decisions. Refresh counts after reviewing.
+
+This opt-in permits that exact local UI origin to read only authenticated
+`/api/status`; review items and decisions remain restricted to the review
+server's own origin. The bearer URL is held in browser memory until disconnect
+or page close. Only allow an origin whose application and users you trust: the
+token grants access to the full private workspace. Hosted/non-loopback UIs are
+not supported by this connection. Approval counts are not model training,
+quality metrics, or a guarantee that assessment targets are present. A separate
+training run and held-out evaluation remain necessary.
+
+The review workflow records provenance and leaves unknown targets unknown.
+Select varied real projects and difficult cases for review rather than treating
+volume or repeated near-duplicates as proof of coverage. Research on
+[diversity-aware data selection](https://proceedings.iclr.cc/paper_files/paper/2025/file/faa6144674bce872365874c576b4f56f-Paper-Conference.pdf)
+motivates examining selection diversity; it does not establish that this UI or
+any particular selection method improves LFG. Keep independent project or
+conversation groups for evaluation and measure the trained model separately.
 
 The browser displays one pending request, source and proposed labels at a time.
 It displays the application rule and boundary for each label from the
