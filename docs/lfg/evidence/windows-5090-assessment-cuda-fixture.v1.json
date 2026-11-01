@@ -1,0 +1,65 @@
+{
+  "code_sha256": {
+    "assessment_train.py": "9ba0a1a43ec1f864e9fe6eb64e66d36fa5f983ba7c0d2faa82607bfe8ccd439c",
+    "lock_wheelhouse.py": "1c8a777770ef14fd865fd2792b64fef70a04fa27d7cdca5414ee7f6b30d2f40b",
+    "probe_assessment_cuda.py": "1adcdcfd9f83f466548c8ab4a6c6cd6269b876b349ae0cdc26223c0a622130f3",
+    "training_inputs.py": "b3f1dd0068bed83f4be63c612545afa41e2c98d31d1bb2f3224c66a9b88836c5"
+  },
+  "config_sha256": "1d3f839e0f7d145076518d7268a16e3c42ca68ebeb39c5b8901dd98011e6a233",
+  "cuda_capability": [
+    12,
+    0
+  ],
+  "cuda_device_name": "NVIDIA GeForce RTX 5090 Laptop GPU",
+  "cuda_memory_fraction": 0.03,
+  "device_index": 0,
+  "device_override": "cuda",
+  "dimension": 384,
+  "elapsed_seconds": 6.0451405000058,
+  "encoder_versions": {
+    "cublas_workspace_config": ":4096:8",
+    "cuda_runtime": "13.0",
+    "cuda_visible_devices": null,
+    "deterministic_algorithms": true,
+    "device_name": "NVIDIA GeForce RTX 5090 Laptop GPU",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.9",
+    "torch": "2.14.1+cu130",
+    "transformers": "4.57.6"
+  },
+  "environment_before_probe": {
+    "allowed_extra": [
+      "pip"
+    ],
+    "installed_files_verified": false,
+    "installed_versions_sha256": "d59d0cefde5e8f81b8a45fb05982adbf8433e70b263f55a7b5a8fda9446c84a3",
+    "lock_sha256": "1cafd9bbdfa374a0d769ad80f44bfaae2ed98c4cff5454d777be678711fcd735",
+    "locked_wheel_payload": {
+      "bytes": 3444306759,
+      "excluded_wheel_records": 54,
+      "excluded_wheel_scripts": 3,
+      "files": 25332,
+      "payload_sha256": "2593b1ea7cce796289a5c019107a761bcd783b36c15b9a6f92d5439c6dda6ad7",
+      "schema_version": "lfg.installed-wheel-payload.v1"
+    }
+  },
+  "fixture_only": true,
+  "heads": [
+    "agent_count",
+    "complexity",
+    "effort",
+    "models"
+  ],
+  "model": {
+    "files": 6,
+    "manifest_sha256": "caf9ef849323ffcc2075b9d13575854c4c7cbe3ffad412abba2b58ce67d0e89e",
+    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+    "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+  },
+  "peak_cuda_allocated_bytes": 124754944,
+  "peak_cuda_reserved_bytes": 142606336,
+  "promotion_eligible": false,
+  "quality_evidence": false,
+  "schema_version": "lfg.assessment-cuda-fixture-probe.v1",
+  "weights_saved": false
+}
