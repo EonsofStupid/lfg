@@ -140,6 +140,19 @@ restricted environment. Its inspected import table listed Windows system DLLs,
 not an MSVC runtime or ONNX Runtime DLL. This is not a clean-machine test,
 an independent toolchain build, a signed release, or evidence of model quality.
 
+On 2026-10-31 the same two-build procedure was repeated for commit
+`656ca1974ebb5e66993c6d47a7afc35246ed208a`, with two jobs, Node 24.21.0,
+npm 11.19.0 and rustc 1.98.1. The two UI outputs and 8,323,072-byte binaries
+matched; the executable SHA-256 was
+`4035661f759b369aed76cf57d07e750dae268a78ba6d42cfaee53730891e1dbc`.
+One copy, run in a temporary directory with its own state directory, matched
+the kernel golden and served the embedded page, JavaScript and eight question
+banks. npm reported an unapproved `esbuild` install script, though both UI builds
+succeeded. The report and builds are retained under
+`target/lfg-repro-656ca19-20261031-v1/`. This baseline predates the optional
+choice-evidence gate and does not include a trained model; it is a same-machine
+repeatability and smoke check, not a clean-host or release qualification.
+
 ## Linux ARM64 baseline
 
 The following command rebuilds a Linux musl baseline twice using explicitly

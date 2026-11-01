@@ -39,6 +39,34 @@ and escalates on conflicting or absent evidence. Score uses an integer weighted
 average; Extract takes the first matching rule's named capture. Compose finishes
 the result. Extracted values appear in the output and can contain private input.
 
+A choice can optionally declare `minEvidencePpm` in its snapshot. The engine
+first combines the matched rule weights for each option with the same noisy-OR
+calculation used for ranking, then compares the winning option's **unnormalized**
+value to that minimum. If it is below the minimum, the result escalates with
+`below_minimum_evidence`; its choice hop reports the unnormalized `evidencePpm`
+alongside the existing relative `topScorePpm` and `marginPpm`. A value equal to
+the minimum passes this gate. The ordinary relative threshold and ambiguity gate
+still apply. The minimum and rule weights are configured values, not calibrated
+probabilities; correlated or duplicated rules can inflate noisy-OR evidence.
+No minimum is selected automatically. Snapshots that omit it retain their
+previous behavior and output; older binaries reject the new snapshot field.
+
+In the existing 422-request, unreviewed development diagnostic, all recorded
+results matched the example snapshot digest. Of 36 choice hops, 20 at
+`operation` used one rule whose weight was below that node's relative threshold
+but whose normalized top score was 1,000,000. The weights and the relative
+threshold have different meanings, so this observation does not establish that
+any choice is wrong or select a suitable minimum. It demonstrates why an
+independently configured evidence gate can be useful. The bundled example has
+not been changed and these requests are not approved evaluation labels.
+An exploratory rerun used the current debug binary and a private copy of the
+snapshot with only the `operation` minimum set to its existing 800,000 relative
+threshold and a distinct revision. All 422 original-snapshot results matched
+the earlier saved results as parsed JSON. The illustrative
+minimum changed 20 complete results to `below_minimum_evidence`; two remained
+complete and 400 remained escalated. This is a behavior comparison, not a
+measured accuracy improvement or a recommended operating threshold.
+
 Results carry the snapshot digest and revision, an address, a seeded XXH3 key
 computed from the address without its revision, and per-hop rule IDs, fields,
 pattern digests and configured weights. Equal keys are not proof that distinct

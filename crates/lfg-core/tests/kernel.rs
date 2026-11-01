@@ -90,6 +90,42 @@ fn missing_evidence_gate_pruning_and_ambiguous_choice_are_explicit() {
 }
 
 #[test]
+fn optional_minimum_evidence_gates_raw_support_without_changing_legacy_snapshots() {
+    let mut config = snapshot();
+    config["nodes"]["choice"]["rules"][0]["weightPpm"] = json!(300000);
+    let legacy = evaluate(&config, Some("yes"), "fix rust");
+    assert_eq!(legacy["state"], "complete");
+    assert_eq!(legacy["hops"][1]["topScorePpm"], 1000000);
+    assert!(legacy["hops"][1].get("evidencePpm").is_none());
+
+    config["nodes"]["choice"]["minEvidencePpm"] = json!(500000);
+    let insufficient = evaluate(&config, Some("yes"), "fix rust");
+    assert_eq!(insufficient["state"], "escalate");
+    assert_eq!(insufficient["reason"], "below_minimum_evidence");
+    assert_eq!(insufficient["hops"][1]["topScorePpm"], 1000000);
+    assert_eq!(insufficient["hops"][1]["evidencePpm"], 300000);
+
+    config["nodes"]["choice"]["rules"].as_array_mut().unwrap().push(json!(
+        {"id":"second-fix-rule","field":"prompt","pattern":"rust","option":"fix","weightPpm":300000}
+    ));
+    let sufficient = evaluate(&config, Some("yes"), "fix rust");
+    assert_eq!(sufficient["state"], "complete");
+    assert_eq!(sufficient["hops"][1]["evidencePpm"], 510000);
+    assert_eq!(sufficient, evaluate(&config, Some("yes"), "fix rust"));
+    config["nodes"]["choice"]["minEvidencePpm"] = json!(510000);
+    assert_eq!(
+        evaluate(&config, Some("yes"), "fix rust")["state"],
+        "complete"
+    );
+    config["nodes"]["choice"]["thresholdPpm"] = json!(900000);
+    let competing = evaluate(&config, Some("yes"), "fix explain rust");
+    assert_eq!(competing["reason"], "below_threshold");
+    assert_eq!(competing["hops"][1]["evidencePpm"], 800000);
+    config["nodes"]["choice"]["minEvidencePpm"] = json!(1000001);
+    assert!(Engine::from_json(config.to_string().as_bytes()).is_err());
+}
+
+#[test]
 fn rejects_bad_rules_missing_targets_cycles_and_oversize_input() {
     let mut config = snapshot();
     config["nodes"]["done"] = json!({"kind":"gate","next":"gate","rules":[
