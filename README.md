@@ -58,12 +58,14 @@ design and the gap between it and the current implementation.
   tools. The intent, capability and risk fine-tuner requires a GPU; an offline
   experimental assessment-head trainer can use CPU or CUDA with a frozen
   locally supplied encoder. Its weight pack has not been trained on reviewed
-  user assessments and cannot yet produce runtime predictions. Distillation
-  dataset building (`distill.py build-sft`) is disabled. The
+  user assessments and cannot yet produce runtime predictions. A plan-driven
+  distillation builder prepares selected teacher traces, but there is no
+  integrated assessment SFT trainer or qualified distilled model. The
   [model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md#what-blocks-this-today)
   direction lists what must change. The assessment-head trainer currently
-  requires reviewed train and validation records; support for exploratory
-  training on other authorized data remains work to be done. Evaluation gates
+  requires reviewed train and validation records; the separate SFT preparation
+  path allows explicitly selected unreviewed teacher traces. A trainer for those
+  traces remains work to be done. Evaluation gates
   decide when a model version is trusted.
 - **Product:** the self-contained binary, embedded UI, configuration and
   integrations are tracked in the [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md).

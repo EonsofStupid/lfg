@@ -148,9 +148,11 @@ when local meets the latency budget.
 
 As of 2026-10-31:
 
-1. `distill.py build-sft` is disabled pending provenance, data-use
-   authorization, review and split checks. This document records the data-use
-   authorization; enable it for the owner's projects.
+1. `distill.py build-sft` prepares selected owner-project or chat teacher
+   traces through an operator-supplied plan; provenance, authorization,
+   redaction, review and outcome are recorded claims rather than independently
+   verified facts. It does not collect teacher assessments or train a student.
+   See [assessment distillation preparation](ASSESSMENT-DISTILLATION.md).
 2. The label guide limits training data to synthetic or explicitly authorized
    prompts. The owner's projects are now explicitly authorized.
 3. The original labels cover intent, capability and risk. A separate assessment

@@ -17,7 +17,7 @@ class TraceAdmissionTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(row["verified"] is False for row in rows))
 
-    def test_template_makes_no_check_or_teacher_claim_and_builder_fails_closed(self):
+    def test_template_makes_no_check_or_teacher_claim_and_builder_requires_plan(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             trace = root / "trace.jsonl"
@@ -32,16 +32,9 @@ class TraceAdmissionTests(unittest.TestCase):
             report = subprocess.run([sys.executable, str(SCRIPT), "validate-traces", "--traces", str(trace)],
                                     check=True, capture_output=True, text=True)
             self.assertEqual(json.loads(report.stdout)["declaredChecksPassed"], 1)
-            train_output = root / "train.jsonl"
-            eval_output = root / "eval.jsonl"
-            train_output.write_text("preserve\n", encoding="utf-8")
-            result = subprocess.run([sys.executable, str(SCRIPT), "build-sft", "--traces", str(trace),
-                                     "--train-output", str(train_output), "--eval-output", str(eval_output),
-                                     "--include-failed"], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), "build-sft"], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("admission are not implemented", result.stderr)
-            self.assertEqual(train_output.read_text(encoding="utf-8"), "preserve\n")
-            self.assertFalse(eval_output.exists())
+            self.assertIn("--plan", result.stderr)
 
 
 if __name__ == "__main__":

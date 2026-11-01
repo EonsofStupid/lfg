@@ -22,7 +22,9 @@ param(
     [string]$PythonCommand = "",
     [string]$BuildVersion = "0.0.0-dev",
     [string]$BuildRevision = "",
-    [string]$SbomOutputPath = "output\\sbom\\lfg.spdx"
+    [string]$SbomOutputPath = "output\\sbom\\lfg.spdx",
+    [string]$DistillPlan = "",
+    [string]$DistillOutputDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,12 +187,16 @@ function Distill-Validate {
 
 function Distill-Build {
     $python = Resolve-PythonCommand -Candidate $PythonCommand
-    $traces = "ml/lfg-encoder/dataset/teacher-traces.v1.jsonl"
-    if (-not (Test-Path $traces)) {
-        throw "$traces is missing. Run DistillTemplate first."
+    if (-not $DistillPlan -or -not $DistillOutputDirectory) {
+        throw "DistillBuild requires -DistillPlan and -DistillOutputDirectory."
     }
-    Invoke-Step "Building SFT train/eval datasets" {
-        Invoke-NativeChecked -Command { & $python "ml/lfg-encoder/distill.py" build-sft --traces $traces } -FailureMessage "distill build-sft failed"
+    if (-not (Test-Path -LiteralPath $DistillPlan -PathType Leaf)) {
+        throw "The selected distillation plan is missing."
+    }
+    Invoke-Step "Preparing private SFT dataset" {
+        Invoke-NativeChecked -Command {
+            & $python "ml/lfg-encoder/distill.py" build-sft --plan $DistillPlan --output-dir $DistillOutputDirectory
+        } -FailureMessage "distill build-sft failed"
     }
 }
 
