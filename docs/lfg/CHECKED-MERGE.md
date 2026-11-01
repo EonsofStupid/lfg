@@ -26,3 +26,10 @@ configured isolated runner. The separate CI workflows can still report failures
 that are not covered by this workflow's merge condition; inspect them and resolve
 release-relevant failures before a pre-release. If no suitable runner is
 available, verification and automatic merging cannot proceed.
+
+The separate container CI job has exhausted disk on GitHub-hosted runners
+while building the image. Before that build it now reports disk space and
+removes three unused SDK directories from the disposable hosted runner only.
+This leaves the image's dependencies and security checks intact; it does not
+prove that the available space is sufficient or qualify the image. A
+non-hosted runner skips this cleanup.
