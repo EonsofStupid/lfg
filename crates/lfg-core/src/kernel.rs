@@ -38,6 +38,8 @@ enum Node {
         rules: Vec<ChoiceRule>,
         threshold_ppm: u32,
         ambiguity_ppm: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_evidence_ppm: Option<u32>,
     },
     Score {
         slot: String,
@@ -126,6 +128,8 @@ struct Hop {
     rule_weights_ppm: Vec<Option<u32>>,
     top_score_ppm: Option<u32>,
     margin_ppm: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_ppm: Option<u32>,
 }
 
 fn valid_segment(value: &str) -> bool {
@@ -219,11 +223,13 @@ impl Engine {
                     rules,
                     threshold_ppm,
                     ambiguity_ppm,
+                    min_evidence_ppm,
                 } => {
                     if options.is_empty()
                         || rules.is_empty()
                         || u64::from(*threshold_ppm) > SCALE
                         || u64::from(*ambiguity_ppm) > SCALE
+                        || min_evidence_ppm.is_some_and(|minimum| u64::from(minimum) > SCALE)
                         || options.keys().any(|option| !valid_segment(option))
                     {
                         return Err("invalid choice configuration".into());
@@ -361,6 +367,7 @@ impl Engine {
                             rule_weights_ppm: weights,
                             top_score_ppm: None,
                             margin_ppm: None,
+                            evidence_ppm: None,
                         });
                         break ("escalate", Some("conflicting_gate_rules"));
                     }
@@ -377,6 +384,7 @@ impl Engine {
                         rule_weights_ppm: weights,
                         top_score_ppm: None,
                         margin_ppm: None,
+                        evidence_ppm: None,
                     });
                     if !value {
                         break ("pruned", Some("gate_closed"));
@@ -388,6 +396,7 @@ impl Engine {
                     rules,
                     threshold_ppm,
                     ambiguity_ppm,
+                    min_evidence_ppm,
                 } => {
                     if rules.iter().any(|r| missing(&r.field)) {
                         break ("escalate", Some("missing_input"));
@@ -426,7 +435,11 @@ impl Engine {
                         rule_weights_ppm: weights,
                         top_score_ppm: Some(top),
                         margin_ppm: Some(margin),
+                        evidence_ppm: min_evidence_ppm.map(|_| ranked[0].1 as u32),
                     });
+                    if min_evidence_ppm.is_some_and(|minimum| ranked[0].1 < u64::from(minimum)) {
+                        break ("escalate", Some("below_minimum_evidence"));
+                    }
                     if top < *threshold_ppm {
                         break ("escalate", Some("below_threshold"));
                     }
@@ -467,6 +480,7 @@ impl Engine {
                         rule_weights_ppm: weights,
                         top_score_ppm: None,
                         margin_ppm: None,
+                        evidence_ppm: None,
                     });
                     node = next;
                 }
@@ -502,6 +516,7 @@ impl Engine {
                         rule_weights_ppm: weights,
                         top_score_ppm: None,
                         margin_ppm: None,
+                        evidence_ppm: None,
                     });
                     node = next;
                 }
@@ -516,6 +531,7 @@ impl Engine {
                         rule_weights_ppm: weights,
                         top_score_ppm: None,
                         margin_ppm: None,
+                        evidence_ppm: None,
                     });
                     break ("complete", None);
                 }
