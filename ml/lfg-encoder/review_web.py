@@ -55,10 +55,15 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes', 'developer_ui_origins'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
+    if 'developer_ui_origins' in value:
+        origins = value['developer_ui_origins']
+        if (not isinstance(origins, list) or any(not valid_developer_origin(origin) for origin in origins)
+                or len(origins) != len(set(origins))):
+            raise ValueError('developer UI origins must be exact loopback HTTP origins')
     if 'max_assessment_profile_bytes' in value and (type(value['max_assessment_profile_bytes']) is not int
                                                      or value['max_assessment_profile_bytes'] < 1):
         raise ValueError('invalid assessment profile byte limit')
@@ -100,6 +105,20 @@ def load_config(path: Path) -> dict[str, Any]:
                 raise ValueError('invalid redaction suggestion rule')
             ids.add(rule['id'])
     return value
+
+
+def valid_developer_origin(origin: Any) -> bool:
+    if not isinstance(origin, str):
+        return False
+    try:
+        parsed = urlsplit(origin)
+        return (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost')
+                and (parsed.port is None or 1 <= parsed.port <= 65535)
+                and parsed.netloc == (parsed.hostname if parsed.port is None else f'{parsed.hostname}:{parsed.port}')
+                and parsed.port != 80  # Browsers omit the default port in Origin.
+                and not parsed.path and not parsed.query and not parsed.fragment)
+    except ValueError:
+        return False
 
 
 def redaction_suggestions(text: str, rules: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -238,7 +257,7 @@ class ReviewServer(HTTPServer):
 
     @property
     def origin(self) -> str:
-        return f'http://127.0.0.1:{self.server_port}'
+        return 'http://127.0.0.1' if self.server_port == 80 else f'http://127.0.0.1:{self.server_port}'
 
 
 class ReviewHandler(BaseHTTPRequestHandler):
@@ -260,6 +279,11 @@ class ReviewHandler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+        origins = self.headers.get_all('Origin', [])
+        if (self.path == '/api/status' and len(origins) == 1
+                and origins[0] in self.server.config.get('developer_ui_origins', [])):
+            self.send_header('Access-Control-Allow-Origin', origins[0])
+            self.send_header('Vary', 'Origin')
         self.end_headers()
         self.wfile.write(content)
 
@@ -283,14 +307,35 @@ class ReviewHandler(BaseHTTPRequestHandler):
             return
 
     def allowed_host(self) -> bool:
-        return self.headers.get_all('Host', []) == [f'127.0.0.1:{self.server.server_port}']
+        return self.headers.get_all('Host', []) == [self.server.origin.removeprefix('http://')]
 
     def authorized(self, post: bool = False) -> bool:
         origins = self.headers.get_all('Origin', [])
         auth = self.headers.get_all('Authorization', [])
         expected = ('Bearer ' + self.server.token).encode('utf-8')
-        return self.allowed_host() and (origins == [self.server.origin] if post else origins in ([], [self.server.origin])) and \
+        allowed_origins = ([], [self.server.origin])
+        if not post and self.path == '/api/status':
+            allowed_origins += tuple([origin] for origin in self.server.config.get('developer_ui_origins', []))
+        return self.allowed_host() and (origins == [self.server.origin] if post else origins in allowed_origins) and \
             len(auth) == 1 and hmac.compare_digest(auth[0].encode('utf-8'), expected)
+
+    def do_OPTIONS(self) -> None:
+        origins = self.headers.get_all('Origin', [])
+        methods = self.headers.get_all('Access-Control-Request-Method', [])
+        headers = self.headers.get_all('Access-Control-Request-Headers', [])
+        if (not self.allowed_host() or self.path != '/api/status' or len(origins) != 1
+                or origins[0] not in self.server.config.get('developer_ui_origins', [])
+                or methods != ['GET'] or len(headers) != 1 or headers[0].strip().lower() != 'authorization'):
+            self.json_reply(403, {'error': 'not authorized'})
+            return
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', origins[0])
+        self.send_header('Access-Control-Allow-Methods', 'GET')
+        self.send_header('Access-Control-Allow-Headers', 'authorization')
+        self.send_header('Vary', 'Origin')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     def do_GET(self) -> None:
         if not self.allowed_host():

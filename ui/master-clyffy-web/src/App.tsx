@@ -8,6 +8,7 @@ import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
 import { BoundaryPanel } from './BoundaryPanel'
+import { SupervisionPanel } from './SupervisionPanel'
 import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
 
 const SESSION_ID = `browser-${crypto.randomUUID()}`
@@ -178,6 +179,7 @@ export default function App() {
           prompt={prompt} promptTooLarge={promptTooLarge} revision={revision} classification={classification} activeSubscriptions={activeSubscriptions} debounceMs={debounceMs}
         />}
         {!publicEmbed && mode === 'inspector' && status && <BoundaryPanel maxFileBytes={status.operations.maxHttpBodyBytes} />}
+        {!publicEmbed && mode === 'inspector' && <SupervisionPanel />}
         {!publicEmbed && mode === 'inspector' && status && debounceMs && historyLimit && <DevPanel
           status={status} debounceMs={debounceMs} historyLimit={historyLimit}
           onDebounce={setDebounceOverride} onHistory={setHistoryOverride}
