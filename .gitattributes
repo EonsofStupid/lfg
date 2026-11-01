@@ -1,4 +1,5 @@
 ml/lfg-encoder/locks/*.requirements.txt text eol=lf
+ml/lfg-encoder/locks/minilm-l6-v2.1110a243.fixture.manifest.json text eol=lf
 ci/isolated-runner/entrypoint.sh text eol=lf
 scripts/build-linux-baseline.sh text eol=lf
 ml/lfg-encoder/systemd/*.service text eol=lf
@@ -26,7 +27,9 @@ ml/lfg-encoder/node-exemplar-config.example.json text eol=lf
 crates/lfg-server/config/node-onnx-runtime.example.json text eol=lf
 ml/lfg-encoder/probe_untrained_onnx.py text eol=lf
 ml/lfg-encoder/probe_model_runtime.py text eol=lf
+ml/lfg-encoder/probe_assessment_cuda.py text eol=lf
 docs/lfg/evidence/gb10-03-*.json text eol=lf
+docs/lfg/evidence/windows-5090-*.json text eol=lf
 docs/lfg/evidence/modernbert-onnx-probe.v3.manifest.json text eol=lf
 crates/lfg-core/config/kernel-core.v1.json text eol=lf
 crates/lfg-server/tests/fixtures/kernel-logout.v1.json text eol=lf

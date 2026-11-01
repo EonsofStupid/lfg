@@ -59,6 +59,10 @@ hardware or software versions. The configured tensor estimate does not bound
 the encoder, allocator, Python objects or solver workspace. Token limits are
 enforced without truncation.
 
+A separately bounded, fixture-only check of the encoder and head-fitting path
+on a Windows RTX 5090 is described in [the local CUDA lab](LOCAL-CUDA-LAB.md).
+That result does not establish training quality or Spark capacity.
+
 Before and after fitting, the trainer checks the audited inputs, source code,
 configuration, locked installed wheel payload and pinned model snapshot. The
 output must be new and outside the snapshot and plan directory. It contains
