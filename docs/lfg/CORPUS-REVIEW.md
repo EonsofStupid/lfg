@@ -463,6 +463,29 @@ skip or reject it rather than silently treating the surrounding text as input.
 The optional `source_context` configuration controls maximum messages and UTF-8
 text bytes; omitting it disables the context endpoint. The tool uses the same
 loopback authentication and `no-store` response policy as the review API.
+For Codex session records, **Show later user messages** separately checks the
+same original prefix and displays a bounded sequence of subsequent `user.text`
+messages from the current session file. This can surface a later correction or
+withdrawal. The observed prefix digest and last scanned source line identify
+the bytes inspected during that request; only the original record's prefix is
+bound to the inventory. Later messages may have been appended or changed since
+inventory creation, omit assistant replies, and do not establish intent,
+authorship or complete context. The optional `source_following` configuration
+sets message, UTF-8 text-byte and scanned-line limits; omitting it disables this
+endpoint. The existing session and line byte limits also apply. The view is
+on-demand, may reveal private data, and does not change or label any record.
+Following context is not implemented for Claude or Git checkpoint sources.
+Existing review-server processes must be restarted to use it; do not interrupt
+an active reviewer.
+
+An isolated read-only check against the live training review workspace found a
+real LFG candidate whose first subsequent user message says it was the wrong
+chat. The original prefix matched and the ledger remained byte-identical. This
+identifies a review issue, not an automatic rejection, and demonstrates why a
+prefix match alone is insufficient to establish that a request remains valid.
+The pending record ID, annotation digest and inspected-prefix digest are in the
+private advisory `dataset/private/combined-source-grounded-training-review-20261031-v1/following-correction-triage-20261101-v1.json`;
+the advisory must be revalidated against the current workspace and source.
 The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a

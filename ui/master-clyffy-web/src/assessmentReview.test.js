@@ -25,6 +25,8 @@ async function openReview() {
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     if (String(url) === '/api/status') return {ok: true, json: async () => ({decisions: {pending: 1, approved: 0, rejected: 0}, reviewer: 'reviewer'})}
     if (String(url).startsWith('/api/item')) return {ok: true, json: async () => itemResponse}
+    if (String(url) === '/api/following-source-context') return {ok: true, json: async () => ({observed_through_line: 4,
+      observed_prefix_sha256: 'c'.repeat(64), truncated: false, messages: [{source_line: 4, text: '<script>later correction</script>'}]})}
     if (String(url) === '/api/decision') { submitted = JSON.parse(options.body); return {ok: true, json: async () => ({saved: true})} }
     throw new Error('unexpected request')
   }))
@@ -55,4 +57,16 @@ test('blank assessment controls remain explicitly unknown', async () => {
   document.querySelector('#approve').click()
   await waitFor(() => expect(submitted()).toBeDefined())
   expect(submitted().assessment_values).toEqual({complexity: null, models: null, agent_count: null})
+})
+
+test('later source context is requested explicitly and rendered as text', async () => {
+  await openReview()
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url) === '/api/following-source-context')).toBe(false)
+  document.querySelector('#show-following').click()
+  await waitFor(() => expect(document.querySelector('#following-context').textContent).toContain('<script>later correction</script>'))
+  expect(document.querySelector('#following-context script')).toBeNull()
+  const request = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === '/api/following-source-context')
+  expect(JSON.parse(request[1].body)).toEqual({id: 'one', annotation_sha256: 'b'.repeat(64)})
+  document.querySelector('#skip').click()
+  expect(document.querySelector('#following-context').textContent).toBe('')
 })

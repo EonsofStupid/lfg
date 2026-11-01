@@ -162,6 +162,7 @@
     el('review').hidden = true;
     el('notice').textContent = '';
     el('source-context').textContent = '';
+    el('following-context').textContent = '';
     const status = await api('/api/status');
     el('summary').textContent = `${status.decisions.pending} pending · ${status.decisions.approved} approved · ${status.decisions.rejected} rejected · ${status.reviewer}`;
     const result = await api(findId === null ? `/api/item?offset=${offset}` : `/api/item?id=${encodeURIComponent(findId)}`);
@@ -264,6 +265,24 @@
         'No prior user messages are available within the configured limits.');
     } catch (error) {
       if (current === checked) el('source-context').textContent = `Context unavailable: ${error.message}`;
+    }
+  })()));
+  el('show-following').addEventListener('click', () => handle((async () => {
+    if (!current) return;
+    const checked = current;
+    el('following-context').textContent = 'Checking source and loading later messages…';
+    try {
+      const result = await api('/api/following-source-context', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: checked.id, annotation_sha256: checked.annotation_sha256})});
+      if (current !== checked) return;
+      const prefix = 'Later user-marked messages from the current session file; assistant replies are omitted.\n' +
+        `Observed through source line ${result.observed_through_line}; observed prefix SHA-256 ${result.observed_prefix_sha256}.\n` +
+        (result.truncated ? 'Further messages may have been omitted by configured limits.\n' : '') + '\n';
+      el('following-context').textContent = prefix + (result.messages.length ?
+        result.messages.map(message => `Source line ${message.source_line}:\n${message.text}`).join('\n\n') :
+        'No later user messages were found within the configured limits.');
+    } catch (error) {
+      if (current === checked) el('following-context').textContent = `Later context unavailable: ${error.message}`;
     }
   })()));
   el('redact').addEventListener('click', () => {

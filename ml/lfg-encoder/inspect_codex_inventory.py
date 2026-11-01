@@ -150,6 +150,77 @@ def prior_user_context(record: dict, max_bytes: int, max_line_bytes: int,
     return found[0][1], [{'source_line': line, 'text': text} for line, text, _ in messages], truncated
 
 
+def following_user_context(record: dict, max_bytes: int, max_line_bytes: int,
+                           max_messages: int, max_context_bytes: int, max_scan_lines: int) -> tuple[str, list[dict], bool, int, str]:
+    """Verify the original prefix, then inspect a bounded suffix of the current session."""
+    verify_record(record)
+    if any(type(value) is not int or value < 1 for value in
+           (max_bytes, max_line_bytes, max_messages, max_context_bytes, max_scan_lines)):
+        raise ValueError('context limits must be positive integers')
+    path = Path(record['source_file'])
+    before = path.stat()
+    if record['source_prefix_bytes'] > max_bytes or before.st_size < record['source_prefix_bytes']:
+        raise ValueError('source prefix is unavailable or exceeds byte limit')
+    hasher = hashlib.sha256()
+    total = 0
+    messages = []
+    size = 0
+    truncated = False
+    through_line = 0
+    with path.open('rb') as source:
+        for line_number in range(1, record['source_line'] + 1):
+            line = source.readline(max_line_bytes + 1)
+            if not line or len(line) > max_line_bytes:
+                raise ValueError('source line missing or exceeds byte limit')
+            total += len(line)
+            if total > max_bytes:
+                raise ValueError('source prefix exceeds byte limit')
+            hasher.update(line)
+            through_line = line_number
+        selected = line.rstrip(b'\r\n')
+        if (total != record['source_prefix_bytes'] or hasher.hexdigest() != record['source_prefix_sha256']
+                or hashlib.sha256(selected).hexdigest() != record['source_line_sha256']):
+            raise ValueError('source prefix or line no longer matches the inventory')
+        text = message_text(selected, record)
+        for offset in range(1, max_scan_lines + 1):
+            line = source.readline(max_line_bytes + 1)
+            if not line:
+                break
+            if len(line) > max_line_bytes:
+                raise ValueError('source line exceeds byte limit')
+            if total + len(line) > max_bytes:
+                truncated = True
+                break
+            total += len(line)
+            hasher.update(line)
+            through_line = record['source_line'] + offset
+            row = json.loads(line)
+            if not isinstance(row, dict) or row.get('type') != 'response_item':
+                continue
+            payload = row.get('payload')
+            if not isinstance(payload, dict) or payload.get('type') != 'message' or payload.get('role') != 'user':
+                continue
+            metadata, content = payload.get('internal_chat_message_metadata_passthrough'), payload.get('content')
+            if (not isinstance(metadata, dict) or metadata.get('content_item_kinds') != ['user.text']
+                    or not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict)
+                    or content[0].get('type') != 'input_text' or not isinstance(content[0].get('text'), str)
+                    or not content[0]['text'].strip()):
+                continue
+            message = content[0]['text']
+            length = len(message.encode('utf-8'))
+            if len(messages) >= max_messages or size + length > max_context_bytes:
+                truncated = True
+                break
+            messages.append({'source_line': through_line, 'text': message})
+            size += length
+        else:
+            truncated = True
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+        raise ValueError('source changed during read')
+    return text, messages, truncated, through_line, hasher.hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inventory', type=Path, required=True)
