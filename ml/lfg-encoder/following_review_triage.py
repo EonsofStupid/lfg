@@ -11,6 +11,7 @@ from pathlib import Path
 
 import corpus_audit
 import inspect_codex_inventory as inspect
+import following_claude_triage as claude
 import review_corpus
 import train
 
@@ -23,12 +24,15 @@ def load_config(path: Path) -> tuple[dict, str]:
     raw = path.read_bytes()
     value = json.loads(raw)
     limits = {'max_session_bytes', 'max_line_bytes', 'max_messages', 'max_context_bytes', 'max_scan_lines'}
-    if (not isinstance(value, dict) or set(value) != limits | {'schema_version', 'revision', 'markers'}
+    if (not isinstance(value, dict) or not limits | {'schema_version', 'revision', 'markers'} <= set(value)
+            or set(value) - (limits | {'schema_version', 'revision', 'markers', 'max_ancestry_records'})
             or value['schema_version'] != 'lfg.following-review-triage-config.v1'
             or not isinstance(value['revision'], str) or not value['revision'].strip()
             or any(type(value[key]) is not int or value[key] < 1 for key in limits)
             or not isinstance(value['markers'], list) or not value['markers']):
         raise ValueError('invalid following triage configuration')
+    if 'max_ancestry_records' in value and (type(value['max_ancestry_records']) is not int or value['max_ancestry_records'] < 1):
+        raise ValueError('invalid ancestry record limit')
     ids = set()
     for marker in value['markers']:
         if (not isinstance(marker, dict) or set(marker) != {'id', 'text', 'ignore_case'}
@@ -150,7 +154,9 @@ def session_scan(path: Path, candidates: list[dict], config: dict) -> list[dict]
 def triage(workspace: Path, config_path: Path) -> dict:
     workspace = workspace.resolve(strict=True)
     config, config_sha = load_config(config_path)
-    code_paths = [Path(__file__), Path(inspect.__file__), Path(review_corpus.__file__),
+    code_paths = [Path(__file__), Path(inspect.__file__), Path(claude.__file__), Path(claude.inspect.__file__),
+                  Path(claude.inventory.__file__), Path(claude.inventory.inventory_codex_sessions.__file__),
+                  Path(review_corpus.__file__),
                   Path(corpus_audit.__file__), Path(train.__file__), Path(review_corpus.evaluate.__file__),
                   Path(review_corpus.assessment_targets.__file__)]
     code_hashes = {path.name: sha(path.read_bytes()) for path in code_paths}
@@ -177,7 +183,8 @@ def triage(workspace: Path, config_path: Path) -> dict:
                 counts['stale'] += 1
                 continue
             origin = row.get('source')
-            if not isinstance(origin, dict) or origin.get('kind') != 'codex-session-user-text':
+            if (not isinstance(origin, dict) or origin.get('kind') not in ('codex-session-user-text', 'claude-session-human-text')
+                    or (origin.get('kind') == 'claude-session-human-text' and 'max_ancestry_records' not in config)):
                 counts['unsupported_source'] += 1
                 continue
             if row.get('review_transforms'):
@@ -186,22 +193,28 @@ def triage(workspace: Path, config_path: Path) -> dict:
             if not isinstance(origin.get('source_file'), str):
                 counts['invalid_source'] += 1
                 continue
-            grouped[origin['source_file']].append({'source': origin, 'text': row['text'],
-                'report': {'id': row['id'], 'project': source['project'], 'annotation_sha256': annotation}})
+            key = (origin['kind'], origin['source_file'], origin.get('project_root') if origin['kind'] == 'claude-session-human-text' else None)
+            grouped[key].append({'source': origin, 'text': row['text'],
+                'report': {'id': row['id'], 'project': source['project'], 'annotation_sha256': annotation,
+                           'source_kind': origin['kind']}})
     results = []
     source_errors = Counter()
-    for path, candidates in grouped.items():
+    for (kind, path, _), candidates in grouped.items():
         try:
-            results.extend(session_scan(Path(path), candidates, config))
+            results.extend((claude.session_scan if kind == 'claude-session-human-text' else session_scan)(Path(path), candidates, config))
         except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
             counts['source_unavailable'] += len(candidates)
+            counts['source_unavailable_' + kind] += len(candidates)
             reason = str(error)
             allowed = {'selected source position disappeared', 'source changed during context scan', 'source prefix exceeds configured limit',
                        'source scan exceeds configured limit', 'source line exceeds configured limit',
-                       'source prefix or review text does not match', 'duplicate source positions'}
+                       'source prefix or review text does not match', 'duplicate source positions',
+                       'source prefix, review text or identity does not match', 'source exceeds ancestry record limit',
+                       'duplicate positions or mixed project roots'}
             source_errors[reason if reason in allowed else type(error).__name__] += len(candidates)
     for result in results:
         counts['checked'] += 1
+        counts['checked_' + result['source_kind']] += 1
         counts['context_' + result['context_end']] += 1
     hits = [result for result in results if result['hits']]
     if (review_corpus.load_workspace(workspace)[1] != audit or load_config(config_path)[1] != config_sha

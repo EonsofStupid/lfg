@@ -6,6 +6,7 @@
   "max_messages": 3,
   "max_context_bytes": 16384,
   "max_scan_lines": 5000,
+  "max_ancestry_records": 100000,
   "markers": [
     {"id": "wrong-chat", "text": "wrong chat", "ignore_case": true}
   ]

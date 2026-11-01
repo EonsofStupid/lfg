@@ -488,7 +488,7 @@ private advisory `dataset/private/combined-source-grounded-training-review-20261
 the advisory must be revalidated against the current workspace and source.
 
 For a training-only workspace, `following_review_triage.py` can scan a
-configurable set of literal markers in bounded later Codex user messages. It
+configurable set of literal markers in bounded later user messages. It
 groups candidates by session, verifies each selected original prefix and text
 while streaming, and writes only IDs, digests, marker IDs and source line
 metadata to a new private report. For example:
@@ -503,9 +503,13 @@ python ml/lfg-encoder/following_review_triage.py `
 The example contains the literal `wrong chat`; copy and edit the configuration
 for other review markers and limits. A marker is not a decision: a later message
 may refer to a different request, and a missing marker does not establish clean
-or complete data. The scanner limits messages, bytes and lines, excludes Claude
-and other source types, and records source failures separately from checked
-items. It checks the workspace before and after without acquiring its review
+or complete data. The scanner limits messages, bytes and lines. It follows
+Claude descendants only when `max_ancestry_records` is configured: it requires
+same-session parent links and stops at a branch or conflicting identity instead
+of selecting a path. It uses only human-marked, single-text messages in the
+selected project root. Parent links are source metadata claims, not proof of
+identity or complete context. Other source types remain unsupported; source
+failures are counted separately from checked items. It checks the workspace before and after without acquiring its review
 lock, so the result is an optimistic snapshot and each finding must be
 revalidated before review. If a session changes while scanning, it rechecks the
 bytes already read and treats any observed end of file as incomplete; this is
@@ -524,6 +528,20 @@ request and two earlier requests. The latter two show why markers must not
 automatically reject records. The retained private reports are
 `following-correction-scan-20261101-v7.json` and `-v8.json` in the workspace's
 parent directory. These scans do not establish clean data or independent labels.
+
+A later scan added the bounded Claude lineage check and used a private copy of
+the configuration with a 768 MiB session limit, since one actual source file
+exceeded the example's limit. Two consecutive training-only runs produced the
+same report digest
+`877b01f82dfd7dda4d9abe7d2e2329a26c05ccc99a9966c9a9d58fe7ae4d72bd`.
+All 520 Codex and 78 Claude original prefixes were checked. Among Claude
+candidates, 64 stopped at an ambiguous branch, one at an ambiguous identity,
+eight had no observed child and five reached the message limit. No additional
+Claude marker hits were found on the paths examined. These are incomplete paths,
+not clean-data verdicts. The private configuration and reports are in the same
+parent directory under `following-triage-claude-768m-20261101-v1.json` and
+`following-triage-claude-scan-20261101-v1.json` / `-v2.json`. Reviewers still
+need to inspect original sources and resolve the branches.
 The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a
