@@ -5,9 +5,10 @@ Rust formatting and workspace tests (including embedded assets), an optional
 native ONNX compilation check, and the Python tooling tests for pull requests.
 It does not claim model quality, release qualification, or real-data coverage.
 
-Once a pull request has been reviewed and its work is complete, applying the
-`ready-to-auto-merge` label starts verification. If it passes, the workflow
-merges only a non-draft `codex/` branch in this repository targeting `main`.
+Once a pull request has been reviewed and its work is complete, the working
+agent applies the `ready-to-auto-merge` label to start verification. If it passes, the workflow
+merges only a non-draft branch in this repository targeting `main`, regardless
+of branch naming convention.
 It checks that the live pull-request head and base still match the tested
 revisions and asks GitHub to reject a changed head. It does not merge other
 branches or forked contributions. A conflict or failed check leaves the pull
@@ -20,9 +21,8 @@ them. GitHub branch protection with required checks or a merge queue is needed
 to enforce those guarantees. Never apply the label to unfinished work. The
 workflow is not a substitute for the pre-release qualification steps.
 
-On 2026-10-30, GitHub declined to start the first hosted verification jobs
-because the repository's Actions budget prevented further use. No self-hosted
-runners were registered. Until a runner is available, the workflow cannot
-verify or automatically merge pull requests. The workflow's live GitHub merge
-path has therefore not yet been exercised; local checks and a mocked test of
-the merge conditions are not a replacement for that end-to-end test.
+The live path has merged pull requests, including #110 on 2026-11-01 using the
+configured isolated runner. The separate CI workflows can still report failures
+that are not covered by this workflow's merge condition; inspect them and resolve
+release-relevant failures before a pre-release. If no suitable runner is
+available, verification and automatic merging cannot proceed.
