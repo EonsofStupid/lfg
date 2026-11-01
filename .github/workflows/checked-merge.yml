@@ -62,11 +62,24 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge')
     runs-on: ${{ fromJSON(vars.LFG_CHECKED_MERGE_RUNNER || '"ubuntu-latest"') }}
-    timeout-minutes: 5
+    timeout-minutes: 40
     permissions:
+      actions: read
       contents: write
       pull-requests: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Wait for the matching full CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TESTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          TESTED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 ci/check_ci_run.py --repository "$REPOSITORY" --pull-request "$PR_NUMBER"
+          --head "$TESTED_HEAD" --base "$TESTED_BASE" --timeout-seconds 2100 --poll-seconds 20
+          --required-job rust --required-job python-ml --required-job ui --required-job container
       - name: Merge only the tested head against the tested base
         env:
           GH_TOKEN: ${{ github.token }}
