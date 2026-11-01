@@ -6,6 +6,7 @@ on:
       - Dockerfile
       - scripts/validate-sbom-policy.py
       - scripts/refresh-sbom-policy-baseline.py
+      - ci/reclaim-hosted-sdk-space.sh
       - security/sbom-policy.json
       - .github/workflows/sbom-baseline-review.yml
   workflow_dispatch:
@@ -32,6 +33,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Reclaim unused SDK space on the disposable hosted runner
+        shell: bash
+        run: bash ci/reclaim-hosted-sdk-space.sh
 
       - name: Derive build metadata
         id: meta

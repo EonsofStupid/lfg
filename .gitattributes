@@ -1,6 +1,7 @@
 ml/lfg-encoder/locks/*.requirements.txt text eol=lf
 ml/lfg-encoder/locks/minilm-l6-v2.1110a243.fixture.manifest.json text eol=lf
 ci/isolated-runner/entrypoint.sh text eol=lf
+ci/reclaim-hosted-sdk-space.sh text eol=lf
 scripts/build-linux-baseline.sh text eol=lf
 ml/lfg-encoder/systemd/*.service text eol=lf
 ml/lfg-encoder/training_supervisor.py text eol=lf

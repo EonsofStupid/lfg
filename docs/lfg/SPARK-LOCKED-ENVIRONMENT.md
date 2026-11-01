@@ -1,5 +1,11 @@
 # GB10 locked environment and model preparation
 
+**Historical fixture environment:** The lock described below includes
+`fsspec 2026.2.0` and `transformers 4.57.6`, which a later container scan
+flagged for high-severity vulnerabilities. Do not use it for real training or
+untrusted inputs. Preserve it as historical evidence and prepare a separately
+verified patched environment for future runs.
+
 On 2026-10-31, the existing `Clyffy-Ring` host was reachable as Linux aarch64
 with an NVIDIA GB10 and driver 580.178.04. The existing SWAG container was
 running before and after these checks. The checks did not establish uninterrupted

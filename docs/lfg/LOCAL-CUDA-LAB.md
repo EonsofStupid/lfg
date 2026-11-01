@@ -1,5 +1,11 @@
 # Local Windows CUDA assessment lab
 
+**Historical fixture environment:** The lock and environment described below
+include `fsspec 2026.2.0` and `transformers 4.57.6`, which a later container
+scan flagged for high-severity vulnerabilities. Do not use that environment
+for real training or untrusted inputs. It is retained only to identify the
+fixture experiment; use a separately verified patched environment instead.
+
 On 2026-10-31 the local machine reported an NVIDIA GeForce RTX 5090 Laptop GPU
 with compute capability 12.0, 24,463 MiB total memory and driver 592.01. The
 existing Python environment had a CPU-only Torch build. A new isolated Python
@@ -16,6 +22,18 @@ were excluded. This does not authenticate the publisher, interpreter, bootstrap
 pip, driver or excluded files. PyTorch describes Blackwell support in its
 [2.7 release notes](https://pytorch.org/blog/pytorch-2-7/); actual compatibility
 still needs checking on each machine and workload.
+
+A later isolated candidate environment uses `datasets 5.1.0`, `fsspec
+2026.7.0` and `transformers 5.22.1`, outside the affected ranges for the four
+findings reported by the container scan. The [candidate lock](../../ml/lfg-encoder/locks/windows-cuda-cu130-py311-20261031.requirements.txt)
+and [fixture probe report](evidence/windows-5090-assessment-cuda-candidate.v1.json)
+identify the tested inputs. `pip check` passed and the probe verified 28,091
+installed wheel-payload files before fitting the four fixture heads on the
+same GPU. This is a compatibility check, not a complete security assessment,
+real training, or evidence that the ARM64 Spark environment has been updated.
+The historical lock above remains unchanged so its earlier result is traceable.
+See [the dependency update](ML-DEPENDENCY-SECURITY.md) for the scan findings
+and the limits of the candidate check.
 
 A tiny generated tensor produced finite CUDA gradients and a parameter update.
 The assessment encoder and all four ridge heads then ran on CUDA with a
