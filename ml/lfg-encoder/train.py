@@ -251,6 +251,12 @@ def load_dataset(path: Path, *, allow_unlabeled_review: bool = False) -> tuple[l
             raise ValueError(f"record {record['id']} has pending labels and is not usable here")
         if not record["text"].strip() or (not record["intents"] and not pending):
             raise ValueError(f"record {record['id']} has empty text or intents")
+        if 'assessment_targets' in record:
+            import assessment_targets
+            source = record.get('source')
+            if not isinstance(source, dict) or not isinstance(source.get('project'), str):
+                raise ValueError('assessment targets require a source project')
+            assessment_targets.validate_stored(record['assessment_targets'], source['project'])
         seen.add(record["id"])
     return records, hashlib.sha256(raw).hexdigest()
 
@@ -356,6 +362,50 @@ def validate_input_options(development: bool, environment_lock: Path | None, whe
         raise ValueError("reviewed training requires an environment lock, wheelhouse, and local model manifest")
 
 
+def effective_token_limit(tokenizer: Any, maximum: int) -> int:
+    if type(maximum) is not int or maximum < 1:
+        raise ValueError("token coverage requires a positive configured limit")
+    advertised = getattr(tokenizer, "model_max_length", None)
+    if advertised is None:
+        return maximum
+    if type(advertised) is not int or advertised < 1:
+        raise ValueError("invalid tokenizer model_max_length")
+    return min(maximum, advertised)
+
+
+def token_coverage(rows: list[dict[str, Any]], tokenizer: Any, maximum: int, split: str) -> dict[str, int]:
+    """Measure complete inputs, including special tokens, without recording their text."""
+    limit = effective_token_limit(tokenizer, maximum)
+    if not rows:
+        raise ValueError("token coverage requires a nonempty split")
+    lengths = []
+    for row in rows:
+        encoded = tokenizer(row["text"], add_special_tokens=True, truncation=False, padding=False)
+        ids = encoded.get("input_ids")
+        if not isinstance(ids, list) or not ids or any(type(token) is not int for token in ids):
+            raise ValueError(f"invalid tokenizer output for {split}")
+        lengths.append(len(ids))
+    over = sum(length > limit for length in lengths)
+    result = {"examples": len(lengths), "maximum_tokens": max(lengths), "over_limit": over,
+              "effective_limit": limit}
+    if over:
+        raise ValueError(f"{split} token coverage gate blocked: {over} of {len(lengths)} examples "
+                         f"exceed effective maximum {limit} (configured maximum {maximum}); "
+                         f"longest has {max(lengths)} tokens")
+    return result
+
+
+def tokenize_complete_batch(batch: dict[str, Any], tokenizer: Any, maximum: int) -> dict[str, Any]:
+    limit = effective_token_limit(tokenizer, maximum)
+    encoded = tokenizer(batch["text"], add_special_tokens=True, truncation=False, padding=False)
+    ids = encoded.get("input_ids")
+    if (not isinstance(ids, list) or len(ids) != len(batch["text"])
+            or any(not isinstance(tokens, list) or not tokens or len(tokens) > limit
+                   or any(type(token) is not int for token in tokens) for tokens in ids)):
+        raise ValueError("tokenizer batch is invalid or exceeds the effective maximum")
+    return encoded
+
+
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
     policy_path = getattr(args, "promotion_policy", POLICY)
@@ -386,7 +436,10 @@ def train(args: argparse.Namespace) -> None:
             support = training_support(train_rows, validation_rows, taxonomy, args.support_policy.read_bytes())
             corpus_audit = {key: audit_report[key] for key in (
                 "schema_version", "plan_sha256", "taxonomy_sha256", "review_ledger_sha256",
-                "auditor_sha256", "taxonomy_loader_sha256", "sources", "counts", "duplicate_within_split")}
+                "auditor_sha256", "taxonomy_loader_sha256", "assessment_targets_validator_sha256",
+                "sources", "counts", "duplicate_within_split")}
+            corpus_audit['reviewed_assessment_targets'] = {
+                split: audit_report['reviewed_assessment_targets'][split] for split in ('train', 'validation')}
             if audit_report.get("scope") == "development":
                 corpus_audit.update(scope="development", holdout_assessment="not_performed")
         except (OSError, ValueError, TypeError, KeyError) as error:
@@ -399,6 +452,7 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit(str(error)) from error
     if not re.fullmatch(r"[0-9a-f]{40}", args.model_revision or ""):
         raise SystemExit("training requires --model-revision as a full 40-character lowercase commit hash")
+    import assessment_targets
     environment_lock = getattr(args, "environment_lock", None)
     wheelhouse = getattr(args, "wheelhouse", None)
     model_manifest = getattr(args, "model_manifest", None)
@@ -440,6 +494,19 @@ def train(args: argparse.Namespace) -> None:
     # than silently dropping labels that happen to be absent from the data.
     classes = sorted(set.union(*taxonomy.values())) if taxonomy else None
     binarizer = MultiLabelBinarizer(classes=classes).fit(combined)
+    def check_model_snapshot() -> None:
+        if model_manifest and training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision) != model_evidence:
+            raise ValueError("model snapshot evidence changed")
+
+    check_model_snapshot()
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision,
+                                               local_files_only=bool(model_manifest))
+    try:
+        coverage = {"train": token_coverage(train_rows, tokenizer, args.max_length, "train"),
+                    "validation": token_coverage(validation_rows, tokenizer, args.max_length, "validation")}
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    check_model_snapshot()
     split = {
         "schema_version": "lfg.encoder-development-split.v1",
         "dataset_sha256": dataset_digest,
@@ -460,12 +527,15 @@ def train(args: argparse.Namespace) -> None:
         "dataset_sha256": split["dataset_sha256"],
         "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
         "training_config_sha256": args.training_config_sha256,
         "environment_evidence": environment_evidence,
         "model_snapshot_evidence": model_evidence,
         "training_inputs_sha256": hashlib.sha256(Path(training_inputs.__file__).read_bytes()).hexdigest() if environment_lock or model_manifest else None,
         "wheelhouse_verifier_sha256": hashlib.sha256(Path(training_inputs.lock_wheelhouse.__file__).read_bytes()).hexdigest() if environment_lock else None,
         "seed": args.seed, "epochs": args.epochs, "max_length": args.max_length,
+        "trained_label_groups": ["intents", "capabilities", "risks"],
+        "token_coverage": coverage,
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,
         "development_override": args.allow_below_gate,
@@ -493,23 +563,13 @@ def train(args: argparse.Namespace) -> None:
     if not args.resume:
         (args.output / "split-manifest.json").write_text(json.dumps(split, indent=2) + "\n", encoding="utf-8")
 
-    def check_model_snapshot() -> None:
-        if model_manifest and training_inputs.verify_model(Path(args.base_model), model_manifest, args.model_revision) != model_evidence:
-            raise ValueError("model snapshot evidence changed")
-
     check_model_snapshot()
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model, revision=args.model_revision,
-                                               local_files_only=bool(model_manifest))
     def make_dataset(rows: list[dict[str, Any]]) -> Any:
         labels = [sorted(set(row["intents"] + row["capabilities"] + row["risks"])) for row in rows]
         return Dataset.from_dict({"text": [row["text"] for row in rows], "labels": binarizer.transform(labels).astype(np.float32)})
 
     def tokenize(batch: dict[str, Any]) -> dict[str, Any]:
-        return tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=args.max_length,
-        )
+        return tokenize_complete_batch(batch, tokenizer, args.max_length)
 
     train_data = make_dataset(train_rows).map(tokenize, batched=True)
     validation_data = make_dataset(validation_rows).map(tokenize, batched=True)

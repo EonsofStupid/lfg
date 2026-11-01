@@ -2,6 +2,7 @@
   "schema_version": "lfg.review-web-config.v1",
   "max_request_bytes": 65536,
   "max_prompt_bytes": 262144,
+  "max_assessment_profile_bytes": 1048576,
   "request_timeout_seconds": 10,
   "source_verification": {
     "max_session_bytes": 536870912,
@@ -11,6 +12,11 @@
     "max_messages": 3,
     "max_context_bytes": 16384,
     "max_ancestry_records": 100000
+  },
+  "source_following": {
+    "max_messages": 3,
+    "max_context_bytes": 16384,
+    "max_scan_lines": 5000
   },
   "redaction_suggestions": [
     {"id": "ambient-browser-envelope", "label": "Preview removing browser context envelope",

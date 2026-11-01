@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import evaluate
+import assessment_targets
 import train
 
 PLAN_SCHEMA = "lfg.encoder-corpus-plan.v1"
@@ -104,6 +105,9 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
     queue: list[dict[str, Any]] = []
     counts = {split: Counter() for split in SPLITS}
     coverage = {split: {field: Counter() for field in evaluate.FIELDS} for split in SPLITS}
+    target_coverage = {split: {field: {'known': 0, 'unknown': 0, **({'partial': 0} if field == 'effort' else {})}
+                               for field in assessment_targets.COVERAGE_FIELDS}
+                       for split in SPLITS}
     source_digests = []
     for source in sources:
         if not isinstance(source, dict):
@@ -135,6 +139,9 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
             provenance = row.get("source")
             if not isinstance(provenance, dict) or provenance.get("project") != project:
                 raise ValueError("example source project does not match the plan")
+            targets = row.get('assessment_targets')
+            if targets is not None:
+                assessment_targets.validate_stored(targets, project)
             family = row["family"]
             if family in families and families[family] != split:
                 raise ValueError("a family appears in more than one split")
@@ -158,6 +165,10 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
             counts[split]["verified_flag"] += int(row["verified"])
             counts[split]["approved_attestation"] += int(is_approved)
             counts[split]["ready_for_reviewed_subset"] += int(is_approved and row["verified"])
+            if is_approved and row['verified']:
+                values = None if targets is None else targets['values']
+                for field, status in assessment_targets.coverage(values).items():
+                    target_coverage[split][field][status] += 1
             queue.append({"schema_version": REVIEW_SCHEMA, "id": identifier, "project": project, "split": split,
                           "annotation_sha256": digest, "decision": "pending", "reviewer": None, "reviewed_at": None})
     if set(ledger) - ids:
@@ -166,9 +177,12 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
               "taxonomy_sha256": taxonomy_hash, "review_ledger_sha256": ledger_hash,
               "auditor_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "taxonomy_loader_sha256": hashlib.sha256(Path(evaluate.__file__).read_bytes()).hexdigest(),
+              "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
               "sources": source_digests, "counts": {name: dict(value) for name, value in counts.items()},
               "label_support": {split: {field: dict(sorted(values.items())) for field, values in fields.items()}
                                 for split, fields in coverage.items()},
+              "reviewed_assessment_targets": {split: {field: dict(values) for field, values in fields.items()}
+                                               for split, fields in target_coverage.items()},
               "duplicate_within_split": duplicate_within_split,
               "project_separation": "declared_projects_and_groups_disjoint", "approval_is_attestation": True,
               "promotion_eligible": False}

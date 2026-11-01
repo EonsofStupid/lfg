@@ -52,6 +52,8 @@ struct RuntimeConfig {
     schema_version: String,
     revision: String,
     cpu_threads: usize,
+    #[serde(default)]
+    overflow_policy: OverflowPolicy,
     max_manifest_bytes: u64,
     max_metadata_bytes: u64,
     max_model_bytes: u64,
@@ -59,6 +61,14 @@ struct RuntimeConfig {
     max_labels: usize,
     max_examples: usize,
     max_prompt_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum OverflowPolicy {
+    #[default]
+    Report,
+    Abstain,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +120,8 @@ struct Prediction {
     capabilities: Vec<String>,
     risks: Vec<String>,
     tokenization: Tokenization,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abstention_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scores: Option<Scores>,
 }
@@ -439,6 +451,25 @@ fn run_source(
         if length == 0 || length > artifact.max_length {
             return Err("tokenizer output exceeds artifact limit".into());
         }
+        let coverage = tokenization(&encoded);
+        if coverage.truncated && config.overflow_policy == OverflowPolicy::Abstain {
+            let result = Prediction {
+                schema_version: "lfg.evaluation-abstention.v1",
+                id: row.id,
+                input_sha256: lfg_core::digest_text(&row.text),
+                producer_sha256: binary_hash.clone(),
+                model: model_identity.clone(),
+                intents: vec![],
+                capabilities: vec![],
+                risks: vec![],
+                tokenization: coverage,
+                abstention_reason: Some("token_limit_exceeded"),
+                scores: None,
+            };
+            serde_json::to_writer(&mut output, &result)?;
+            writeln!(output)?;
+            continue;
+        }
         let inputs = artifact
             .inputs
             .iter()
@@ -484,7 +515,8 @@ fn run_source(
             intents: chosen.intersection(&intent).cloned().collect(),
             capabilities: chosen.intersection(&capability).cloned().collect(),
             risks: chosen.intersection(&risk).cloned().collect(),
-            tokenization: tokenization(&encoded),
+            tokenization: coverage,
+            abstention_reason: None,
             scores: include_scores.then(|| Scores {
                 semantics: "sigmoid-uncalibrated-v1",
                 values: model_labels
@@ -532,6 +564,7 @@ mod tests {
         std::fs::write(&config, include_str!("../config/onnx-runtime.example.json")).unwrap();
         let (parsed, _) = load_config(&config).unwrap();
         assert_eq!(parsed.cpu_threads, 1);
+        assert_eq!(parsed.overflow_policy, OverflowPolicy::Report);
         assert!(!valid_digest("bad"));
         std::fs::write(dir.path().join("manifest.json"), "{}").unwrap();
         assert!(
@@ -542,6 +575,24 @@ mod tests {
         );
         let mut value: Value =
             serde_json::from_str(include_str!("../config/onnx-runtime.example.json")).unwrap();
+        value["overflowPolicy"] = json!("abstain");
+        assert_eq!(
+            parse_config(value.to_string().as_bytes())
+                .unwrap()
+                .0
+                .overflow_policy,
+            OverflowPolicy::Abstain
+        );
+        value["overflowPolicy"] = json!("invalid");
+        assert!(parse_config(value.to_string().as_bytes()).is_err());
+        value.as_object_mut().unwrap().remove("overflowPolicy");
+        assert_eq!(
+            parse_config(value.to_string().as_bytes())
+                .unwrap()
+                .0
+                .overflow_policy,
+            OverflowPolicy::Report
+        );
         value["cpuThreads"] = json!(2);
         std::fs::write(&config, value.to_string()).unwrap();
         assert!(load_config(&config).is_err());

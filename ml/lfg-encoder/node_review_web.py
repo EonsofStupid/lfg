@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import node_review
 import review_web
+import inspect_codex_inventory
+import inspect_claude_inventory
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / 'node-review-web'
@@ -117,12 +119,16 @@ def source_metadata(path: Path | None, item: dict, limit: int) -> dict:
 
 class NodeServer(HTTPServer):
     def __init__(self, queue: Path, ledger: Path, snapshot: Path, guide: Path, source: Path | None,
-                 reviewer: str, port: int, config: dict, token: str):
+                 reviewer: str, port: int, config: dict, token: str, context_config: dict | None = None):
         if not node_review.nonempty(reviewer):
             raise ValueError('reviewer must be a nonempty single-line identifier')
         self.queue, self.ledger, self.snapshot, self.guide = [path.resolve(strict=True) for path in (queue, ledger, snapshot, guide)]
         self.source = source.resolve(strict=True) if source is not None else None
         self.reviewer, self.config, self.token = reviewer, config, token
+        self.context_config = context_config
+        if context_config is not None and (self.source is None or 'source_verification' not in context_config
+                                           or 'source_context' not in context_config):
+            raise ValueError('source context requires a source file and configured limits')
         self.load()
         super().__init__(('127.0.0.1', port), NodeHandler)
 
@@ -170,7 +176,8 @@ class NodeHandler(review_web.ReviewHandler):
             if parsed.path == '/api/status' and not parsed.query:
                 counts = {state: sum(value == state for value in decisions.values()) for state in ('pending', 'approved', 'rejected')}
                 self.json_reply(200, {'reviewer': self.server.reviewer, 'decisions': counts,
-                                      'guideStatus': guide['status'], 'guideSha256': guide_sha})
+                                      'guideStatus': guide['status'], 'guideSha256': guide_sha,
+                                      'sourceContextEnabled': self.server.context_config is not None})
                 return
             if parsed.path == '/api/item':
                 query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
@@ -200,7 +207,7 @@ class NodeHandler(review_web.ReviewHandler):
         if not self.authorized(post=True):
             self.reject_unauthorized_post(self.server.config['maxRequestBytes'])
             return
-        if self.path != '/api/decision' or self.headers.get('Transfer-Encoding') or self.headers.get_content_type() != 'application/json':
+        if self.path not in ('/api/decision', '/api/source-context') or self.headers.get('Transfer-Encoding') or self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})
             return
         try:
@@ -214,6 +221,11 @@ class NodeHandler(review_web.ReviewHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
+            if self.path == '/api/source-context':
+                if not isinstance(value, dict) or set(value) != {'itemSha256'} or not isinstance(value['itemSha256'], str):
+                    raise ValueError('invalid source context request')
+                self.json_reply(200, self.source_context(value['itemSha256']))
+                return
             common = {'itemSha256', 'guideSha256', 'decision', 'confirmation', 'attest'}
             approved = {'choice', 'project', 'projectGroup', 'family', 'split'}
             if (not isinstance(value, dict) or value.get('decision') not in ('approved', 'rejected')
@@ -237,6 +249,46 @@ class NodeHandler(review_web.ReviewHandler):
         except (OSError, ValueError, KeyError, TypeError, UnicodeError, socket.timeout) as error:
             self.json_reply(400, {'error': str(error)})
 
+    def source_context(self, identifier: str) -> dict:
+        config = self.server.context_config
+        if config is None or self.server.source is None:
+            raise ValueError('source context is not configured')
+        items, ledger, _, _ = self.server.load()
+        matches = [item for item in items if node_review.identity(item) == identifier]
+        decisions = [row for row in ledger['records'] if row['itemSha256'] == identifier]
+        if len(matches) != 1 or len(decisions) != 1 or decisions[0]['decision'] != 'pending':
+            raise ValueError('only a pending item can be inspected')
+        item = matches[0]
+        metadata = source_metadata(self.server.source, item, self.server.config['maxSourceBytes'])
+        if metadata['status'] != 'source_file_and_text_match' or not isinstance(metadata.get('source'), dict):
+            raise ValueError('source file and request text must match before inspecting context')
+        source = metadata['source']
+        limits, context = config['source_verification'], config['source_context']
+        if source.get('kind') == 'codex-session-user-text':
+            entry = {**source, 'schema_version': 'lfg.unreviewed-codex-message.v2'}
+            text, messages, truncated = inspect_codex_inventory.prior_user_context(
+                entry, limits['max_session_bytes'], limits['max_line_bytes'],
+                context['max_messages'], context['max_context_bytes'])
+            scope = 'prior_user_messages_in_session'
+        elif source.get('kind') == 'claude-session-human-text':
+            if 'max_ancestry_records' not in context:
+                raise ValueError('Claude context requires a configured ancestry limit')
+            entry = {**source, 'schema_version': 'lfg.unreviewed-claude-message.v1'}
+            text, messages, truncated = inspect_claude_inventory.prior_user_context(
+                entry, limits['max_session_bytes'], limits['max_line_bytes'],
+                context['max_messages'], context['max_context_bytes'], context['max_ancestry_records'])
+            scope = 'same_session_source_parent_chain'
+        else:
+            raise ValueError('context is unavailable for this source type')
+        if text != item['text']:
+            raise ValueError('review text differs from the verified original')
+        items_after, ledger_after, _, _ = self.server.load()
+        if (items_after != items or ledger_after != ledger
+                or source_metadata(self.server.source, item, self.server.config['maxSourceBytes']) != metadata):
+            raise ValueError('review or source changed during context inspection')
+        return {'status': 'source_prefix_and_original_text_match', 'contextScope': scope,
+                'messages': messages, 'truncated': truncated}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -249,6 +301,7 @@ def main() -> None:
     for field in ('queue', 'ledger', 'snapshot', 'guide'):
         serve.add_argument('--' + field, type=Path, required=True)
     serve.add_argument('--source', type=Path)
+    serve.add_argument('--context-config', type=Path, help='opt in to bounded source context using review-web configuration')
     serve.add_argument('--reviewer', required=True)
     serve.add_argument('--port', type=int, default=0)
     serve.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
@@ -259,9 +312,10 @@ def main() -> None:
         if not 0 <= args.port <= 65535:
             raise ValueError('invalid port')
         config = load_config(args.config)
+        context_config = review_web.load_config(args.context_config) if args.context_config else None
         token = secrets.token_urlsafe(32)
         with NodeServer(args.queue, args.ledger, args.snapshot, args.guide, args.source,
-                        args.reviewer, args.port, config, token) as server:
+                        args.reviewer, args.port, config, token, context_config) as server:
             print(f'{server.origin}/#{token}', flush=True)
             print('Local node review is running. Open the URL; press Ctrl+C to stop.', flush=True)
             try:

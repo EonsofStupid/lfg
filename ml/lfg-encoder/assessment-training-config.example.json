@@ -1,0 +1,23 @@
+{
+  "schema_version": "lfg.assessment-training-config.v1",
+  "revision": "example-only-v1",
+  "device": "cpu",
+  "ridge": 1.0,
+  "max_tokens": 256,
+  "max_text_bytes": 12000,
+  "batch_size": 4,
+  "cpu_threads": 2,
+  "max_dimensions": 4096,
+  "max_records_per_split": 10000,
+  "max_pairs_per_split": 100000,
+  "max_unique_texts": 200000,
+  "max_fit_bytes": 1073741824,
+  "max_pack_bytes": 4000000,
+  "include_subscription_ids": false,
+  "requirements": {
+    "complexity": {"train_records": 1, "train_positive": 1, "train_negative": 1, "validation_records": 1, "validation_positive": 1, "validation_negative": 1},
+    "models": {"train_records": 1, "train_positive": 1, "train_negative": 1, "validation_records": 1, "validation_positive": 1, "validation_negative": 1},
+    "effort": {"train_records": 1, "train_positive": 1, "train_negative": 1, "validation_records": 1, "validation_positive": 1, "validation_negative": 1},
+    "agent_count": {"train_known": 1, "validation_known": 1}
+  }
+}

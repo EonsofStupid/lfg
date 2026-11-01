@@ -116,3 +116,45 @@ requests remained private and unreviewed. This confirms the flag for those two
 cases, not all tokenizer inputs or model quality. A separate two-request debug
 benchmark counted one complete and one truncated candidate response; the
 baseline's two tokenization statuses were unknown.
+
+An updated local optimized Windows binary with embedded UI and the same
+unqualified model had SHA-256
+`42942aaf8619cc8755e73e8920a6954f580426bddb6692ff2129ba96f4a4c7d5`
+and was 125,399,552 bytes. Its static import table listed Windows system
+libraries and no ONNX Runtime or MSVC runtime DLL. A copy served the embedded
+UI and developer-statistics endpoint from an otherwise empty working directory,
+and ran two real unreviewed inputs without supplying external model files.
+This was one local build using existing UI assets, not a clean-host or
+reproducibility qualification. The executable contains weights derived from
+private project data and is not suitable for distribution.
+
+Three more non-isolated runs used that updated binary and the same 422-request
+corpus and settings. Baseline median latency ranged from 0.130–0.144 ms and
+p95 from 0.196–0.210 ms; the embedded model's median ranged from 10.33–12.04 ms
+and p95 from 60.80–72.56 ms. Baseline cycles per request ranged from
+147,425–169,323; model cycles ranged from 49.97–56.38 million. Each run's 844
+measured model responses included 812 complete and 32 truncated tokenizations,
+representing the same 16 over-limit inputs repeated twice. These are local
+resource observations, not quality or release evidence. Build evidence and
+aggregate reports remain in the local private output directories.
+
+## Configurable overflow abstention
+
+Three paired, alternating, sequential runs compared `report` and `abstain`
+policies on the same 422 real, unreviewed training-source requests, with one
+warmup and two measured passes each. Both processes used the same experimental
+embedded model and binary; the configuration digest differs by policy. Each
+run measured 844 requests: `report` predicted all 844, including 32 truncated
+inputs, while `abstain` predicted 812 and abstained on those 32. The 32 are
+16 distinct requests repeated twice. These policies do different work and their
+outputs are not equivalent.
+
+Across the three runs, median latency was 9.51–9.60 ms for `report` and
+8.75–8.95 ms for `abstain`; p95 was 55.52–60.07 ms and 41.01–42.80 ms,
+respectively. Process cycles per measured request were 46.88–48.34 million
+and 38.82–39.96 million. This local measurement includes IPC and tokenization,
+was not isolated, and another Rust test build overlapped the first run. It is
+not a quality comparison or a claim about other workloads. The binary still
+loads the model at startup, and abstention does not analyze the full input.
+The model remains unreviewed and the private-derived binary must not be
+distributed. Aggregate reports and runtime configurations remain private.

@@ -1,0 +1,13 @@
+{
+  "schema_version": "lfg.following-review-triage-config.v1",
+  "revision": "user-correction-draft-1",
+  "max_session_bytes": 536870912,
+  "max_line_bytes": 16777216,
+  "max_messages": 3,
+  "max_context_bytes": 16384,
+  "max_scan_lines": 5000,
+  "max_ancestry_records": 100000,
+  "markers": [
+    {"id": "wrong-chat", "text": "wrong chat", "ignore_case": true}
+  ]
+}

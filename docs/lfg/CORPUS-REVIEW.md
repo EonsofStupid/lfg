@@ -191,6 +191,9 @@ separate and access-controlled.
 The audit and training scripts are identity-bound inputs to these runs; changing
 their bytes changes the recorded code identities and can prevent resuming or
 evaluating an earlier run. Preserve the exact scripts for existing experiments.
+When copying the current scripts to a training host, include
+`assessment_targets.py` alongside the audit, evaluation and trainer modules;
+the validator's digest is recorded with the audited run.
 
 The reviewed trainer accepts the v2 development plan and records its scope.
 Use `--development-plan-only` to reject a legacy complete plan before the audit
@@ -303,7 +306,103 @@ and a caveat for the reviewer. Use it instead of its original
 `additional-training-review-draft.v1/workspace`, never alongside it. The two
 draft workspaces together contain 18 AI drafts, not 18 human-reviewed examples.
 
+On 2026-10-31, eleven additional assistant-drafted suggestions were made from
+actual requests in the three live training workspaces. The source verification
+endpoint matched each selected record to its recorded session prefix and
+original text, both before preparation and in the resulting workspace. The
+suggestions remain unreviewed, include reviewer caveats, and do not establish
+authorship, rights, context or correctness. Other messages were left unlabeled
+when the task or implied negatives were unclear.
+
+The original review servers retained their locks and were not stopped. Private
+point-in-time copies were made after comparing the source files before and
+after the copy; a separate pending-only union of those copies contains 598
+training candidates, including 29 draft-labeled and 569 unlabeled records, with
+zero approvals and no normalized exact duplicates. It is at
+`dataset/private/combined-source-grounded-training-review-20261031-v1/workspace`.
+The private `priority-review-list.md` in its parent identifies the eleven new
+suggestions. A separate local review server was started for this union; its URL
+is in `dataset/private/combined-review-running-20261031-v1/review.stdout`.
+That URL grants review access and should remain private.
+
+Review the union **instead of** its component or original workspaces; decisions
+do not synchronize, and later work in either copy can make the other stale.
+The copies are optimistic snapshots, not a lock on the original sessions.
+Neither the count of drafts nor a source-text match makes a reviewed corpus or
+proves representative label support. Validation and test workspaces were not
+opened for this preparation.
+
 ### Local browser review
+
+#### Optional project assessment targets
+
+The review server can also collect reviewer judgments for complexity, models
+and effort, and total agents. These are separate from the existing intent,
+capability and risk labels. Each may be explicitly unknown; a blank model
+selection means unknown, and an agent count of zero is a known value when the
+project profile permits it. An empty model list is not accepted as a substitute
+for unknown. These judgments are not measured model performance or proof of an
+optimal recommendation.
+
+Supply `--assessment-profile PATH` to a new review-server process. The
+[empty configuration template](../../ml/lfg-encoder/assessment-review-config.example.json)
+does not invent options. The review web configuration must set a positive
+`max_assessment_profile_bytes`; choose it for the size of the actual project
+profiles. Each project entry must use the exact project ID in
+the review plan and supply its own choices, for example:
+
+```json
+{
+  "schema_version": "lfg.assessment-review-config.v1",
+  "revision": "project-profile-revision",
+  "projects": [{
+    "project": "project-id",
+    "complexities": [{"id": "configured-bracket-id", "label": "Configured bracket"}],
+    "models": [{"id": "configured-binding-id", "label": "Configured binding",
+      "provider": "provider-id", "model": "model-id", "subscription_id": "subscription-id",
+      "availability": "available", "effort_levels": ["configured-effort"]}],
+    "agent_range": {"min": 1, "max": 4}
+  }]
+}
+```
+
+These IDs, bracket choices and limits are examples only: replace them with the
+project's actual configuration and evidence. `subscription_id` may be null;
+`agent_range` may be null if unknown. A model must be declared `available` in
+the project profile before it can be selected; `unknown` and `unavailable`
+choices are shown but disabled. This is a declaration, not a verified
+subscription entitlement. Do not put credentials in the profile.
+
+The server reads the configured file when displaying an item and accepting an
+approval, so an updated profile can be displayed without restarting. It rejects an approval if the profile changed
+since the record was displayed or during the review. Approval stores the
+project-specific profile snapshot, its digest, the source configuration hash and
+the selected or unknown values inside the annotation bound to the existing
+review ledger. The complete configuration file is not copied, so retain it if
+its original bytes need later verification. The embedded project snapshot and
+its values can expose subscription metadata and remain private with the corpus.
+Changes to a project's later profile do not retroactively change an approved
+historical annotation. Local files must remain trusted against concurrent
+changes; the hash checks are not an adversarial locking protocol.
+The project snapshot is currently repeated in each annotated record, and the
+reviewer rewrites the affected source file on approval. Large profiles or
+corpora can therefore increase storage and review latency; deduplicated profile
+storage and higher-volume review have not been implemented or benchmarked.
+An interrupted review that already wrote assessment targets must be resumed
+through a review server with a matching project profile; the interactive CLI
+does not yet edit these targets and will not silently approve them.
+
+The corpus audit counts known and unknown targets only for currently approved,
+verified records and rejects malformed or mismatched stored profiles. Effort
+coverage is per record: it is partial when only some selected models have an
+effort value. Approved
+exports retain the targets. The current trainer still learns **only** intent,
+capability and risk; its run manifest states those trained label groups. These
+additional fields are not yet consumed by a training head, model selector or
+quality evaluator. A suitable project profile is not automatically obtained from
+DevPulse or another app today. Existing running review servers keep their old
+Python code; use a new process with an explicitly supplied profile after safely
+handling any work in the existing session.
 
 The same workspace can be reviewed in a browser using the Python training
 tools. This is a local corpus-review interface, not the server's developer UI
@@ -364,6 +463,85 @@ skip or reject it rather than silently treating the surrounding text as input.
 The optional `source_context` configuration controls maximum messages and UTF-8
 text bytes; omitting it disables the context endpoint. The tool uses the same
 loopback authentication and `no-store` response policy as the review API.
+For Codex session records, **Show later user messages** separately checks the
+same original prefix and displays a bounded sequence of subsequent `user.text`
+messages from the current session file. This can surface a later correction or
+withdrawal. The observed prefix digest and last scanned source line identify
+the bytes inspected during that request; only the original record's prefix is
+bound to the inventory. Later messages may have been appended or changed since
+inventory creation, omit assistant replies, and do not establish intent,
+authorship or complete context. The optional `source_following` configuration
+sets message, UTF-8 text-byte and scanned-line limits; omitting it disables this
+endpoint. The existing session and line byte limits also apply. The view is
+on-demand, may reveal private data, and does not change or label any record.
+Following context is not implemented for Claude or Git checkpoint sources.
+Existing review-server processes must be restarted to use it; do not interrupt
+an active reviewer.
+
+An isolated read-only check against the live training review workspace found a
+real LFG candidate whose first subsequent user message says it was the wrong
+chat. The original prefix matched and the ledger remained byte-identical. This
+identifies a review issue, not an automatic rejection, and demonstrates why a
+prefix match alone is insufficient to establish that a request remains valid.
+The pending record ID, annotation digest and inspected-prefix digest are in the
+private advisory `dataset/private/combined-source-grounded-training-review-20261031-v1/following-correction-triage-20261101-v1.json`;
+the advisory must be revalidated against the current workspace and source.
+
+For a training-only workspace, `following_review_triage.py` can scan a
+configurable set of literal markers in bounded later user messages. It
+groups candidates by session, verifies each selected original prefix and text
+while streaming, and writes only IDs, digests, marker IDs and source line
+metadata to a new private report. For example:
+
+```powershell
+python ml/lfg-encoder/following_review_triage.py `
+  --workspace PRIVATE_TRAIN_WORKSPACE `
+  --config ml/lfg-encoder/following-review-triage.example.json `
+  --output NEW_PRIVATE_REPORT.json
+```
+
+The example contains the literal `wrong chat`; copy and edit the configuration
+for other review markers and limits. A marker is not a decision: a later message
+may refer to a different request, and a missing marker does not establish clean
+or complete data. The scanner limits messages, bytes and lines. It follows
+Claude descendants only when `max_ancestry_records` is configured: it requires
+same-session parent links and stops at a branch or conflicting identity instead
+of selecting a path. It uses only human-marked, single-text messages in the
+selected project root. Parent links are source metadata claims, not proof of
+identity or complete context. Other source types remain unsupported; source
+failures are counted separately from checked items. It checks the workspace before and after without acquiring its review
+lock, so the result is an optimistic snapshot and each finding must be
+revalidated before review. If a session changes while scanning, it rechecks the
+bytes already read and treats any observed end of file as incomplete; this is
+not a defense against an adversarial local filesystem. The current source and
+report may contain sensitive metadata. No validation or test source is opened,
+and the command makes no labels or decisions.
+
+On 2026-11-01, two consecutive scans of the local 598-pending training workspace
+with the example marker produced identical private report hashes
+`a63a4232c759c7e7c069f82e03e580f550a2a5b4588db9c272ae12ab5f3758c6`.
+All 520 Codex candidates were checked within the configured windows; 78 Claude
+candidates were unsupported. The message limit ended 461 windows, the line
+limit ended 31, and 28 reached the observed end of file. Three candidates were
+flagged by the same later correction: the immediately preceding wrong-chat
+request and two earlier requests. The latter two show why markers must not
+automatically reject records. The retained private reports are
+`following-correction-scan-20261101-v7.json` and `-v8.json` in the workspace's
+parent directory. These scans do not establish clean data or independent labels.
+
+A later scan added the bounded Claude lineage check and used a private copy of
+the configuration with a 768 MiB session limit, since one actual source file
+exceeded the example's limit. Two consecutive training-only runs produced the
+same report digest
+`877b01f82dfd7dda4d9abe7d2e2329a26c05ccc99a9966c9a9d58fe7ae4d72bd`.
+All 520 Codex and 78 Claude original prefixes were checked. Among Claude
+candidates, 64 stopped at an ambiguous branch, one at an ambiguous identity,
+eight had no observed child and five reached the message limit. No additional
+Claude marker hits were found on the paths examined. These are incomplete paths,
+not clean-data verdicts. The private configuration and reports are in the same
+parent directory under `following-triage-claude-768m-20261101-v1.json` and
+`following-triage-claude-scan-20261101-v1.json` / `-v2.json`. Reviewers still
+need to inspect original sources and resolve the branches.
 The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a
@@ -698,6 +876,18 @@ same related-project group; it does not establish independent project diversity.
 No candidate was approved, and the reserved test workspace was not opened or
 compared during this preparation. A local review-server check verified one
 original source and its context endpoint without recording a decision.
+
+A later read-only check of the three live training review servers found 598
+pending candidates and zero approvals. Of the 598, 580 had no draft labels;
+18 had draft labels, all still pending review. The configured triage patterns
+flagged none of the 78 newer Claude candidates; this does not establish that
+they are clean, complete, independent or correctly labeled. The local private
+report is `dataset/private/claude-live-training-triage-20261031-v1.json` and
+contains IDs and annotation digests, not request text. The scan compared file
+hashes before and after but did not lock the active reviewer, so it is an
+optimistic snapshot; recheck each item before a decision. The existing 83
+marker hits among the earlier 520 candidates and the human-review, label
+support and independent-validation requirements remain relevant.
 
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse

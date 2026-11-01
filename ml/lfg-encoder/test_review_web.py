@@ -322,6 +322,20 @@ class ReviewWebTests(unittest.TestCase):
         config_path.write_text(json.dumps({**config, 'checkpoint_verification': limits}), encoding='utf-8')
         self.assertEqual(review_web.load_config(config_path)['checkpoint_verification'], limits)
 
+    def test_following_context_requires_bounded_source_configuration(self):
+        config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        config_path = Path(self.temp.name) / 'following-config.json'
+        for limits in ({'max_messages': 0, 'max_context_bytes': 10, 'max_scan_lines': 1},
+                       {'max_messages': 1, 'max_context_bytes': 10, 'max_scan_lines': True},
+                       {'max_messages': 1, 'max_context_bytes': 10}):
+            config_path.write_text(json.dumps({**config, 'source_following': limits}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'following source context'):
+                review_web.load_config(config_path)
+        without_source = {key: value for key, value in config.items() if key not in ('source_verification', 'source_context')}
+        config_path.write_text(json.dumps(without_source), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'following source context'):
+            review_web.load_config(config_path)
+
     def test_source_context_is_local_bounded_and_does_not_record_review(self):
         root = Path(self.temp.name)
         def message(role, text, kind='user.text'):
@@ -329,7 +343,8 @@ class ReviewWebTests(unittest.TestCase):
                     'content': [{'type': 'input_text', 'text': text}],
                     'internal_chat_message_metadata_passthrough': {'content_item_kinds': [kind]}}}
         rows = [message('user', 'prior private text'), message('assistant', 'assistant text'),
-                message('user', 'selected text'), message('user', 'later text')]
+                message('user', 'selected text'), message('assistant', 'later assistant text'),
+                message('user', 'later text')]
         lines = [(json.dumps(row) + '\n').encode() for row in rows]
         prefix = b''.join(lines[:3])
         session = root / 'context-session.jsonl'; session.write_bytes(b''.join(lines))
@@ -357,8 +372,48 @@ class ReviewWebTests(unittest.TestCase):
         self.assertNotIn(b'assistant text', data)
         self.assertNotIn(b'later text', data)
         self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        self.assertEqual(self.request('POST', '/api/following-source-context', body=body, origin='https://evil.example')[0], 403)
+        self.assertEqual(self.request('POST', '/api/following-source-context',
+                                      body={**body, 'annotation_sha256': '0' * 64}, origin=self.server.origin)[0], 400)
+        status, headers, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        following = json.loads(data)
+        self.assertEqual([entry['text'] for entry in following['messages']], ['later text'])
+        self.assertNotIn(b'assistant text', data)
+        self.assertNotIn(b'prior private text', data)
+        self.assertEqual(following['observed_through_line'], 5)
+        self.assertEqual(following['observed_prefix_sha256'], hashlib.sha256(b''.join(lines)).hexdigest())
+        self.assertFalse(following['truncated'])
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        old_following = self.server.config['source_following']
+        self.server.config['source_following'] = {**old_following, 'max_context_bytes': 1}
+        try:
+            status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+            self.assertEqual(status, 200)
+            bounded = json.loads(data)
+            self.assertEqual(bounded['messages'], [])
+            self.assertTrue(bounded['truncated'])
+            self.server.config['source_following'] = {**old_following, 'max_scan_lines': 1}
+            status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+            self.assertEqual(status, 200)
+            bounded = json.loads(data)
+            self.assertEqual(bounded['messages'], [])
+            self.assertTrue(bounded['truncated'])
+            self.assertEqual(bounded['observed_through_line'], 4)
+        finally:
+            self.server.config['source_following'] = old_following
+        revised_later = b''.join(lines[:4]) + (json.dumps(message('user', 'revised later text')) + '\n').encode()
+        session.write_bytes(revised_later)
+        status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        revised = json.loads(data)
+        self.assertEqual([entry['text'] for entry in revised['messages']], ['revised later text'])
+        self.assertEqual(revised['observed_prefix_sha256'], hashlib.sha256(revised_later).hexdigest())
+        self.assertNotEqual(revised['observed_prefix_sha256'], following['observed_prefix_sha256'])
         session.write_bytes(b''.join(lines).replace(b'prior private text', b'changed private text'))
         self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)[0], 400)
 
     def test_guided_review_binds_approval_to_displayed_guide_and_rejects_changes(self):
         guide = {'schema_version': 'lfg.review-label-guide.v1', 'revision': 'fixture', 'notice': 'Review carefully.',
@@ -403,6 +458,129 @@ class ReviewWebTests(unittest.TestCase):
         taxonomy, _ = review_web.evaluate.load_taxonomy(self.workspace / 'taxonomy.json')
         with self.assertRaisesRegex(ValueError, 'does not match'):
             review_web.load_guide(review_web.DEFAULT_GUIDE, taxonomy)
+
+    def assessment_server(self):
+        self.stop_server()
+        path = Path(self.temp.name) / 'assessment-profile.json'
+        profile = {'schema_version': 'lfg.assessment-review-config.v1', 'revision': 'fixture-r1',
+                   'projects': [{'project': 'fixture', 'complexities': [{'id': 'c1', 'label': 'First'}],
+                                 'models': [{'id': 'm1', 'label': 'Configured model', 'provider': 'fixture-provider',
+                                             'model': 'fixture-model', 'subscription_id': 'fixture-subscription',
+                                             'availability': 'available', 'effort_levels': ['e1']},
+                                            {'id': 'm2', 'label': 'Unknown', 'provider': 'local', 'model': 'local-model',
+                                             'subscription_id': None, 'availability': 'unknown', 'effort_levels': []}],
+                                 'agent_range': {'min': 0, 'max': 4}}]}
+        path.write_text(json.dumps(profile), encoding='utf-8')
+        self.server = review_web.ReviewServer(self.workspace, 'fixture-reviewer', 0,
+                    review_web.load_config(review_web.DEFAULT_CONFIG), self.token, None, path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return path
+
+    def test_assessment_targets_are_profile_bound_reviewed_and_exported(self):
+        path = self.assessment_server()
+        original = path.read_bytes()
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        result = json.loads(raw)
+        self.assertEqual(result['assessment_profile']['project'], 'fixture')
+        item = result['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                'assessment_config_sha256': result['assessment_config_sha256'],
+                'assessment_values': {'complexity': 'c1', 'models': [{'id': 'm1', 'effort': 'e1'}], 'agent_count': 0}}
+        invalid = {**body, 'assessment_values': {**body['assessment_values'], 'models': [{'id': 'm2', 'effort': None}]}}
+        self.assertEqual(self.request('POST', '/api/decision', body=invalid, origin=self.server.origin)[0], 400)
+        updated_profile = json.loads(original)
+        updated_profile['projects'][0]['models'][0]['availability'] = 'unknown'
+        path.write_text(json.dumps(updated_profile), encoding='utf-8')
+        _, _, refreshed = self.request('GET', '/api/item?offset=0')
+        self.assertNotEqual(json.loads(refreshed)['assessment_config_sha256'], result['assessment_config_sha256'])
+        self.assertEqual(json.loads(refreshed)['assessment_profile']['models'][0]['availability'], 'unknown')
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 400)
+        path.write_bytes(original)
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 200)
+        report, _ = corpus_audit.audit(self.workspace / 'plan.json')
+        for field in ('complexity', 'models', 'agent_count'):
+            self.assertEqual(report['reviewed_assessment_targets']['train'][field]['known'], 1)
+        self.assertEqual(report['reviewed_assessment_targets']['train']['effort']['known'], 1)
+        row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(row['assessment_targets']['values'], body['assessment_values'])
+        self.assertEqual(row['assessment_targets']['config_sha256'], hashlib.sha256(original).hexdigest())
+        output = Path(self.temp.name) / 'assessment-export'
+        review_corpus.export_approved(self.workspace, output)
+        exported = json.loads((output / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertEqual(exported['assessment_targets'], row['assessment_targets'])
+        row['assessment_targets']['project_profile']['models'][0]['model'] = 'tampered'
+        (self.workspace / 'source-0000.jsonl').write_bytes(review_corpus.encoded_rows([row]))
+        with self.assertRaisesRegex(ValueError, 'project or digest'):
+            corpus_audit.audit(self.workspace / 'plan.json')
+
+    def test_unknown_assessment_targets_remain_unknown_after_approval(self):
+        self.assessment_server()
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        result = json.loads(raw)
+        item = result['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                'assessment_config_sha256': result['assessment_config_sha256'],
+                'assessment_values': {'complexity': None, 'models': None, 'agent_count': None}}
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 200)
+        report, _ = corpus_audit.audit(self.workspace / 'plan.json')
+        for field in ('complexity', 'models', 'agent_count'):
+            self.assertEqual(report['reviewed_assessment_targets']['train'][field]['unknown'], 1)
+        self.assertEqual(report['reviewed_assessment_targets']['train']['effort']['unknown'], 1)
+
+    def test_assessment_values_are_rejected_without_profile(self):
+        report, _ = corpus_audit.audit(self.workspace / 'plan.json')
+        for field in ('complexity', 'models', 'agent_count'):
+            self.assertEqual(report['reviewed_assessment_targets']['train'][field], {'known': 0, 'unknown': 0})
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        item = json.loads(raw)['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                'assessment_config_sha256': 'a' * 64,
+                'assessment_values': {'complexity': None, 'models': None, 'agent_count': None}}
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['approved'], 0)
+
+    def test_profile_requires_explicit_limit_in_web_configuration(self):
+        config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        config.pop('max_assessment_profile_bytes')
+        path = Path(self.temp.name) / 'profile.json'
+        path.write_text(json.dumps({'schema_version': 'lfg.assessment-review-config.v1',
+                                    'revision': 'fixture', 'projects': []}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'configured byte limit'):
+            review_web.ReviewServer(self.workspace, 'fixture-reviewer', 0, config, self.token, None, path)
+
+    def test_interrupted_assessment_cannot_be_approved_without_showing_profile(self):
+        self.assessment_server()
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        response = json.loads(raw)
+        item = response['item']
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': {'intents': ['build'], 'capabilities': [], 'risks': []},
+                'assessment_config_sha256': response['assessment_config_sha256'],
+                'assessment_values': {'complexity': 'c1', 'models': None, 'agent_count': None}}
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 200)
+        self.stop_server()
+        ledger = [json.loads(line) for line in (self.workspace / 'reviews.jsonl').read_text().splitlines()]
+        ledger[0]['decision'] = 'pending'
+        (self.workspace / 'reviews.jsonl').write_bytes(review_corpus.encoded_rows(ledger))
+        self.server = review_web.ReviewServer(self.workspace, 'fixture-reviewer', 0,
+                    review_web.load_config(review_web.DEFAULT_CONFIG), self.token)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        current = json.loads(raw)['item']
+        self.assertIsNotNone(current['assessment_targets'])
+        body = {'id': current['id'], 'annotation_sha256': current['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE', 'labels': current['labels']}
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['pending'], 1)
 
 
 if __name__ == '__main__':
