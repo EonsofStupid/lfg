@@ -80,6 +80,39 @@ class ReviewWebTests(unittest.TestCase):
         self.assertEqual(json.loads(data)['decisions']['pending'], 1)
         self.assertNotIn(b'fixture</script>', data)
 
+    def test_developer_ui_access_is_opt_in_and_status_only(self):
+        origin = 'http://127.0.0.1:5174'
+        self.assertEqual(self.request('GET', '/api/status', origin=origin)[0], 403)
+        self.server.config['developer_ui_origins'] = [origin]
+        status, headers, body = self.request('GET', '/api/status', origin=origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Access-Control-Allow-Origin'], origin)
+        self.assertEqual(json.loads(body)['decisions']['pending'], 1)
+        self.assertNotIn(b'fixture</script>', body)
+        self.assertEqual(self.request('GET', '/api/status', origin=origin, auth=False)[0], 403)
+        self.assertEqual(self.request('GET', '/api/item?offset=0', origin=origin)[0], 403)
+        self.assertEqual(self.request('POST', '/api/decision', body={}, origin=origin)[0], 403)
+        self.assertEqual(self.request('GET', '/api/status', origin='http://localhost:5174')[0], 403)
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
+        try:
+            connection.request('OPTIONS', '/api/status', headers={'Origin': origin,
+                'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 204)
+            self.assertEqual(response.getheader('Access-Control-Allow-Origin'), origin)
+            response.read()
+        finally:
+            connection.close()
+
+    def test_developer_origin_configuration_rejects_non_loopback_and_non_origins(self):
+        for origin in ('https://example.com', 'http://example.com:80', 'http://127.0.0.1:5174/path',
+                       'http://127.0.0.1.evil.example:5174', 'http://user@localhost:5174', 'null'):
+            self.assertFalse(review_web.valid_developer_origin(origin))
+        self.assertTrue(review_web.valid_developer_origin('http://localhost:5174'))
+        self.assertTrue(review_web.valid_developer_origin('http://127.0.0.1:5174'))
+        self.assertTrue(review_web.valid_developer_origin('http://localhost'))
+        self.assertFalse(review_web.valid_developer_origin('http://localhost:80'))
+
     def test_find_pending_record_by_id_and_reject_invalid_query(self):
         status, _, raw = self.request('GET', '/api/item?id=one')
         value = json.loads(raw)
