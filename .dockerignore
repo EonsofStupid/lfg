@@ -1,5 +1,13 @@
 .git
 .github
+.chat
+**/.chat
+.env
+.env.*
+**/.env
+**/.env.*
+.venv
+**/.venv
 target
 **/target
 node_modules
@@ -7,4 +15,6 @@ ui/master-clyffy-web/node_modules
 output
 .playwright-cli
 ml/lfg-encoder/__pycache__
+ml/lfg-encoder/artifacts
+ml/lfg-encoder/dataset/private
 **/*.pyc
