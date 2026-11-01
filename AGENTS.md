@@ -19,6 +19,10 @@ Read this before planning work. It is the owner's direction.
   of relationships between projects, prompts, models, agents and outcomes.
   Hold it in organized KV-cache shards, and periodically fine-tune stable
   knowledge into the weights.
+- **Model knowledge is learned, not hand-kept.** Which models exist, what they
+  are for and how they are used comes from provider tools' own data and the
+  user's sessions, and updates as they work. Do not add hand-maintained model
+  catalogs or leave models unrated. See [one assessment](docs/lfg/ASSESSMENT.md).
 - **Gates decide trust, not whether to build.** Evaluation gates decide when a
   model version or suggestion is trusted more. They must not block training on
   authorized data or block the product.
@@ -27,5 +31,5 @@ Read this before planning work. It is the owner's direction.
   are configurable.
 
 Details: [README objective](README.md#project-objective),
-[model and distillation](docs/lfg/MODEL-AND-DISTILLATION.md),
+[model and distillation and the order of work](docs/lfg/MODEL-AND-DISTILLATION.md#order-of-work),
 [product and delivery](docs/lfg/PRODUCT-AND-DELIVERY.md).

@@ -236,9 +236,18 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
     if binary.contains(std::path::MAIN_SEPARATOR) {
         return Path::new(binary).is_file().then(|| PathBuf::from(binary));
     }
-    env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths)
-            .map(|path| path.join(binary))
+    let paths: Vec<PathBuf> = env::split_paths(&env::var_os("PATH")?).collect();
+    // On Windows a bare name can be a shell launcher that cannot be started
+    // directly, so prefer a real executable anywhere on the path.
+    let names = if cfg!(windows) && Path::new(binary).extension().is_none() {
+        vec![format!("{binary}.exe"), format!("{binary}.cmd")]
+    } else {
+        vec![binary.to_string()]
+    };
+    names.iter().find_map(|name| {
+        paths
+            .iter()
+            .map(|path| path.join(name))
             .find(|path| path.is_file())
     })
 }
@@ -265,8 +274,34 @@ fn safe_environment() -> BTreeMap<String, String> {
         "https_proxy",
         "no_proxy",
     ];
+    // Windows needs these to locate the user's profile and run at all, and its
+    // variable names are case-insensitive: PATH is usually spelled Path.
+    const WINDOWS_ALLOWED: &[&str] = &[
+        "APPDATA",
+        "COMSPEC",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "PATHEXT",
+        "PROGRAMDATA",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    ];
     env::vars()
-        .filter(|(name, _)| ALLOWED.contains(&name.as_str()) || name.starts_with("LC_"))
+        .filter(|(name, _)| {
+            let allowed = if cfg!(windows) {
+                ALLOWED
+                    .iter()
+                    .chain(WINDOWS_ALLOWED)
+                    .any(|value| value.eq_ignore_ascii_case(name))
+            } else {
+                ALLOWED.contains(&name.as_str())
+            };
+            allowed || name.starts_with("LC_")
+        })
         .collect()
 }
 

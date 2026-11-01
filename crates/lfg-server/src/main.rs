@@ -557,6 +557,7 @@ async fn serve(bind: Option<SocketAddr>) -> Result<(), Box<dyn std::error::Error
         .unwrap_or_else(|| env::temp_dir().join("lfg"));
     let state = AppState::persistent(state_root.join("signals.jsonl"))?;
     let bind = bind.unwrap_or_else(|| state.operations().default_listen_address());
+    state.start_learning(bind.ip().is_loopback());
     let external_ui = env::var_os("MASTER_CLYFFY_UI_DIR").map(PathBuf::from);
     #[cfg(feature = "embedded-ui")]
     let app: Router = match external_ui {

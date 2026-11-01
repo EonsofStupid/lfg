@@ -117,6 +117,86 @@ export type ClassificationSnapshot = {
   project: string
 }
 
+export type WordHit = { id: string; plainLabel: string; matched: string[] }
+
+export type FormulaTerm = { id: string; label: string; value: number; weight: number; points: number; detail: string[] }
+
+export type ModelSuggestion = {
+  subscriptionId: string
+  model: string
+  label: string
+  description: string
+  role: string | null
+  effort: string | null
+  usualEffort: string | null
+  origin: string
+  fit: number
+  habit: number
+  score: number
+  promptsInBracket: number
+  why: string
+}
+
+export type SubscriptionStatus = {
+  id: string
+  label: string
+  status: 'verified' | 'recognized' | 'declared' | 'signed-out' | 'not-found' | string
+  usable: boolean
+  declared: boolean
+  plan: string | null
+  lastUsed: string | null
+  detail: string
+}
+
+export type Assessment = {
+  schemaVersion: string
+  sessionId: string
+  revision: number
+  durationMicros: number
+  configRevision: string
+  configDigest: string
+  prompt: { characters: number; words: number; tasks: string[] }
+  intent: { primary: string; plainLabel: string; all: WordHit[]; risks: WordHit[]; fallback: boolean }
+  complexity: {
+    score: number
+    bracket: string
+    label: string
+    plainLabel: string
+    terms: FormulaTerm[]
+    ladder: Array<{ id: string; label: string; minScore: number; current: boolean }>
+  }
+  agents: { total: number; tasks: number; min: number; max: number; plain: string }
+  models: { role: string; effort: string; suggested: ModelSuggestion | null; alternatives: ModelSuggestion[]; usualModel: string | null; plain: string }
+  subscriptions: SubscriptionStatus[]
+  knowledge: { state: string; refreshedAt: string | null; promptsSeen: number; modelsKnown: number }
+  rules: string[]
+  advisory: boolean
+  confidence: number | null
+}
+
+export type KnownModel = {
+  subscriptionId: string
+  model: string
+  label: string
+  description: string
+  priority: number | null
+  efforts: string[]
+  origin: string
+  available: boolean
+  lastUsed: string | null
+  usage: Array<{ bracket: string; prompts: number; weighted: number; efforts: Record<string, number> }>
+  role: string | null
+}
+
+export type Knowledge = {
+  state: string
+  refreshedAt: string | null
+  promptsSeen: number
+  sources: Array<{ id: string; files: number; prompts: number; status: string }>
+  subscriptions: Array<{ id: string; plan: string | null; listedAt: string | null; lastUsed: string | null; daysSinceUsed: number | null }>
+  models: KnownModel[]
+}
+
 export type RuntimeStatus = {
   name: string
   phase: string
@@ -162,8 +242,9 @@ export type DevStats = {
   operationsDigest: string
   encoderDigest: string
   classifierDigest: string
-  summaries: Array<{ operation: 'preflight' | 'classification'; samples: number; errors: number; p50TotalMicros: number | null; p95TotalMicros: number | null }>
-  traces: Array<{ sequence: number; recordedAt: string; operation: string; outcome: string; totalMicros: number; queueMicros: number | null; workMicros: number | null }>
+  assessmentDigest?: string
+  summaries: Array<{ operation: 'preflight' | 'classification' | 'assessment'; samples: number; errors: number; p50TotalMicros: number | null; p95TotalMicros: number | null }>
+  traces: Array<{ sequence: number; recordedAt: string; operation: string; outcome: string; totalMicros: number; queueMicros: number | null; workMicros: number | null; rules?: string[] }>
 }
 
 export type IntakePreview = {

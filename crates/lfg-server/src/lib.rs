@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use std::{convert::Infallible, time::Duration};
@@ -10,6 +11,9 @@ use axum::{
     routing::{get, post},
 };
 use lfg_codex::{CodexRunner, CodexStatus, ExecutionResult};
+use lfg_core::assessment::{
+    AssessRequest, Assessment, AssessmentConfig, Knowledge, SubscriptionCheck, assess, with_roles,
+};
 use lfg_core::{
     CategoryClassifier, ClassificationSnapshot, ClassifierConfig, ClassifyRequest,
     CpuCategoryClassifier, CpuRuleEncoder, EvaluationRubric, ExperimentStatistics, GraphSnapshot,
@@ -37,6 +41,7 @@ mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]
 pub mod exemplar_suggest;
 mod intake;
+pub mod knowledge;
 #[cfg(feature = "onnx-shadow")]
 pub mod onnx_embedding;
 mod project_attunement;
@@ -53,6 +58,30 @@ pub struct AppState {
     intake: Arc<intake::Template>,
     boundary_questions: Arc<boundary_questions::Catalog>,
     devpulse_context: Option<Arc<devpulse_context::Source>>,
+    assessment_config: Arc<AssessmentConfig>,
+    preflight_rules: Arc<PreflightRuleConfig>,
+    knowledge: Arc<std::sync::RwLock<Arc<Knowledge>>>,
+    subscription_checks: Arc<std::sync::RwLock<BTreeMap<String, SubscriptionCheck>>>,
+}
+
+fn record_codex_check(
+    checks: &std::sync::RwLock<BTreeMap<String, SubscriptionCheck>>,
+    status: &CodexStatus,
+) {
+    let mut checks = checks.write().unwrap_or_else(|error| error.into_inner());
+    // Only a clear answer counts. A missing CLI or a failed check says nothing
+    // about the subscription, so it must not override evidence of real use.
+    if status.active() || status.status == "unauthenticated" {
+        checks.insert(
+            "codex".into(),
+            SubscriptionCheck {
+                active: status.active(),
+                detail: status.detail.clone(),
+            },
+        );
+    } else {
+        checks.remove("codex");
+    }
 }
 
 impl AppState {
@@ -76,12 +105,20 @@ impl AppState {
             intake: Arc::new(intake::Template::bundled()),
             boundary_questions: Arc::new(boundary_questions::Catalog::bundled()),
             devpulse_context: None,
+            assessment_config: Arc::new(AssessmentConfig::default_alpha()),
+            preflight_rules: Arc::new(CpuRuleEncoder::default().config().clone()),
+            knowledge: Arc::new(std::sync::RwLock::new(Arc::new(Knowledge::disabled()))),
+            subscription_checks: Arc::default(),
         }
     }
 
     pub fn persistent(signal_path: impl AsRef<std::path::Path>) -> Result<Self, RuntimeError> {
         let encoder = configured_preflight_encoder().map_err(|error| {
             RuntimeError::InvalidRequest(format!("preflight configuration: {error}"))
+        })?;
+        let preflight_rules = encoder.config().clone();
+        let assessment_config = load_assessment_config().map_err(|error| {
+            RuntimeError::InvalidRequest(format!("assessment configuration: {error}"))
         })?;
         let classifier_config = load_classifier_config().map_err(|error| {
             RuntimeError::InvalidRequest(format!("classifier configuration: {error}"))
@@ -130,7 +167,53 @@ impl AppState {
             intake: Arc::new(intake),
             boundary_questions: Arc::new(boundary_questions),
             devpulse_context,
+            assessment_config: Arc::new(assessment_config),
+            preflight_rules: Arc::new(preflight_rules),
+            knowledge: Arc::new(std::sync::RwLock::new(Arc::new(Knowledge::disabled()))),
+            subscription_checks: Arc::default(),
         })
+    }
+
+    /// Keeps what LFG knows about models and subscriptions current from the
+    /// provider tools' local files. Reads only this machine and keeps only
+    /// counts. `LFG_LEARNING=off` disables it. A server reachable from other
+    /// machines needs `LFG_LEARNING=on`, since it would expose that summary.
+    pub fn start_learning(&self, loopback: bool) {
+        let setting = std::env::var("LFG_LEARNING").unwrap_or_default();
+        if setting == "off" || (!loopback && setting != "on") {
+            return;
+        }
+        let store = self.knowledge.clone();
+        let checks = self.subscription_checks.clone();
+        let runner = self.codex.clone();
+        let refresh = Duration::from_secs(self.assessment_config.matching.refresh_seconds);
+        let mut learner = knowledge::Learner::new(
+            self.assessment_config.clone(),
+            self.preflight_rules.clone(),
+            knowledge::Locations::from_environment(),
+        );
+        *store.write().unwrap_or_else(|error| error.into_inner()) = Arc::new(Knowledge {
+            state: "reading".into(),
+            ..Knowledge::default()
+        });
+        tokio::spawn(async move {
+            loop {
+                let runner = runner.clone();
+                let Ok((returned, knowledge, status)) = tokio::task::spawn_blocking(move || {
+                    let knowledge = learner.refresh();
+                    let status = runner.probe();
+                    (learner, knowledge, status)
+                })
+                .await
+                else {
+                    return;
+                };
+                learner = returned;
+                *store.write().unwrap_or_else(|error| error.into_inner()) = Arc::new(knowledge);
+                record_codex_check(&checks, &status);
+                tokio::time::sleep(refresh).await;
+            }
+        });
     }
 }
 
@@ -205,6 +288,15 @@ fn load_provider_inventory() -> Result<ProviderInventoryConfig, String> {
         std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
     ProviderInventoryConfig::from_json_str(&text)
         .map_err(|error| format!("invalid {path:?}: {error}"))
+}
+
+fn load_assessment_config() -> Result<AssessmentConfig, String> {
+    let Some(path) = std::env::var_os("LFG_ASSESSMENT_CONFIG") else {
+        return Ok(AssessmentConfig::default_alpha());
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("cannot read {path:?}: {error}"))?;
+    AssessmentConfig::from_json_str(&text).map_err(|error| format!("invalid {path:?}: {error}"))
 }
 
 fn load_classifier_config() -> Result<ClassifierConfig, String> {
@@ -288,6 +380,8 @@ pub fn router(state: AppState) -> Router {
             "/api/shippin/intelligence/lfg/evaluations/promotions",
             get(lfg_promotions).post(lfg_decide_promotion),
         )
+        .route("/api/lfg/assess", post(lfg_assess))
+        .route("/api/lfg/knowledge", get(lfg_knowledge))
         .route("/api/lfg/classify", post(lfg_classify))
         .route("/api/lfg/dev-stats", get(lfg_dev_stats))
         .route("/api/lfg/intake/template", get(lfg_intake_template))
@@ -402,6 +496,66 @@ async fn lfg_classify(
     result
 }
 
+async fn lfg_assess(
+    State(state): State<AppState>,
+    Json(request): Json<AssessRequest>,
+) -> Result<Json<Assessment>, (StatusCode, Json<ErrorResponse>)> {
+    let start = state.dev_stats.start();
+    let work = state.dev_stats.start();
+    let result = state
+        .operations
+        .validate_prompt(&request.session_id, &request.text)
+        .map(|()| {
+            let knowledge = state
+                .knowledge
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let checks = state
+                .subscription_checks
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            assess(
+                &state.assessment_config,
+                &state.preflight_rules,
+                &request,
+                &knowledge,
+                &checks,
+            )
+        })
+        .map_err(lfg_error);
+    state.dev_stats.record_with_rules(
+        Operation::Assessment,
+        start,
+        None,
+        DevStats::elapsed(work),
+        result.is_ok(),
+        result
+            .as_ref()
+            .map(|assessment| assessment.rules.clone())
+            .unwrap_or_default(),
+    );
+    result.map(Json)
+}
+
+async fn lfg_knowledge(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<Knowledge>,
+) {
+    let knowledge = state
+        .knowledge
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(with_roles(&state.assessment_config, &knowledge)),
+    )
+}
+
 async fn lfg_dev_stats(
     State(state): State<AppState>,
 ) -> (
@@ -416,6 +570,7 @@ async fn lfg_dev_stats(
         status.operations_digest,
         status.encoder.sha256,
         classifier_digest,
+        state.assessment_config.digest(),
     );
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -468,6 +623,7 @@ async fn lfg_codex_status(State(state): State<AppState>) -> Json<CodexStatus> {
             detail: "Codex readiness probe could not complete".into(),
             capabilities: vec![],
         });
+    record_codex_check(&state.subscription_checks, &status);
     state
         .lfg
         .lock()
@@ -934,6 +1090,72 @@ mod tests {
         let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("missing-classifier-config-for-test.json");
         assert!(read_classifier_config(&missing).is_err());
+    }
+
+    #[tokio::test]
+    async fn one_assessment_returns_all_results_and_traces_only_rule_identifiers() {
+        let state = AppState::new();
+        let prompt = "Fix the zebra-canary auth bug in the server, add regression tests, and update the docs";
+        let (status, assessment) = json_response(
+            router(state.clone()),
+            Request::builder()
+                .method("POST")
+                .uri("/api/lfg/assess")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sessionId": "s", "revision": 1, "text": prompt, "declaredSubscriptions": ["claude"]})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(assessment["schemaVersion"], "lfg.assessment.v1");
+        assert_eq!(assessment["intent"]["primary"], "build.software");
+        assert_eq!(assessment["complexity"]["bracket"], "moderate");
+        assert_eq!(assessment["agents"]["total"], 2);
+        assert_eq!(
+            assessment["models"]["suggested"]["model"],
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(assessment["models"]["suggested"]["origin"], "published");
+
+        let (_, stats) = json_response(
+            router(state.clone()),
+            Request::builder()
+                .uri("/api/lfg/dev-stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let trace = stats["traces"].as_array().unwrap().last().unwrap();
+        assert_eq!(trace["operation"], "assessment");
+        let rules = trace["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|rule| rule == "bracket:moderate"));
+        assert!(!stats.to_string().contains("zebra-canary"));
+        assert!(
+            stats["assessmentDigest"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+
+        let (status, knowledge) = json_response(
+            router(state),
+            Request::builder()
+                .uri("/api/lfg/knowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(knowledge["state"], "disabled");
+        assert!(
+            knowledge["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model["model"] == "claude-haiku-5-5" && model["role"] == "fast")
+        );
     }
 
     async fn json_response(app: Router, request: Request<Body>) -> (StatusCode, Value) {

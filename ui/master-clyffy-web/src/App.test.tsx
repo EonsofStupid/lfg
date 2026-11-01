@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from './App'
 
@@ -13,6 +13,27 @@ const preflight = {
   intents: [{ label: 'research.web', confidence: null, source: 'cpu-rule' }], capabilities: [], risks: [],
   rros: [{ id: 'rro-1', confidence: null, advisory: true, lineage: ['test'], category: { id: 'research.web', version: '1.0.0', label: 'EVIDENCE', plainLabel: 'Research current evidence', capability: 'web.access', tone: 'cyan', hash: 'b'.repeat(64) } }],
   predictedAgents: 3, predictedBranches: 2, confidence: null, abstained: true
+}
+
+const assessment = {
+  schemaVersion: 'lfg.assessment.v1', sessionId: 'test', revision: 1, durationMicros: 85, configRevision: 'test', configDigest: 'f'.repeat(64),
+  prompt: { characters: 34, words: 6, tasks: ['implement my feature', 'run tests'] },
+  intent: { primary: 'build.software', plainLabel: 'Build or change software', fallback: false, risks: [],
+    all: [{ id: 'build.software', plainLabel: 'Build or change software', matched: ['implement'] }, { id: 'verify.outcome', plainLabel: 'Prove the result', matched: ['test'] }] },
+  complexity: { score: 3.65, bracket: 'moderate', label: 'Moderate', plainLabel: 'A few connected steps',
+    terms: [{ id: 'tasks', label: 'Separate tasks', value: 2, weight: 1, points: 2, detail: [] }],
+    ladder: [{ id: 'trivial', label: 'Trivial', minScore: 0, current: false }, { id: 'moderate', label: 'Moderate', minScore: 3, current: true }] },
+  agents: { total: 7, tasks: 2, min: 1, max: 2, plain: '2 separate tasks found.' },
+  models: { role: 'standard', effort: 'medium', usualModel: null, plain: 'Moderate work suits a standard model at medium effort.', alternatives: [],
+    suggested: { subscriptionId: 'project-seat', model: 'example-model', label: 'Example Model', description: 'Balanced model', role: 'standard', effort: 'medium', usualEffort: 'xhigh', origin: 'provider-list', fit: 1, habit: 0.5, score: 0.85, promptsInBracket: 4, why: 'A standard model.' } },
+  subscriptions: [{ id: 'project-seat', label: 'project-seat', status: 'recognized', usable: true, declared: false, plan: 'Example Plan', lastUsed: '2026-11-01', detail: 'Found on this machine; last used 2026-11-01.' }],
+  knowledge: { state: 'ready', refreshedAt: '2026-11-01T00:00:00Z', promptsSeen: 1182, modelsKnown: 3 },
+  rules: ['intent:build.software', 'bracket:moderate'], advisory: true, confidence: null
+}
+
+const knowledge = {
+  state: 'ready', refreshedAt: '2026-11-01T00:00:00Z', promptsSeen: 1182, sources: [{ id: 'codex-sessions', files: 92, prompts: 746, status: 'read' }], subscriptions: [],
+  models: [{ subscriptionId: 'codex', model: 'gpt-learned', label: 'GPT Learned', description: '', priority: 1, efforts: ['low'], origin: 'provider-list', available: true, lastUsed: '2026-11-01', role: 'fast', usage: [{ bracket: 'trivial', prompts: 12, weighted: 11, efforts: { low: 12 } }] }]
 }
 
 const classification = {
@@ -33,7 +54,8 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
     if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2, devTools: { statsEnabled: true, traceCapacity: 8, statsPollIntervalMs: 1000, debounceMinMs: 5, debounceMaxMs: 80, historyMinSamples: 1, historyMaxSamples: 8 } } }))
-    if (path.endsWith('/preflight')) return new Response(JSON.stringify(preflight))
+    if (path.endsWith('/assess')) return new Response(JSON.stringify({ ...assessment, revision: JSON.parse(String(init?.body)).revision }))
+    if (path.endsWith('/knowledge')) return new Response(JSON.stringify(knowledge))
     if (path.endsWith('/classify')) return new Response(JSON.stringify({ ...classification, revision: JSON.parse(String(init?.body)).revision }))
     if (path.endsWith('/intake/app-context')) return new Response(JSON.stringify(appContext))
     if (path.endsWith('/intake/preview')) {
@@ -41,7 +63,7 @@ beforeEach(() => {
       return new Response(JSON.stringify({schemaVersion: 'lfg.intake-preview.v1', templateRevision: 'test', templateDigest: 'e'.repeat(64), sourceApp: body.sourceApp, missingRequired: 1,
         answers: [{id: 'user_request', question: 'What is the user asking to do?', required: true, status: body.facts.request.text ? 'filled' : 'missing', value: body.facts.request.text || null}]}))
     }
-    if (path.endsWith('/dev-stats')) return new Response(JSON.stringify({schemaVersion: 'lfg.dev-stats.v1', enabled: true, capacity: 8, totalRecorded: 1, evicted: 0, cpuTimeMicros: null, operationsDigest: 'd'.repeat(64), encoderDigest: 'a'.repeat(64), classifierDigest: 'c'.repeat(64), summaries: [{operation: 'preflight', samples: 1, errors: 0, p50TotalMicros: 100, p95TotalMicros: 100}], traces: [{sequence: 1, recordedAt: '2026-01-01T00:00:00Z', operation: 'preflight', outcome: 'ok', totalMicros: 100, queueMicros: 10, workMicros: 80}]}))
+    if (path.endsWith('/dev-stats')) return new Response(JSON.stringify({schemaVersion: 'lfg.dev-stats.v1', enabled: true, capacity: 8, totalRecorded: 1, evicted: 0, cpuTimeMicros: null, operationsDigest: 'd'.repeat(64), encoderDigest: 'a'.repeat(64), classifierDigest: 'c'.repeat(64), summaries: [{operation: 'preflight', samples: 1, errors: 0, p50TotalMicros: 100, p95TotalMicros: 100}], traces: [{sequence: 1, recordedAt: '2026-01-01T00:00:00Z', operation: 'assessment', outcome: 'ok', totalMicros: 100, queueMicros: 10, workMicros: 80, rules: ['bracket:moderate', 'agents:2']}]}))
     return new Response('{}', { status: 404 })
   }))
 })
@@ -87,8 +109,30 @@ test('shows measured elapsed time separately from committed tallies', async () =
   expect(screen.getByRole('textbox', { name: 'Prompt to route' })).toHaveValue('')
   enterPrompt()
   await waitFor(() => expect(screen.getByText('0.085 ms elapsed')).toBeInTheDocument())
-  expect(screen.getByText('3')).toBeInTheDocument()
   expect(screen.getByText('Committed')).toBeInTheDocument()
+})
+
+test('shows one assessment in the order a person reads it', async () => {
+  render(<App />)
+  enterPrompt()
+  const view = await screen.findByRole('region', { name: 'LFG assessment' })
+  await within(view).findByText('Prompt received')
+  expect(within(view).getAllByRole('heading').map((heading) => heading.textContent)).toEqual([
+    'Prompt received', 'Formula', 'Brackets', 'Agents and models suggested', 'Subscriptions recognized'
+  ])
+  expect(within(view).getByText('“Implement my feature and run tests”')).toBeInTheDocument()
+  expect(within(view).getByText('run tests')).toBeInTheDocument()
+  expect(within(view).getByText('Separate tasks')).toBeInTheDocument()
+  expect(within(view).getByText('Moderate', { selector: 'li.is-current strong' })).toBeInTheDocument()
+  expect(within(view).getByText('Example Model')).toBeInTheDocument()
+  expect(within(view).getByText('Found on this machine')).toBeInTheDocument()
+  expect(within(view).getByText('Example Plan')).toBeInTheDocument()
+  expect(within(view).getByText(/Learned from 1,182 of your requests/)).toBeInTheDocument()
+  expect(screen.queryByText(/ready to probe/)).not.toBeInTheDocument()
+  const agents = screen.getByText('Suggested agents').closest('article')
+  expect(agents).toHaveTextContent('7')
+  expect(view.querySelector('.assessment-agents')).toHaveTextContent('7 agents')
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/preflight') || String(url).endsWith('/classify'))).toBe(false)
 })
 
 test('uses configured subscription IDs instead of a built-in provider roster', async () => {
@@ -99,7 +143,7 @@ test('uses configured subscription IDs instead of a built-in provider roster', a
   fireEvent.click(configured)
   await waitFor(() => expect(configured).toHaveClass('is-active'))
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
-    String(url).endsWith('/classify') && JSON.parse(String(init?.body)).activeSubscriptions.includes('project-seat')
+    String(url).endsWith('/assess') && JSON.parse(String(init?.body)).declaredSubscriptions.includes('project-seat')
   )).toBe(true))
 })
 
@@ -139,14 +183,18 @@ test('shows local traces and applies browser-only tuning', async () => {
   const { container } = render(<App />)
   enterPrompt()
   await screen.findByRole('button', { name: 'project-seat' })
-  await waitFor(() => expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1))
   fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  await waitFor(() => expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1))
+  expect(screen.getByText(/being replaced by the assessment above/)).toBeInTheDocument()
   expect(await screen.findByText('Implement my feature and run tests')).toBeInTheDocument()
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
     String(url).endsWith('/intake/preview') && JSON.parse(String(init?.body)).facts.request.text === 'Implement my feature and run tests'
   )).toBe(true))
   expect(await screen.findByText(/1 traces recorded/)).toHaveTextContent('CPU time unavailable')
   expect(screen.getByText('0.010 ms')).toBeInTheDocument()
+  expect(screen.getByText('bracket:moderate · agents:2')).toBeInTheDocument()
+  expect(screen.getByText('gpt-learned')).toBeInTheDocument()
+  expect(screen.getByText('trivial 12')).toBeInTheDocument()
   fireEvent.change(screen.getByRole('slider', { name: 'Browser debounce' }), { target: { value: '25' } })
   await waitFor(() => expect(timer.mock.calls.some(([, delay]) => delay === 25)).toBe(true))
   fireEvent.change(screen.getByRole('slider', { name: 'Displayed history' }), { target: { value: '3' } })

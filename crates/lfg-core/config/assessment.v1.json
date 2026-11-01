@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "lfg.assessment-config.v1",
+  "revision": "baseline-1",
+  "wordSuffixes": ["s", "es", "ed", "d", "ing"],
+  "taskSeparators": ["\n", ";", ",", ". ", "? ", "! ", " and then ", " and ", " then ", " also ", " plus "],
+  "actionWords": ["add", "analyze", "audit", "benchmark", "build", "clean up", "compare", "configure", "convert", "create", "debug", "delete", "deploy", "design", "document", "draft", "evaluate", "explain", "fix", "generate", "implement", "install", "integrate", "investigate", "merge", "migrate", "optimize", "plan", "port", "refactor", "release", "remove", "rename", "research", "review", "rewrite", "run", "set up", "ship", "summarize", "test", "train", "translate", "update", "upgrade", "verify", "write"],
+  "scopeWords": ["across", "architecture", "codebase", "end-to-end", "entire", "every", "infrastructure", "migrate", "multiple files", "overhaul", "pipeline", "production", "redesign", "refactor", "repository", "system", "whole"],
+  "extraIntentWords": [
+    {"intent": "build.software", "words": ["add", "configure", "debug", "delete", "deploy", "install", "integrate", "merge", "migrate", "port", "refactor", "remove", "rename", "rewrite", "update", "upgrade"]},
+    {"intent": "research.web", "words": ["investigate", "look up"]},
+    {"intent": "verify.outcome", "words": ["check", "validate"]},
+    {"intent": "evaluate.semantic", "words": ["benchmark", "compare"]}
+  ],
+  "signals": {
+    "workKinds": 0.75,
+    "tasks": 1.0,
+    "length": 1.0,
+    "wordsPerLengthPoint": 40.0,
+    "lengthCap": 3.0,
+    "scope": 1.5,
+    "scopeCap": 3,
+    "risks": 0.5
+  },
+  "brackets": [
+    {"id": "trivial", "label": "Trivial", "plainLabel": "A quick answer or a tiny change", "minScore": 0.0, "minAgents": 1, "maxAgents": 1, "role": "fast", "effort": "low"},
+    {"id": "simple", "label": "Simple", "plainLabel": "One small, clear task", "minScore": 1.5, "minAgents": 1, "maxAgents": 1, "role": "fast", "effort": "low"},
+    {"id": "moderate", "label": "Moderate", "plainLabel": "A few connected steps", "minScore": 3.0, "minAgents": 1, "maxAgents": 2, "role": "standard", "effort": "medium"},
+    {"id": "complex", "label": "Complex", "plainLabel": "Several tasks that need planning and checking", "minScore": 5.0, "minAgents": 2, "maxAgents": 4, "role": "frontier", "effort": "high"},
+    {"id": "major", "label": "Major", "plainLabel": "Large, wide-reaching work", "minScore": 8.0, "minAgents": 3, "maxAgents": 8, "role": "maximum", "effort": "xhigh"}
+  ],
+  "roles": ["fast", "standard", "frontier", "maximum"],
+  "roleRules": [
+    {"role": "specialist", "words": ["cybersecurity"]},
+    {"role": "maximum", "words": ["most capable"]},
+    {"role": "frontier", "words": ["frontier", "most demanding"]},
+    {"role": "fast", "words": ["fast", "affordable", "easier", "lightweight", "efficient"]},
+    {"role": "standard", "words": ["workhorse", "balanced", "everyday", "straightforward"]}
+  ],
+  "olderWords": ["older", "previous generation"],
+  "familyIgnoreWords": ["claude", "codex", "gpt", "latest", "model"],
+  "effortOrder": ["low", "medium", "high", "xhigh", "max", "ultra"],
+  "matching": {
+    "usageInfluence": 0.3,
+    "roleStepPenalty": 0.4,
+    "minimumFit": 0.05,
+    "unknownRoleFit": 0.5,
+    "offLadderFit": 0.05,
+    "olderFitFactor": 0.5,
+    "adjacentBracketWeight": 0.25,
+    "usageHalfLifeDays": 21.0,
+    "seenWithinDays": 45,
+    "maxAlternatives": 3,
+    "effortFollowsHabit": false,
+    "refreshSeconds": 300
+  },
+  "subscriptions": [
+    {"id": "claude", "label": "Claude"},
+    {"id": "codex", "label": "OpenAI Codex"}
+  ],
+  "publishedModels": [
+    {"subscriptionId": "claude", "model": "claude-fable-5-1", "label": "Claude Fable 5.1", "description": "Most capable for the hardest and longest-running tasks", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
+    {"subscriptionId": "claude", "model": "claude-opus-5-5", "label": "Claude Opus 5.5", "description": "Frontier model for demanding coding and agentic work", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
+    {"subscriptionId": "claude", "model": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "description": "Balanced speed and capability for everyday coding and agent work", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
+    {"subscriptionId": "claude", "model": "claude-haiku-5-5", "label": "Claude Haiku 5.5", "description": "Fast and affordable model for simple tasks", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"}
+  ]
+}

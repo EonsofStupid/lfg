@@ -8,6 +8,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+pub mod assessment;
 pub mod kernel;
 
 pub const PROTOCOL_VERSION: &str = "lfg.payload-signal.v0.3.0";
@@ -866,6 +867,10 @@ impl CpuRuleEncoder {
         let config = PreflightRuleConfig::from_json_str(&encoded)?;
         let manifest = ManifestRef::new("lfg-cpu-rule-baseline", &config.revision, &encoded);
         Ok(Self { config, manifest })
+    }
+
+    pub fn config(&self) -> &PreflightRuleConfig {
+        &self.config
     }
 }
 

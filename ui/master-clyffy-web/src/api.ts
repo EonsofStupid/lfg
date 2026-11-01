@@ -1,4 +1,4 @@
-import type { AppContext, BoundaryCatalog, ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, PlanCommit, PreflightSnapshot, RuntimeStatus } from './types'
+import type { AppContext, Assessment, BoundaryCatalog, ClassificationSnapshot, DevStats, GraphSnapshot, IntakePreview, Knowledge, PlanCommit, RuntimeStatus } from './types'
 
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -33,10 +33,12 @@ export const getStatus = async () => {
   return status
 }
 
-export const preflight = (sessionId: string, revision: number, text: string) =>
-  requestJSON<PreflightSnapshot>('/api/shippin/intelligence/lfg/preflight', {
-    method: 'POST', body: JSON.stringify({ sessionId, revision, text })
+export const assess = (sessionId: string, revision: number, text: string, declaredSubscriptions: string[]) =>
+  requestJSON<Assessment>('/api/lfg/assess', {
+    method: 'POST', body: JSON.stringify({ sessionId, revision, text, declaredSubscriptions })
   })
+
+export const getKnowledge = () => requestJSON<Knowledge>('/api/lfg/knowledge')
 
 export const commitPlan = (sessionId: string, revision: number, text: string) =>
   requestJSON<PlanCommit>('/api/shippin/intelligence/lfg/plans', {
