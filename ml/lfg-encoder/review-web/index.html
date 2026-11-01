@@ -36,6 +36,9 @@
           <button id="show-context" type="button" class="secondary">Show prior user messages</button>
           <p class="hint">Prior messages may contain private data. This view omits assistant replies and is not included in the training record.</p>
           <pre id="source-context" class="source" aria-live="polite"></pre>
+          <button id="show-following" type="button" class="secondary">Show later user messages</button>
+          <p class="hint">Later messages can contain corrections and private data. They are from the current session file, omit assistant replies, and are not training labels.</p>
+          <pre id="following-context" class="source" aria-live="polite"></pre>
           <h3>Review note</h3><p id="review-note"></p>
         </article>
         <article class="panel">

@@ -322,6 +322,20 @@ class ReviewWebTests(unittest.TestCase):
         config_path.write_text(json.dumps({**config, 'checkpoint_verification': limits}), encoding='utf-8')
         self.assertEqual(review_web.load_config(config_path)['checkpoint_verification'], limits)
 
+    def test_following_context_requires_bounded_source_configuration(self):
+        config = review_web.load_config(review_web.DEFAULT_CONFIG)
+        config_path = Path(self.temp.name) / 'following-config.json'
+        for limits in ({'max_messages': 0, 'max_context_bytes': 10, 'max_scan_lines': 1},
+                       {'max_messages': 1, 'max_context_bytes': 10, 'max_scan_lines': True},
+                       {'max_messages': 1, 'max_context_bytes': 10}):
+            config_path.write_text(json.dumps({**config, 'source_following': limits}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'following source context'):
+                review_web.load_config(config_path)
+        without_source = {key: value for key, value in config.items() if key not in ('source_verification', 'source_context')}
+        config_path.write_text(json.dumps(without_source), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'following source context'):
+            review_web.load_config(config_path)
+
     def test_source_context_is_local_bounded_and_does_not_record_review(self):
         root = Path(self.temp.name)
         def message(role, text, kind='user.text'):
@@ -329,7 +343,8 @@ class ReviewWebTests(unittest.TestCase):
                     'content': [{'type': 'input_text', 'text': text}],
                     'internal_chat_message_metadata_passthrough': {'content_item_kinds': [kind]}}}
         rows = [message('user', 'prior private text'), message('assistant', 'assistant text'),
-                message('user', 'selected text'), message('user', 'later text')]
+                message('user', 'selected text'), message('assistant', 'later assistant text'),
+                message('user', 'later text')]
         lines = [(json.dumps(row) + '\n').encode() for row in rows]
         prefix = b''.join(lines[:3])
         session = root / 'context-session.jsonl'; session.write_bytes(b''.join(lines))
@@ -357,8 +372,48 @@ class ReviewWebTests(unittest.TestCase):
         self.assertNotIn(b'assistant text', data)
         self.assertNotIn(b'later text', data)
         self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        self.assertEqual(self.request('POST', '/api/following-source-context', body=body, origin='https://evil.example')[0], 403)
+        self.assertEqual(self.request('POST', '/api/following-source-context',
+                                      body={**body, 'annotation_sha256': '0' * 64}, origin=self.server.origin)[0], 400)
+        status, headers, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        following = json.loads(data)
+        self.assertEqual([entry['text'] for entry in following['messages']], ['later text'])
+        self.assertNotIn(b'assistant text', data)
+        self.assertNotIn(b'prior private text', data)
+        self.assertEqual(following['observed_through_line'], 5)
+        self.assertEqual(following['observed_prefix_sha256'], hashlib.sha256(b''.join(lines)).hexdigest())
+        self.assertFalse(following['truncated'])
+        self.assertEqual(review_corpus.status(workspace)['decisions']['approved'], 0)
+        old_following = self.server.config['source_following']
+        self.server.config['source_following'] = {**old_following, 'max_context_bytes': 1}
+        try:
+            status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+            self.assertEqual(status, 200)
+            bounded = json.loads(data)
+            self.assertEqual(bounded['messages'], [])
+            self.assertTrue(bounded['truncated'])
+            self.server.config['source_following'] = {**old_following, 'max_scan_lines': 1}
+            status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+            self.assertEqual(status, 200)
+            bounded = json.loads(data)
+            self.assertEqual(bounded['messages'], [])
+            self.assertTrue(bounded['truncated'])
+            self.assertEqual(bounded['observed_through_line'], 4)
+        finally:
+            self.server.config['source_following'] = old_following
+        revised_later = b''.join(lines[:4]) + (json.dumps(message('user', 'revised later text')) + '\n').encode()
+        session.write_bytes(revised_later)
+        status, _, data = self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        revised = json.loads(data)
+        self.assertEqual([entry['text'] for entry in revised['messages']], ['revised later text'])
+        self.assertEqual(revised['observed_prefix_sha256'], hashlib.sha256(revised_later).hexdigest())
+        self.assertNotEqual(revised['observed_prefix_sha256'], following['observed_prefix_sha256'])
         session.write_bytes(b''.join(lines).replace(b'prior private text', b'changed private text'))
         self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
+        self.assertEqual(self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)[0], 400)
 
     def test_guided_review_binds_approval_to_displayed_guide_and_rejects_changes(self):
         guide = {'schema_version': 'lfg.review-label-guide.v1', 'revision': 'fixture', 'notice': 'Review carefully.',
