@@ -486,6 +486,44 @@ prefix match alone is insufficient to establish that a request remains valid.
 The pending record ID, annotation digest and inspected-prefix digest are in the
 private advisory `dataset/private/combined-source-grounded-training-review-20261031-v1/following-correction-triage-20261101-v1.json`;
 the advisory must be revalidated against the current workspace and source.
+
+For a training-only workspace, `following_review_triage.py` can scan a
+configurable set of literal markers in bounded later Codex user messages. It
+groups candidates by session, verifies each selected original prefix and text
+while streaming, and writes only IDs, digests, marker IDs and source line
+metadata to a new private report. For example:
+
+```powershell
+python ml/lfg-encoder/following_review_triage.py `
+  --workspace PRIVATE_TRAIN_WORKSPACE `
+  --config ml/lfg-encoder/following-review-triage.example.json `
+  --output NEW_PRIVATE_REPORT.json
+```
+
+The example contains the literal `wrong chat`; copy and edit the configuration
+for other review markers and limits. A marker is not a decision: a later message
+may refer to a different request, and a missing marker does not establish clean
+or complete data. The scanner limits messages, bytes and lines, excludes Claude
+and other source types, and records source failures separately from checked
+items. It checks the workspace before and after without acquiring its review
+lock, so the result is an optimistic snapshot and each finding must be
+revalidated before review. If a session changes while scanning, it rechecks the
+bytes already read and treats any observed end of file as incomplete; this is
+not a defense against an adversarial local filesystem. The current source and
+report may contain sensitive metadata. No validation or test source is opened,
+and the command makes no labels or decisions.
+
+On 2026-11-01, two consecutive scans of the local 598-pending training workspace
+with the example marker produced identical private report hashes
+`a63a4232c759c7e7c069f82e03e580f550a2a5b4588db9c272ae12ab5f3758c6`.
+All 520 Codex candidates were checked within the configured windows; 78 Claude
+candidates were unsupported. The message limit ended 461 windows, the line
+limit ended 31, and 28 reached the observed end of file. Three candidates were
+flagged by the same later correction: the immediately preceding wrong-chat
+request and two earlier requests. The latter two show why markers must not
+automatically reject records. The retained private reports are
+`following-correction-scan-20261101-v7.json` and `-v8.json` in the workspace's
+parent directory. These scans do not establish clean data or independent labels.
 The `source_verification` object in the web configuration sets the maximum
 session-prefix and line sizes. Configurations without that optional object
 disable this check; it is independent of whether a reviewer can decide a
