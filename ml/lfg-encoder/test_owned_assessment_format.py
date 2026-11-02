@@ -1,11 +1,15 @@
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
-import evaluate_owned_assessment_format as evaluation
+AVAILABLE = all(importlib.util.find_spec(name) for name in ('torch', 'safetensors'))
+if AVAILABLE:
+    import evaluate_owned_assessment_format as evaluation
 
 
+@unittest.skipUnless(AVAILABLE, 'torch and safetensors required')
 class AssessmentFormatTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

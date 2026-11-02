@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -7,10 +8,14 @@ import urllib.error
 from unittest.mock import patch
 
 import assessment_distill
-import collect_local_teacher as collector
-import select_teacher_requests as selection
+
+AVAILABLE = all(importlib.util.find_spec(name) for name in ('torch', 'safetensors'))
+if AVAILABLE:
+    import collect_local_teacher as collector
+    import select_teacher_requests as selection
 
 
+@unittest.skipUnless(AVAILABLE, 'torch and safetensors required')
 class LocalTeacherCollectionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
