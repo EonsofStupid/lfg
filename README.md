@@ -86,6 +86,9 @@ self-contained binary, local/hosted use, cloud integration, and developer UI.
 The [developer-to-alpha execution plan](docs/lfg/DEVELOPER-TO-ALPHA-PLAN.md)
 tracks the work from the current developer preview through real supervised
 training, standalone qualification and RRFlow/SWAG integration.
+The [integration and training research](docs/lfg/INTEGRATION-AND-TRAINING-RESEARCH.md)
+reconciles that plan with the current LFG, RRFlow and SWAG implementations and
+the next independently testable delivery packages.
 
 Rust-authoritative; `GoClyffy` (in a sibling project) still hosts an older
 shadow-parity Go implementation kept in sync via

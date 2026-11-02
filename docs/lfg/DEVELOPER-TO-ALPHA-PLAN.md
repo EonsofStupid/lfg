@@ -1,5 +1,11 @@
 # LFG: developer build to learned alpha
 
+**Status note, 2026-11-02:** The inventory in “What is real today” and the
+original next slice below are historical: PR #123 merged the unified assessment,
+bounded discovery and browser-local question profiles. See the dated
+[integration and training research](INTEGRATION-AND-TRAINING-RESEARCH.md) for
+the current verified baseline, cross-repository findings and next packages.
+
 **Purpose:** turn the existing local work into a usable developer preview, a
 standalone assessment prototype that can participate in RRFlow, and ultimately
 LFG's own trained language model. This is an execution plan, not a statement
