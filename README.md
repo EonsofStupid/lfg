@@ -82,6 +82,9 @@ The [assessment and update design](docs/lfg/ASSESSMENT-AND-UPDATES.md) records
 the intended MCP, project profile, CPU measurement, and artifact-update paths.
 The [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md) defines the
 self-contained binary, local/hosted use, cloud integration, and developer UI.
+The [developer-to-alpha execution plan](docs/lfg/DEVELOPER-TO-ALPHA-PLAN.md)
+tracks the work from the current developer preview through real supervised
+training, standalone qualification and RRFlow/SWAG integration.
 
 Rust-authoritative; `GoClyffy` (in a sibling project) still hosts an older
 shadow-parity Go implementation kept in sync via
