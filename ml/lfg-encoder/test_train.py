@@ -139,6 +139,16 @@ class DatasetGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("explicitly selected --dataset", result.stderr)
 
+    def test_authorized_training_does_not_read_promotion_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "train.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            args = argparse.Namespace(dataset=dataset, allow_below_gate=True, promotion_policy=root / "missing.json",
+                                      seed=731, model_revision=None)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(SystemExit, "model-revision"):
+                train.train(args)
+
     def test_validation_cannot_silently_drop_a_label_absent_from_training(self):
         training = [record(1, True)]
         validation = [dict(record(2, True), risks=["sensitive-data"])]

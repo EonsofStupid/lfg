@@ -131,7 +131,7 @@ is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
 Training requires an explicitly selected `--dataset`; it never silently selects
 the bundled synthetic fixture. By default, selected authorized records,
-including unverified rows, can train.
+including unverified rows, can train without loading the promotion policy.
 `--allow-below-gate` remains an explicit alias for this mode. A grouped
 development split is used when the available families and labels support it;
 otherwise all selected rows train and validation is recorded as not performed.

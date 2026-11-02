@@ -419,10 +419,14 @@ def tokenize_complete_batch(batch: dict[str, Any], tokenizer: Any, maximum: int)
 
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
-    policy_path = getattr(args, "promotion_policy", POLICY)
-    policy_bytes = policy_path.read_bytes()
-    policy = parse_promotion_policy(policy_bytes)
-    records = select_training_records(input_records, policy["minimum_human_verified_examples"], args.allow_below_gate)
+    policy_bytes = None
+    if args.allow_below_gate:
+        records = input_records
+    else:
+        policy_path = getattr(args, "promotion_policy", POLICY)
+        policy_bytes = policy_path.read_bytes()
+        policy = parse_promotion_policy(policy_bytes)
+        records = select_training_records(input_records, policy["minimum_human_verified_examples"], False)
     corpus_audit = None
     support = None
     taxonomy = None
@@ -541,7 +545,7 @@ def train(args: argparse.Namespace) -> None:
         "base_model": args.base_model,
         "model_revision": args.model_revision,
         "dataset_sha256": split["dataset_sha256"],
-        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest() if policy_bytes is not None else None,
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
         "training_config_sha256": args.training_config_sha256,
