@@ -26,6 +26,13 @@ declared training group uniformly, then weights windows by their availability
 within that group. The choice is recorded in the corpus identity. It does not
 establish representativeness or measure whether groups are truly independent.
 
+Copy the [plan template](../../ml/lfg-encoder/document-development-plan.example.json)
+to a private location and replace every placeholder. On PowerShell,
+`(Get-FileHash -Algorithm SHA256 -LiteralPath YOUR_FILE).Hash.ToLowerInvariant()`
+gives the required digest. Use distinct project groups for validation; paths
+may be absolute or relative to the plan. These entries are explicit selections,
+not an automatic claim that the files are authorized or secret-free.
+
 ```powershell
 python ml/lfg-encoder/distill_owned_student.py `
   --student-config PRIVATE_STUDENT_CONFIG.json `
