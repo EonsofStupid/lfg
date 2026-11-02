@@ -144,6 +144,10 @@ def require_private_outputs(output: Path) -> None:
         raise ScreenError('cannot_verify_output_privacy')
     for name in ('train.jsonl', 'validation.jsonl', 'manifest.json'):
         relative = (output / name).relative_to(repository).as_posix()
+        tracked = subprocess.run(['git', '-C', str(repository), 'ls-files', '--error-unmatch', '--', relative],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if tracked.returncode != 1:
+            raise ScreenError('output_tracked_or_unverifiable')
         result = subprocess.run(['git', '-C', str(repository), 'check-ignore', '-q', '--no-index', '--', relative],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         if result.returncode != 0:

@@ -64,7 +64,8 @@ and use a different new directory after examining the failure.
 3. Run to a **new** private output location. The `--policy-read-limit` bounds
    reading the policy before its own limits are known. Existing outputs are never
    overwritten. Within a Git working tree, every possible output file must be
-   ignored. Paths below are placeholders, not source or target defaults:
+   ignored and must not already be tracked, even as a deleted file. Paths below
+   are placeholders, not source or target defaults:
 
 ```powershell
 python ml/lfg-encoder/screen_private_corpus.py `
@@ -88,12 +89,12 @@ workspace or an inference-ready model.
 ## Local evidence, 2026-11-02
 
 The tool screened the existing private development plan into
-`ml/lfg-encoder/dataset/private/screened-text-candidates-20261102-v3` in the
+`ml/lfg-encoder/dataset/private/screened-text-candidates-20261102-v4` in the
 original checkout. It processed **598 train and 47 validation** requests; two
 records matched the example bearer-credential rule and had those matches
 replaced. The result does not establish whether the matches were valid secrets
 or whether other secrets remain. The held-out Makers-Impulse source was not in
-the development plan and was not opened by this run. Prior raw input and the two
+the development plan and was not opened by this run. Prior raw input and the three
 earlier screening outputs are retained separately.
 
 The screened text totals **313,858 UTF-8 bytes for training** and **17,705 for

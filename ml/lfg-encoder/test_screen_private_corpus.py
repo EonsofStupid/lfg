@@ -154,6 +154,19 @@ class PrivateScreenTests(unittest.TestCase):
         self.prepare()
         self.assertTrue((self.output / 'manifest.json').exists())
 
+    def test_ignored_but_tracked_output_is_rejected(self):
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / '.gitignore').write_text('/output/\n', encoding='utf-8')
+        self.output.mkdir()
+        tracked = self.output / 'train.jsonl'
+        tracked.write_text('fixture', encoding='utf-8')
+        subprocess.run(['git', '-C', str(self.root), 'add', '-f', 'output/train.jsonl'], check=True)
+        tracked.unlink()
+        self.output.rmdir()
+        with self.assertRaisesRegex(subject.ScreenError, 'output_tracked_or_unverifiable'):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
