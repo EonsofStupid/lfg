@@ -15,6 +15,21 @@ spec.loader.exec_module(gate)
 
 
 class CheckedMergeCITests(unittest.TestCase):
+    def open_pr(self, head, base):
+        return {'state': 'open', 'draft': False, 'base': {'ref': 'main', 'sha': base},
+                'head': {'sha': head, 'repo': {'full_name': 'owner/repo'}},
+                'labels': [{'name': 'ready-to-auto-merge'}]}
+
+    def test_stale_or_ineligible_pull_requests_stop_waiting(self):
+        head, base = 'a' * 40, 'b' * 40
+        original = self.open_pr(head, base)
+        self.assertTrue(gate.still_eligible(original, 'owner/repo', head, base))
+        for change in ({'state': 'closed'}, {'draft': True}, {'labels': []},
+                       {'base': {'ref': 'main', 'sha': 'c' * 40}},
+                       {'head': {'sha': 'd' * 40, 'repo': {'full_name': 'owner/repo'}}},
+                       {'head': {'sha': head, 'repo': None}}):
+            self.assertFalse(gate.still_eligible({**original, **change}, 'owner/repo', head, base))
+
     def run_record(self, number, head, base, identifier):
         return {'id': identifier, 'event': 'pull_request', 'head_sha': head,
                 'pull_requests': [{'number': number, 'head': {'sha': head}, 'base': {'sha': base}}]}
@@ -50,12 +65,20 @@ class CheckedMergeCITests(unittest.TestCase):
                 '--base', base, '--timeout-seconds', '5', '--poll-seconds', '1']
         for name in required:
             args.extend(['--required-job', name])
-        with patch.object(sys, 'argv', args), patch.object(gate, 'api', side_effect=[{'workflow_runs': [run]}, {'jobs': jobs}]) as api, redirect_stdout(io.StringIO()):
+        pr = self.open_pr(head, base)
+        branch = {'commit': {'sha': base}}
+        with patch.object(sys, 'argv', args), patch.object(gate, 'api', side_effect=[pr, branch, {'workflow_runs': [run]}, {'jobs': jobs}]) as api, redirect_stdout(io.StringIO()):
             gate.main()
-        self.assertIn('/runs/12/attempts/2/jobs?', api.call_args_list[1].args[0])
+        self.assertIn('/runs/12/attempts/2/jobs?', api.call_args_list[3].args[0])
         run['conclusion'] = 'failure'
-        with patch.object(sys, 'argv', args), patch.object(gate, 'api', return_value={'workflow_runs': [run]}):
+        with patch.object(sys, 'argv', args), patch.object(gate, 'api', side_effect=[pr, branch, {'workflow_runs': [run]}]):
             with self.assertRaisesRegex(SystemExit, 'concluded failure'):
+                gate.main()
+        with patch.object(sys, 'argv', args), patch.object(gate, 'api', return_value={**pr, 'state': 'closed'}):
+            with self.assertRaisesRegex(SystemExit, 'stop waiting'):
+                gate.main()
+        with patch.object(sys, 'argv', args), patch.object(gate, 'api', side_effect=[pr, {'commit': {'sha': 'c' * 40}}]):
+            with self.assertRaisesRegex(SystemExit, 'main changed'):
                 gate.main()
 
 

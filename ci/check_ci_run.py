@@ -28,6 +28,16 @@ def jobs_passed(jobs: list[dict], required: list[str]) -> bool:
     return True
 
 
+def still_eligible(pr: dict, repository: str, head: str, base: str) -> bool:
+    """Stop waiting once this exact checked merge can no longer be performed."""
+    return (pr.get('state') == 'open' and pr.get('draft') is False
+            and pr.get('base', {}).get('ref') == 'main'
+            and pr.get('base', {}).get('sha') == base
+            and pr.get('head', {}).get('sha') == head
+            and (pr.get('head', {}).get('repo') or {}).get('full_name') == repository
+            and any(label.get('name') == 'ready-to-auto-merge' for label in pr.get('labels', [])))
+
+
 def api(endpoint: str) -> dict:
     result = subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True, check=True, timeout=30)
     return json.loads(result.stdout)
@@ -54,6 +64,12 @@ def main() -> None:
                 f'?event=pull_request&head_sha={args.head}&per_page=100')
     while time.monotonic() < deadline:
         try:
+            pr = api(f'repos/{args.repository}/pulls/{args.pull_request}')
+            if not still_eligible(pr, args.repository, args.head, args.base):
+                raise SystemExit('pull request is closed, changed, or no longer eligible; stop waiting')
+            live_base = api(f'repos/{args.repository}/branches/main')['commit']['sha']
+            if live_base != args.base:
+                raise SystemExit('main changed since verification started; stop waiting')
             run = matching_run(api(endpoint)['workflow_runs'], args.pull_request, args.head, args.base)
             if run and run.get('status') == 'completed':
                 if run.get('conclusion') != 'success':
