@@ -186,7 +186,7 @@ test('shows local traces and applies browser-only tuning', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
   await waitFor(() => expect(container.querySelectorAll('.cpu-burst-bar')).toHaveLength(1))
   expect(screen.getByText(/being replaced by the assessment above/)).toBeInTheDocument()
-  expect(await screen.findByText('Implement my feature and run tests')).toBeInTheDocument()
+  expect(await screen.findByText('Implement my feature and run tests', { selector: 'pre' })).toBeInTheDocument()
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
     String(url).endsWith('/intake/preview') && JSON.parse(String(init?.body)).facts.request.text === 'Implement my feature and run tests'
   )).toBe(true))

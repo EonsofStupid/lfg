@@ -1,0 +1,20 @@
+{
+  "schema_version": "lfg.document-development-plan.v1",
+  "sampling": "group_uniform",
+  "sources": [
+    {
+      "path": "REPLACE_WITH_TRAIN_FILE_PATH",
+      "project": "REPLACE_WITH_TRAIN_PROJECT",
+      "project_group": "REPLACE_WITH_TRAIN_GROUP",
+      "split": "train",
+      "sha256": "REPLACE_WITH_LOWERCASE_SHA256"
+    },
+    {
+      "path": "REPLACE_WITH_VALIDATION_FILE_PATH",
+      "project": "REPLACE_WITH_VALIDATION_PROJECT",
+      "project_group": "REPLACE_WITH_VALIDATION_GROUP",
+      "split": "validation",
+      "sha256": "REPLACE_WITH_LOWERCASE_SHA256"
+    }
+  ]
+}
