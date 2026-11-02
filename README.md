@@ -82,6 +82,9 @@ The [assessment and update design](docs/lfg/ASSESSMENT-AND-UPDATES.md) records
 the intended MCP, project profile, CPU measurement, and artifact-update paths.
 The [product and delivery target](docs/lfg/PRODUCT-AND-DELIVERY.md) defines the
 self-contained binary, local/hosted use, cloud integration, and developer UI.
+The [developer-to-alpha execution plan](docs/lfg/DEVELOPER-TO-ALPHA-PLAN.md)
+tracks the work from the current developer preview through real supervised
+training, standalone qualification and RRFlow/SWAG integration.
 
 Rust-authoritative; `GoClyffy` (in a sibling project) still hosts an older
 shadow-parity Go implementation kept in sync via
@@ -110,6 +113,11 @@ where `lfg-server serve` listens by default.
 For a release build that embeds the browser assets in the executable, see
 [bundled UI builds](docs/lfg/BUNDLED-UI.md). The UI build is a build-time
 prerequisite, not a runtime Node.js requirement.
+
+Inspector can download its current diagnostic snapshot. To keep bounded local
+timing and outcome logs in a second process, see
+[developer observability](docs/lfg/DEVELOPER-OBSERVABILITY.md#keep-local-diagnostics).
+These diagnostics do not include prompts or establish model quality.
 
 Check activation without consuming a model run:
 

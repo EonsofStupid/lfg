@@ -4,6 +4,31 @@ import type { DevStats, Knowledge, RuntimeStatus } from './types'
 
 const formatMicros = (value: number | null) => value === null ? '—' : `${(value / 1000).toFixed(3)} ms`
 
+// Copy only the published diagnostic fields, even if a server supplies extra data.
+export function diagnosticExport(stats: DevStats) {
+  return {
+    schemaVersion: 'lfg.dev-snapshot-export.v1', exportedAt: new Date().toISOString(),
+    snapshot: {
+      schemaVersion: stats.schemaVersion, enabled: stats.enabled, capacity: stats.capacity,
+      totalRecorded: stats.totalRecorded, evicted: stats.evicted, cpuTimeMicros: stats.cpuTimeMicros,
+      operationsDigest: stats.operationsDigest, encoderDigest: stats.encoderDigest, classifierDigest: stats.classifierDigest,
+      ...(stats.assessmentDigest ? { assessmentDigest: stats.assessmentDigest } : {}),
+      summaries: stats.summaries.map(({ operation, samples, errors, p50TotalMicros, p95TotalMicros }) =>
+        ({ operation, samples, errors, p50TotalMicros, p95TotalMicros })),
+      traces: stats.traces.map(({ sequence, recordedAt, operation, outcome, totalMicros, queueMicros, workMicros }) =>
+        ({ sequence, recordedAt, operation, outcome, totalMicros, queueMicros, workMicros })),
+    },
+  }
+}
+
+function downloadSnapshot(stats: DevStats) {
+  const blob = new Blob([JSON.stringify(diagnosticExport(stats), null, 2) + '\n'], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url; link.download = 'lfg-diagnostics.json'; link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
 export function DevPanel({ status, debounceMs, historyLimit, onDebounce, onHistory, onReset }: {
   status: RuntimeStatus
   debounceMs: number
@@ -47,6 +72,8 @@ export function DevPanel({ status, debounceMs, historyLimit, onDebounce, onHisto
     <p>These controls affect this browser session only; server configuration is unchanged.</p>
     {!settings.statsEnabled ? <p>Statistics collection is disabled in server configuration.</p> : error ? <p role="alert">{error}</p> : !stats ? <p>Loading statistics…</p> : <>
       <p>{stats.totalRecorded} traces recorded · {stats.traces.length} retained of {stats.capacity} · {stats.evicted} evicted · CPU time unavailable</p>
+      <button type="button" onClick={() => downloadSnapshot(stats)}>Download diagnostic snapshot</button>
+      <p>Downloads the current retained timings and outcomes; it does not include prompts. For continuous bounded capture, use the local dev-log command.</p>
       <p>Encoder {stats.encoderDigest.slice(0, 12)} · classifier {stats.classifierDigest.slice(0, 12)} · operations {stats.operationsDigest.slice(0, 12)}{stats.assessmentDigest ? ` · assessment ${stats.assessmentDigest.slice(0, 12)}` : ''}</p>
       <div className="dev-table-wrap"><table><thead><tr><th>Operation</th><th>Samples</th><th>Errors</th><th>p50 elapsed</th><th>p95 elapsed</th></tr></thead><tbody>
         {stats.summaries.map((row) => <tr key={row.operation}><td>{row.operation}</td><td>{row.samples}</td><td>{row.errors}</td><td>{formatMicros(row.p50TotalMicros)}</td><td>{formatMicros(row.p95TotalMicros)}</td></tr>)}

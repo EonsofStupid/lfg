@@ -40,8 +40,49 @@ separate benchmark on declared hardware with a fixed corpus, warmup, concurrency
 quality checks, and actual CPU/cycle measurement. The current statistics are
 useful for locating latency changes, not proving CPU efficiency.
 
+## Keep local diagnostics
+
+Inspector's **Download diagnostic snapshot** saves the currently retained
+statistics to a JSON file. It explicitly selects the documented fields; it
+does not download the prompt or the complete UI state. The result is a point
+in time, not an ongoing log.
+
+To record periodic snapshots while developing, run the same LFG executable in
+a second terminal. Choose the server address, a **new** local output file and
+limits appropriate for your machine:
+
+```powershell
+.\lfg-server.exe dev-log --server 127.0.0.1:4317 --output .\lfg-dev-log.jsonl `
+  --interval-ms 2000 --timeout-ms 3000 --max-response-bytes 1048576 --max-bytes 10485760
+```
+
+The values above are examples, not fixed performance settings. Only loopback
+addresses are accepted. The logger polls at the selected interval and writes
+only changed snapshots, so idle polling does not fill the file. Each line has
+schema `lfg.dev-log-entry.v1`, a capture time and one validated
+`lfg.dev-stats.v1` snapshot. The logger rejects unknown
+snapshot fields, unexpected operation/outcome values, malformed digests and
+oversized responses. It creates a new file without overwriting an existing one,
+flushes each entry, and stops before the next entry would exceed `--max-bytes`.
+Stop it with Ctrl+C. If the server becomes unavailable or returns an incompatible
+snapshot, the logger stops with an error; prior flushed entries remain. Start a
+new file to resume.
+
+For compatibility with the separate running assessment prototype, the logger
+accepts its assessment operation and assessment configuration digest, but
+omits its optional rule-detail field from the saved trace. This avoids copying
+potentially identifying configuration values into the log.
+
+Snapshots repeat the retained ring, so their traces overlap. Events evicted
+between polls are lost; `evicted` and `totalRecorded` describe each server
+snapshot. A restart resets these counters and the current protocol does not
+provide a unique process identity, so the log is not an audit or distributed
+trace. File permissions and retention are the operator's responsibility;
+timing and activity metadata can still be sensitive. Logging is opt-in and does
+not transmit data to RRFlow or a cloud service.
+
 The server currently has no authentication layer on this endpoint. Its default
 listen address is loopback; if configured to listen on a network, the operator
 must account for exposure of timing and activity metadata. No remote export,
-distributed tracing, profile comparison, persisted diagnostics, or server-side
-configuration editor is implemented here.
+distributed tracing, profile comparison, automatic server-side persistence, or
+server-side configuration editor is implemented here.
