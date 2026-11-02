@@ -144,3 +144,12 @@ that observation does not prove there was no interference. The environment was
 not wheel-locked. The private report records source and configuration hashes
 under the local ignored `target` directory and on the Spark. No real training
 data or assessment-quality evaluation was used in this hardware check.
+
+The reusable `probe_owned_sft_resume.py` was then run on the same GB10 with a
+separately generated software fixture and the same two-step and resource
+settings. Its uninterrupted and resumed weights, losses and supervised token
+counts matched. Its private report and uninterrupted manifest were copied to
+the local ignored `target` directory; the recorded probe and trainer code hashes
+match the local files at commit `d44ad76`. The existing SWAG container was still
+running afterward. This second run also used no real training data and does not
+establish a useful model or a qualified Spark environment.
