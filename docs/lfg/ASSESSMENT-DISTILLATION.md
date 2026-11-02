@@ -1,5 +1,9 @@
 # Preparing assessment teacher traces
 
+For a separate privacy-screened, **unlabeled text-only** development staging
+path, see [private corpus screening](PRIVATE-CORPUS-SCREENING.md). It does not
+create teacher assessments or mark data as fully redacted or human reviewed.
+
 `ml/lfg-encoder/distill.py build-sft` converts explicitly selected local
 teacher traces into a private SFT dataset. Its task and system instruction come
 from the operator's plan. To train LFG's assessment behavior, choose teacher
