@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.owned-student-experiment.v1",
+  "architecture": {"width": 32, "layers": 2, "heads": 4, "conv_kernel": 3, "context": 64, "ff_multiplier": 2, "attention_every": 2},
+  "seed": 730,
+  "cpu_threads": 2,
+  "batch_size": 4,
+  "steps": 80,
+  "learning_rate": 0.001,
+  "weight_decay": 0.01,
+  "max_data_bytes": 1048576,
+  "max_parameters": 1000000
+}
