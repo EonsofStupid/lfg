@@ -51,8 +51,9 @@ design and the gap between it and the current implementation.
 
 - **Current foundation:** runtime answers come from deterministic rules. The
   [one assessment](docs/lfg/ASSESSMENT.md) returns all four results with the
-  formula behind them, and learns which models you have and how you use them
-  from your local Codex and Claude files. The older preflight and category
+  formula behind them, and can derive provisional model listings and usage
+  counts from local Codex and Claude files. A listing or past use does not prove
+  current subscription entitlement or a successful outcome. The older preflight and category
   classifiers remain for existing integrations and can disagree with it.
 - **Building the model:** `ml/lfg-encoder/` contains experimental training
   tools. The intent, capability and risk fine-tuner requires a GPU; an offline

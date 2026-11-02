@@ -38,16 +38,21 @@ used from the provider tools' own files, and refreshes while it runs.
 | `~/.codex/sessions/` | Codex prompts, with the model and effort used for each |
 | `~/.claude.json` | Claude plan and extra model options |
 | `~/.claude/projects/*/` | Claude prompts, with the model and effort used for each |
-| Codex sign-in check | Whether Codex is signed in |
-| `publishedModels` in the configuration | Only models no local source lists, currently Claude Sonnet and Haiku |
+| Explicit Codex sign-in check | Whether Codex is signed in when the user requests a check |
+| `publishedModels` in the configuration | Optional operator-supplied entries; the bundled configuration has no hand-maintained model roster |
 
 A model's role comes from its provider's description, using `roleRules`. A model
 whose description says nothing inherits from a sibling in the same family, so
 `gpt-6.1-terra` takes its role from `gpt-5.6-terra`. Hidden models and models a
-provider list no longer offers are never suggested. Subagent sessions, such as
+provider list no longer offers are never suggested. A model seen only in old
+session history has unknown current availability and is not treated as offered.
+Subagent sessions, such as
 Codex guardian reviews, are not counted as the user's choice.
 
-Each model the user can reach is scored:
+Models listed by a provider or configured by the operator are scored only when
+the user has declared the corresponding subscription available. A sign-in
+check, local history or provider list does not independently verify a paid
+entitlement; a user declaration also remains unverified.
 
 ```text
 score = (1 - usageInfluence) × fit + usageInfluence × habit
@@ -79,6 +84,19 @@ Learning starts with `lfg-server serve`. `LFG_LEARNING=off` disables it. A serve
 bound to a non-loopback address does not learn unless `LFG_LEARNING=on`, because
 `GET /api/lfg/knowledge` would expose the summary to anyone who can reach it.
 `CODEX_HOME` and `CLAUDE_CONFIG_DIR` change where it looks.
+Background refresh does not launch the Codex CLI; sign-in checks happen only
+when explicitly requested through the existing provider status workflow.
+
+History discovery and incremental reading are bounded by the `knowledgeScan`
+settings in the assessment configuration. File and directory quotas are shared
+between configured sources, and the byte budget rotates across discovered files.
+When a quota, oversized line, retained-state limit, incomplete write, read error
+or metadata limit prevents full collection, the knowledge state is `partial`.
+The limits are operator configuration, not measured performance targets. A
+partial or missing provider source is not evidence that a subscription or model
+is currently available. File shrinkage and modified same-size files reset their
+cached counts; a longer replacement with unchanged initial content may not be
+detected by this prototype and should not be treated as verified provenance.
 
 ## Known limits
 

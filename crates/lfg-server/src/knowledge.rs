@@ -7,20 +7,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lfg_core::PreflightRuleConfig;
 use lfg_core::assessment::{
-    AssessmentConfig, BracketUsage, Knowledge, KnowledgeSource, KnownModel, ObservedSubscription,
-    bracket_for,
+    AssessmentConfig, BracketUsage, Knowledge, KnowledgeScanLimits, KnowledgeSource, KnownModel,
+    ObservedSubscription, bracket_for,
 };
 use serde::Deserialize;
 use serde_json::Value;
 
-const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
-const READ_BUFFER_BYTES: usize = 1024 * 1024;
 const MAIN_QUERY_SOURCES: [&str; 2] = ["repl_main_thread", "sdk"];
 /// Text the tools themselves send that is still marked as coming from a person.
 const NOT_TYPED_PREFIXES: [&str; 5] = [
@@ -88,10 +86,17 @@ struct FileState {
     effort: Option<String>,
     pending: Vec<(usize, String)>,
     counts: BTreeMap<UsageKey, u64>,
+    discarding: bool,
+    incomplete: bool,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    max_keys: usize,
+    max_pending: usize,
+    max_identifier: usize,
 }
 
 impl FileState {
-    fn new(kind: Kind) -> Self {
+    fn new(kind: Kind, limits: &KnowledgeScanLimits) -> Self {
         Self {
             kind,
             offset: 0,
@@ -100,14 +105,32 @@ impl FileState {
             effort: None,
             pending: Vec::new(),
             counts: BTreeMap::new(),
+            discarding: false,
+            incomplete: false,
+            modified: None,
+            created: None,
+            max_keys: limits.max_keys_per_file,
+            max_pending: limits.max_pending_per_file,
+            max_identifier: limits.max_identifier_bytes,
         }
     }
 
     fn count(&mut self, model: &str, bracket: usize, effort: Option<String>, day: String) {
-        *self
-            .counts
-            .entry((model.to_string(), bracket, effort, day))
-            .or_insert(0) += 1;
+        if model.len() > self.max_identifier
+            || effort
+                .as_ref()
+                .is_some_and(|x| x.len() > self.max_identifier)
+        {
+            self.incomplete = true;
+            return;
+        }
+        let key = (model.to_string(), bracket, effort, day);
+        if !self.counts.contains_key(&key) && self.counts.len() >= self.max_keys {
+            self.incomplete = true;
+            return;
+        }
+        let count = self.counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
     }
 }
 
@@ -116,6 +139,7 @@ pub struct Learner {
     rules: Arc<PreflightRuleConfig>,
     locations: Locations,
     files: HashMap<PathBuf, FileState>,
+    cursor: usize,
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -193,83 +217,122 @@ fn claude_prompt(row: &Value) -> Option<&str> {
 fn read_new_lines(
     path: &Path,
     state: &mut FileState,
+    remaining: &mut usize,
+    max_line: usize,
     mut handle: impl FnMut(&[u8], &mut FileState),
 ) -> std::io::Result<()> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(state.offset))?;
-    let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, file);
+    let limit = u64::try_from(*remaining).unwrap_or(u64::MAX);
+    let mut reader =
+        BufReader::with_capacity(max_line.saturating_add(1).min(*remaining), file.take(limit));
     let mut line = Vec::new();
-    let mut oversized = false;
-    let mut line_bytes = 0u64;
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            // A partial last line stays unread until the writer finishes it.
-            return Ok(());
-        }
-        let newline = memchr::memchr(b'\n', available);
-        let take = newline.map_or(available.len(), |index| index + 1);
-        if !oversized {
-            if line.len() + take > MAX_LINE_BYTES {
-                oversized = true;
-                line = Vec::new();
-            } else {
-                line.extend_from_slice(&available[..take]);
-            }
-        }
-        reader.consume(take);
-        line_bytes += take as u64;
-        if newline.is_some() {
-            if !oversized {
-                handle(&line, state);
-            }
-            state.offset += line_bytes;
-            line_bytes = 0;
-            line.clear();
-            oversized = false;
-            if state.skip {
+    let mut start = state.offset;
+    let result = (|| -> std::io::Result<()> {
+        while *remaining > 0 {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                // Incomplete normal lines are reread after their writer finishes.
                 return Ok(());
             }
+            let portion = &available[..available.len().min(*remaining)];
+            let newline = memchr::memchr(b'\n', portion);
+            let take = newline.map_or(portion.len(), |index| index + 1);
+            if !state.discarding {
+                if line.len().saturating_add(take) > max_line {
+                    state.discarding = true;
+                    state.incomplete = true;
+                    line.clear();
+                } else {
+                    line.extend_from_slice(&portion[..take]);
+                }
+            }
+            reader.consume(take);
+            *remaining -= take;
+            start += take as u64;
+            if state.discarding {
+                state.offset = start;
+            }
+            if newline.is_some() {
+                if !state.discarding {
+                    handle(&line, state);
+                }
+                state.offset = start;
+                line.clear();
+                state.discarding = false;
+                if state.skip {
+                    return Ok(());
+                }
+                // Leave enough budget for a complete allowed line on the next call.
+                if *remaining <= max_line {
+                    return Ok(());
+                }
+            }
         }
-    }
+        Ok(())
+    })();
+    // Account for bytes prefetched by BufReader, including unread bytes.
+    *remaining = usize::try_from(reader.get_ref().limit()).unwrap_or(0);
+    result
 }
 
-fn jsonl_files_under(root: &Path, recursive: bool, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if kind.is_dir() && recursive {
-            jsonl_files_under(&path, true, found);
-        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
-            found.push(path);
-        }
-    }
-}
-
-fn session_files(locations: &Locations) -> Vec<(Kind, PathBuf)> {
+fn session_files(
+    locations: &Locations,
+    limits: &KnowledgeScanLimits,
+) -> (Vec<(Kind, PathBuf)>, bool) {
     let mut sessions = Vec::new();
+    let mut sources = Vec::new();
     if let Some(home) = &locations.codex_home {
-        let mut found = Vec::new();
-        jsonl_files_under(&home.join("sessions"), true, &mut found);
-        sessions.extend(found.into_iter().map(|path| (Kind::Codex, path)));
+        sources.push((Kind::Codex, home.join("sessions"), true));
     }
-    if let Some(home) = &locations.claude_home
-        && let Ok(projects) = std::fs::read_dir(home.join("projects"))
-    {
-        for project in projects.flatten() {
-            if project.file_type().is_ok_and(|kind| kind.is_dir()) {
-                let mut found = Vec::new();
-                jsonl_files_under(&project.path(), false, &mut found);
-                sessions.extend(found.into_iter().map(|path| (Kind::Claude, path)));
+    if let Some(home) = &locations.claude_home {
+        sources.push((Kind::Claude, home.join("projects"), false));
+    }
+    let mut incomplete = false;
+    let source_count = sources.len().max(1);
+    for (source, root, recurse) in sources {
+        let quota = limits.max_files / source_count;
+        let entry_quota = limits.max_directory_entries / source_count;
+        let mut roots = vec![(source, root, true, recurse)];
+        let mut entries_seen = 0usize;
+        let mut source_files = 0usize;
+        while let Some((source, root, visit_dirs, recurse)) = roots.pop() {
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    incomplete = true;
+                    continue;
+                }
+            };
+            for entry in entries {
+                if entries_seen >= entry_quota || source_files >= quota {
+                    incomplete = true;
+                    break;
+                }
+                entries_seen += 1;
+                let Ok(entry) = entry else {
+                    incomplete = true;
+                    continue;
+                };
+                let Ok(kind) = entry.file_type() else {
+                    incomplete = true;
+                    continue;
+                };
+                let path = entry.path();
+                if kind.is_symlink() {
+                    incomplete = true;
+                } else if kind.is_dir() && visit_dirs {
+                    roots.push((source, path, recurse, recurse));
+                } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+                    sessions.push((source, path));
+                    source_files += 1;
+                }
             }
         }
     }
-    sessions
+    sessions.sort_by(|a, b| a.1.cmp(&b.1));
+    (sessions, incomplete)
 }
 
 /// Whole days since the civil epoch, for comparing `YYYY-MM-DD` dates.
@@ -297,8 +360,18 @@ struct ProviderList {
 }
 
 /// Codex's own list of what this account is offered, refreshed by the Codex CLI.
-fn read_codex_list(home: &Path) -> Option<ProviderList> {
-    let text = std::fs::read_to_string(home.join("models_cache.json")).ok()?;
+fn read_codex_list(home: &Path, limit: u64) -> Option<ProviderList> {
+    let file = File::open(home.join("models_cache.json")).ok()?;
+    if file.metadata().ok()?.len() > limit {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(limit.checked_add(1)?)
+        .read_to_string(&mut text)
+        .ok()?;
+    if u64::try_from(text.len()).ok()? > limit {
+        return None;
+    }
     let value: Value = serde_json::from_str(&text).ok()?;
     let models = value["models"]
         .as_array()?
@@ -384,9 +457,16 @@ struct ClaudeModelProjection {
 
 /// Stream the config while retaining only the plan and model-option fields.
 /// The parser still reads the file, but does not retain other account fields.
-fn read_claude_account(path: &Path) -> Option<ClaudeAccount> {
-    let reader = BufReader::new(File::open(path).ok()?);
-    let value: ClaudeConfigProjection = serde_json::from_reader(reader).ok()?;
+fn read_claude_account(path: &Path, limit: u64) -> Option<ClaudeAccount> {
+    let file = File::open(path).ok()?;
+    if file.metadata().ok()?.len() > limit {
+        return None;
+    }
+    let mut reader = BufReader::new(file.take(limit.checked_add(1)?));
+    let value: ClaudeConfigProjection = serde_json::from_reader(&mut reader).ok()?;
+    if reader.into_inner().into_inner().metadata().ok()?.len() > limit {
+        return None;
+    }
     let account = value.oauth_account.unwrap_or_default();
     let plan = account.organization_type.as_deref().map(|kind| {
         let name = title_words(kind);
@@ -443,6 +523,7 @@ impl Learner {
             rules,
             locations,
             files: HashMap::new(),
+            cursor: 0,
         }
     }
 
@@ -452,18 +533,31 @@ impl Learner {
         line: &[u8],
         state: &mut FileState,
     ) {
-        let head = &line[..line.len().min(512)];
+        let head = line;
         if contains(head, b"\"session_meta\"") {
             if let Ok(row) = serde_json::from_slice::<Value>(line) {
                 state.skip = row["payload"]["source"].is_object();
             }
         } else if contains(head, b"\"turn_context\"") {
             if let Ok(row) = serde_json::from_slice::<Value>(line) {
+                if row["payload"]["model"]
+                    .as_str()
+                    .is_some_and(|s| s.len() > state.max_identifier)
+                    || row["payload"]["effort"]
+                        .as_str()
+                        .is_some_and(|s| s.len() > state.max_identifier)
+                {
+                    state.incomplete = true;
+                }
                 state.model = row["payload"]["model"]
                     .as_str()
                     .and_then(clean_model)
+                    .filter(|model| model.len() <= state.max_identifier)
                     .map(str::to_string);
-                state.effort = row["payload"]["effort"].as_str().map(str::to_string);
+                state.effort = row["payload"]["effort"]
+                    .as_str()
+                    .filter(|s| s.len() <= state.max_identifier)
+                    .map(str::to_string);
             }
         } else if contains(head, b"\"response_item\"")
             && contains(head, b"\"role\":\"user\"")
@@ -489,7 +583,11 @@ impl Learner {
                 && let Some(text) = claude_prompt(&row)
                 && let Some(day) = day_of(&row)
             {
-                state.pending.push((bracket_for(config, rules, text), day));
+                if state.pending.len() < state.max_pending {
+                    state.pending.push((bracket_for(config, rules, text), day));
+                } else {
+                    state.incomplete = true;
+                }
             }
             return;
         }
@@ -527,39 +625,72 @@ impl Learner {
         }
     }
 
-    fn scan(&mut self, path: &Path, kind: Kind) {
+    fn scan(&mut self, path: &Path, kind: Kind, remaining: &mut usize) -> bool {
         let Ok(metadata) = std::fs::metadata(path) else {
-            return;
+            return true;
         };
         let len = metadata.len();
+        let modified = metadata.modified().ok();
+        let created = metadata.created().ok();
+        let limits = &self.config.knowledge_scan;
         let state = self
             .files
             .entry(path.to_path_buf())
-            .or_insert_with(|| FileState::new(kind));
-        if len < state.offset {
-            *state = FileState::new(kind);
+            .or_insert_with(|| FileState::new(kind, limits));
+        if (state.created.is_some() && created.is_some() && state.created != created)
+            || len < state.offset
+            || (len == state.offset
+                && state.offset > 0
+                && state.modified.is_some()
+                && state.modified != modified)
+        {
+            *state = FileState::new(kind, limits);
         }
+        state.created = created;
+        state.modified = modified;
         if state.skip || len == state.offset {
-            return;
+            return state.incomplete || state.discarding;
+        }
+        if *remaining <= limits.max_line_bytes {
+            return true;
         }
         let config = &self.config;
         let rules = &self.rules;
-        // A read error keeps what was already learned; the next refresh retries.
-        let _ = read_new_lines(path, state, |line, state| match kind {
-            Kind::Codex => Self::scan_codex_line(config, rules, line, state),
-            Kind::Claude => Self::scan_claude_line(config, rules, line, state),
-        });
+        let result = read_new_lines(
+            path,
+            state,
+            remaining,
+            limits.max_line_bytes,
+            |line, state| match kind {
+                Kind::Codex => Self::scan_codex_line(config, rules, line, state),
+                Kind::Claude => Self::scan_claude_line(config, rules, line, state),
+            },
+        );
+        result.is_err()
+            || state.incomplete
+            || state.discarding
+            || (!state.skip && state.offset < len)
     }
 
     /// Reads what changed and rebuilds what LFG knows. Blocking.
     pub fn refresh(&mut self) -> Knowledge {
         let now = lfg_core::now_rfc3339();
         let today = day_number(&now).unwrap_or(0);
-        let sessions = session_files(&self.locations);
+        let (sessions, mut partial) = session_files(&self.locations, &self.config.knowledge_scan);
         let current: HashSet<&PathBuf> = sessions.iter().map(|(_, path)| path).collect();
         self.files.retain(|path, _| current.contains(path));
-        for (kind, path) in &sessions {
-            self.scan(path, *kind);
+        let mut remaining = self.config.knowledge_scan.max_bytes_per_refresh;
+        if !sessions.is_empty() {
+            let start = self.cursor % sessions.len();
+            let mut visited = 0usize;
+            while visited < sessions.len() && remaining > self.config.knowledge_scan.max_line_bytes
+            {
+                let (kind, path) = &sessions[(start + visited) % sessions.len()];
+                partial |= self.scan(path, *kind, &mut remaining);
+                visited += 1;
+            }
+            partial |= visited < sessions.len();
+            self.cursor = (start + visited) % sessions.len();
         }
 
         let half_life = self.config.matching.usage_half_life_days;
@@ -586,17 +717,25 @@ impl Learner {
             }
         }
 
-        let codex_list = self
+        let codex_list =
+            self.locations.codex_home.as_deref().and_then(|home| {
+                read_codex_list(home, self.config.knowledge_scan.max_metadata_bytes)
+            });
+        let claude_account = self.locations.claude_config.as_deref().and_then(|path| {
+            read_claude_account(path, self.config.knowledge_scan.max_metadata_bytes)
+        });
+        partial |= self
             .locations
             .codex_home
-            .as_deref()
-            .and_then(read_codex_list);
-        let claude_account = self
+            .as_ref()
+            .is_some_and(|home| home.join("models_cache.json").exists())
+            && codex_list.is_none();
+        partial |= self
             .locations
             .claude_config
-            .as_deref()
-            .and_then(read_claude_account);
-        let codex_has_list = codex_list.is_some();
+            .as_ref()
+            .is_some_and(|path| path.exists())
+            && claude_account.is_none();
         let mut models: Vec<KnownModel> = codex_list
             .as_ref()
             .map(|list| list.models.clone())
@@ -614,8 +753,8 @@ impl Learner {
                     model: model.clone(),
                     label: model.clone(),
                     origin: "session".into(),
-                    // A provider list that omits a model means it is no longer offered.
-                    available: !(*subscription == CODEX && codex_has_list),
+                    // Prior use is not evidence that a model remains available.
+                    available: false,
                     ..KnownModel::default()
                 });
             }
@@ -705,7 +844,14 @@ impl Learner {
                 id: id.into(),
                 files,
                 prompts: prompts_for(subscription),
-                status: if files > 0 { "read" } else { "not-found" }.into(),
+                status: if partial {
+                    "partial"
+                } else if files > 0 {
+                    "read"
+                } else {
+                    "not-found"
+                }
+                .into(),
             }
         };
         let sources = vec![
@@ -713,7 +859,7 @@ impl Learner {
             source("claude-sessions", Kind::Claude, CLAUDE),
         ];
         Knowledge {
-            state: "ready".into(),
+            state: if partial { "partial" } else { "ready" }.into(),
             refreshed_at: Some(now),
             prompts_seen: sources.iter().map(|s| s.prompts).sum(),
             sources,
@@ -832,7 +978,7 @@ mod tests {
         assert_eq!(astra.usage.len(), 1);
         assert_eq!(astra.usage[0].prompts, 1);
         assert_eq!(astra.usage[0].efforts.get("high"), Some(&1));
-        assert!(astra.available);
+        assert!(!astra.available);
 
         append(
             &session,
@@ -987,14 +1133,141 @@ mod tests {
     fn oversized_lines_are_skipped_and_partial_lines_wait() {
         let root = scratch("lines");
         let path = root.join("a.jsonl");
-        let mut body = vec![b'x'; MAX_LINE_BYTES + 10];
+        let mut body = vec![b'x'; 42];
         body.push(b'\n');
         body.extend_from_slice(b"short\npartial");
         std::fs::write(&path, &body).unwrap();
-        let mut state = FileState::new(Kind::Codex);
+        let limits = AssessmentConfig::default_alpha().knowledge_scan;
+        let mut state = FileState::new(Kind::Codex, &limits);
         let mut seen = Vec::new();
-        read_new_lines(&path, &mut state, |line, _| seen.push(line.to_vec())).unwrap();
+        let mut remaining = 200;
+        read_new_lines(&path, &mut state, &mut remaining, 32, |line, _| {
+            seen.push(line.to_vec())
+        })
+        .unwrap();
         assert_eq!(seen, vec![b"short\n".to_vec()]);
         assert_eq!(state.offset, (body.len() - b"partial".len()) as u64);
+    }
+
+    #[test]
+    fn capped_reads_resume_without_retaining_partial_prompt_text() {
+        let root = scratch("budget");
+        let path = root.join("a.jsonl");
+        std::fs::write(&path, b"first\nsecond\nthird\n").unwrap();
+        let limits = AssessmentConfig::default_alpha().knowledge_scan;
+        let mut state = FileState::new(Kind::Codex, &limits);
+        let mut seen = Vec::new();
+        let mut budget = 8;
+        read_new_lines(&path, &mut state, &mut budget, 7, |line, _| {
+            seen.push(line.to_vec())
+        })
+        .unwrap();
+        assert_eq!(seen, vec![b"first\n".to_vec()]);
+        assert!(budget <= 8);
+        assert_eq!(state.offset, 6);
+        let mut budget = 32;
+        read_new_lines(&path, &mut state, &mut budget, 7, |line, _| {
+            seen.push(line.to_vec())
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                b"first\n".to_vec(),
+                b"second\n".to_vec(),
+                b"third\n".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_limits_report_partial_and_schedule_other_files() {
+        let root = scratch("fair");
+        let a = root.join("codex/sessions/a.jsonl");
+        let b = root.join("codex/sessions/b.jsonl");
+        append(
+            &a,
+            &[
+                codex_meta(serde_json::json!("vscode")),
+                codex_turn("model-a", "low"),
+                codex_user("first", "user.text"),
+                codex_user("second", "user.text"),
+            ],
+        );
+        append(
+            &b,
+            &[
+                codex_meta(serde_json::json!("vscode")),
+                codex_turn("model-b", "low"),
+                codex_user("third", "user.text"),
+            ],
+        );
+        let mut learner = learner(&root);
+        let mut config = (*learner.config).clone();
+        config.knowledge_scan.max_line_bytes = 512;
+        config.knowledge_scan.max_bytes_per_refresh = 513;
+        learner.config = Arc::new(config);
+        assert_eq!(learner.refresh().state, "partial");
+        let mut latest = learner.refresh();
+        for _ in 0..8 {
+            if latest.state == "ready" {
+                break;
+            }
+            latest = learner.refresh();
+        }
+        assert_eq!(latest.state, "ready");
+        assert_eq!(latest.prompts_seen, 3);
+        assert_eq!(find(&latest, "model-a").usage[0].prompts, 2);
+        assert_eq!(find(&latest, "model-b").usage[0].prompts, 1);
+    }
+
+    #[test]
+    fn per_file_state_caps_and_metadata_limits_are_explicit() {
+        let root = scratch("limits");
+        let mut limits = AssessmentConfig::default_alpha().knowledge_scan;
+        limits.max_keys_per_file = 1;
+        limits.max_pending_per_file = 1;
+        limits.max_identifier_bytes = 8;
+        let mut state = FileState::new(Kind::Codex, &limits);
+        state.count("first", 0, None, "2026-11-01".into());
+        state.count("second", 0, None, "2026-11-01".into());
+        assert_eq!(state.counts.len(), 1);
+        assert!(state.incomplete);
+        std::fs::create_dir_all(root.join("codex")).unwrap();
+        std::fs::write(root.join("codex/models_cache.json"), b"{\"models\":[]}").unwrap();
+        assert!(read_codex_list(&root.join("codex"), 4).is_none());
+        std::fs::write(root.join("claude.json"), b"{\"oauthAccount\":{}}").unwrap();
+        assert!(read_claude_account(&root.join("claude.json"), 4).is_none());
+    }
+
+    #[test]
+    fn same_size_rewrite_replaces_prior_counts() {
+        let root = scratch("rewrite");
+        let path = root.join("codex/sessions/a.jsonl");
+        let rows = |model: &str| {
+            vec![
+                codex_meta(serde_json::json!("vscode")),
+                codex_turn(model, "low"),
+                codex_user("hello", "user.text"),
+            ]
+        };
+        let original = rows("model-a");
+        append(&path, &original);
+        let mut learner = learner(&root);
+        assert_eq!(learner.refresh().prompts_seen, 1);
+        let first_len = std::fs::metadata(&path).unwrap().len();
+        let mut replacement = original;
+        replacement[1]["payload"]["model"] = serde_json::json!("model-b");
+        let body = replacement
+            .iter()
+            .map(|row| row.to_string() + "\n")
+            .collect::<String>();
+        std::fs::write(&path, body).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), first_len);
+        learner.files.get_mut(&path).unwrap().modified = Some(std::time::UNIX_EPOCH);
+        let result = learner.refresh();
+        assert_eq!(result.prompts_seen, 1);
+        assert!(result.models.iter().all(|model| model.model != "model-a"));
+        assert!(result.models.iter().any(|model| model.model == "model-b"));
     }
 }

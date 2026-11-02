@@ -1,7 +1,7 @@
 import type { Assessment, ModelSuggestion, SubscriptionStatus } from './types'
 
 const STATUS_LABEL: Record<string, string> = {
-  verified: 'Signed in',
+  'signed-in': 'Signed in; subscription unverified',
   recognized: 'Found on this machine',
   declared: 'You said you have this',
   'signed-out': 'Signed out',
@@ -62,6 +62,7 @@ export function AssessmentView({ assessment, prompt, declared, onToggleSubscript
         <h2>Prompt received</h2>
         <p className="assessment-prompt">{`“${prompt}”`}</p>
         <p>{assessment.prompt.words} words · {assessment.prompt.tasks.length} {assessment.prompt.tasks.length === 1 ? 'task' : 'tasks'} found</p>
+        {assessment.prompt.scoringTruncated && <p role="status">Some text was outside the configured scoring limit; the assessment may be incomplete.</p>}
         {assessment.prompt.tasks.length > 0 && <ul className="assessment-tasks">{assessment.prompt.tasks.map((task, index) => <li key={`${index}-${task}`}>{task}</li>)}</ul>}
       </li>
       <li>

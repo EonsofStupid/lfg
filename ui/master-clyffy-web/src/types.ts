@@ -155,7 +155,7 @@ export type Assessment = {
   durationMicros: number
   configRevision: string
   configDigest: string
-  prompt: { characters: number; words: number; tasks: string[] }
+  prompt: { characters: number; words: number; tasks: string[]; scoringTruncated?: boolean }
   intent: { primary: string; plainLabel: string; all: WordHit[]; risks: WordHit[]; fallback: boolean }
   complexity: {
     score: number

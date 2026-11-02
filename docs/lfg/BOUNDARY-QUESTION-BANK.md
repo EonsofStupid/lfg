@@ -12,6 +12,17 @@ matched all 425 numbered question texts and source terms in order. This check
 did not validate the drafts' technical claims or transcribe the unnumbered
 curriculum and routing material.
 
+On 2026-11-02, the source search located the [original Drive folder](https://drive.google.com/drive/folders/1Tp0fWzSkiH5a9gpbhGeQzRi4pgkjPJmh),
+including the six stack curriculum drafts and the separate
+[stack-routing draft](https://docs.google.com/document/d/1r0KlUR9_ZK-9IJjhAs7uze0ENdxqU8hZ7Ay3-Kop67w/edit).
+A private local archive of ten retrieved notes, including the RRFlow/LFG
+addendum, is under `ml/lfg-encoder/dataset/private/source-notes-20261102` in
+the original checkout. Its manifest records source URLs, modification times,
+and SHA-256 hashes of the UTF-8, LF-normalized copies. It is Git-ignored and is
+not bundled with LFG. Retrieval preserves the source material but does not
+mean the previously omitted curriculum and routing sections have been converted
+into executable configuration or validated against the current code.
+
 | Bank ID | Source draft | Questions |
 | --- | --- | ---: |
 | `core` | Core Predicates v0.2 | 67 |
@@ -51,6 +62,36 @@ nor verifies the artifacts; it applies the intake template's configurable
 credential-shaped input checks, which cannot detect all secrets. Do not send
 credentials. This local API has no authentication; hosted use needs appropriate
 authentication, authorization and transport protection.
+
+In Inspector, importing a local `boundary-project` preview now offers its
+supplied artifacts as **proposed** answers beside the original catalog questions.
+The operator can edit an answer and explicitly mark it reviewed. A proposal is
+not proof that an artifact answers the question; imported provenance is an
+operator-supplied claim, not an independent verification. A project ID and an
+explicit save create a browser-local profile revision containing the preview,
+catalog digest, draft answers and review flags. Loading an earlier revision and
+saving it creates a new revision, preserving the prior history. The configured
+browser import byte limit also caps the combined saved profile store; a save
+that would exceed it is rejected without replacing the existing store.
+
+Profiles are plaintext in the browser's local storage, scoped to its origin and
+browser profile. Do not save secrets there. Browser storage is neither encrypted
+project storage nor an authenticated multi-user service; clearing site data,
+changing browser profiles or changing origin can make the saved history
+unavailable. Review flags are local assertions. A stale head is rejected when
+detected, but this is not an atomic multi-tab or multi-machine transaction.
+There is not yet a server-side profile API or portable sync.
+
+An isolated run of the unified development binary on 2026-11-02 generated a
+private preview from the actual configured RRFlow checkout. For the selected
+core and Rust banks, it reported four supplied bindings, eleven missing
+bindings and 105 questions without an explicit binding. These are counts of
+question entries, not answers or verified assertions. The private preview is
+`ml/lfg-encoder/dataset/private/rrflow-project-preview-20261102.json` in the
+original checkout; it is not included in the repository or binary. The browser
+test observed imported evidence as unreviewed proposals. Persistence and
+rollback were exercised separately with test data; no RRFlow project answers
+were approved on the owner's behalf.
 
 To read artifacts from an integrating app's existing facts instead, add an
 `artifactPaths` object to a copied catalog, mapping binding names to JSON

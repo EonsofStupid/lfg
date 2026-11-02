@@ -93,3 +93,33 @@ cannot prove that they did not change between checks.
 The fixture tests exercise preparation only. As of the local audit, the existing
 review workspace has no reviewed assessment targets, and no assessment SFT
 dataset or student training run has been produced from it by this tool.
+
+On 2026-11-02, a local development-only audit combined the existing private
+training workspace with two Onemanwho validation workspaces. It reported 598
+training requests and 47 validation requests, with zero approved decisions or
+verified flags in those sources. The development plan and audit are in
+`ml/lfg-encoder/dataset/private/split-reservation-20261102-v1` in the original
+checkout; they reference private files and are not distributed. The separate
+Makers-Impulse test source was reserved by path and file digest outside that
+development plan. Its existing workspace contained 785 pending requests, but
+none were used to construct the development dataset or derive targets. The
+reservation records declared group separation, not proof of semantic or
+conversation independence; a near-duplicate and relationship audit remains
+necessary. A separate local separation audit read the reserved source only to
+check IDs, declared project/family assignments and exact normalized-text
+overlap; those checks passed. It did not expose test text to a model or use it
+for training, and does not prove semantic or conversational independence.
+No teacher assessment was generated, redaction was not attested by
+this audit, and no final training or evaluation corpus was created.
+
+A separate train-only pipeline pilot was prepared from the user's actual
+2026-11-02 request in this conversation, with one assessment authored by the
+current assistant. Its private source, plan and prepared output are under
+`ml/lfg-encoder/dataset/private/current-request-assessment-pilot-20261102-v1`
+in the original checkout. The request is a local transcription of the message,
+not independently verified against a session file. The assessment is explicitly
+`unreviewed`, its outcome is `unknown`, and unknown model/effort/agent choices
+remain null. The manifest is not promotion eligible. This single example only
+exercises preparation of a real input with a labeled AI proposal; it does not
+establish redaction completeness, model quality, dataset sufficiency, validation
+or any training run. It was not added to the held-out test data.

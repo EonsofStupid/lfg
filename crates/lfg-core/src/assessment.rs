@@ -13,14 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PreflightRuleConfig, digest_value};
 
-const MAX_SCORED_BYTES: usize = 64 * 1024;
-const MAX_TASK_CHARS: usize = 80;
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssessmentConfig {
     pub schema_version: String,
     pub revision: String,
+    pub max_scored_bytes: usize,
+    pub max_task_chars: usize,
     pub word_suffixes: Vec<String>,
     pub task_separators: Vec<String>,
     pub action_words: Vec<String>,
@@ -35,8 +34,24 @@ pub struct AssessmentConfig {
     pub family_ignore_words: Vec<String>,
     pub effort_order: Vec<String>,
     pub matching: ModelMatching,
+    pub knowledge_scan: KnowledgeScanLimits,
     pub subscriptions: Vec<SubscriptionDefinition>,
     pub published_models: Vec<PublishedModel>,
+}
+
+/// Operator-selected resource limits for local provider history discovery.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KnowledgeScanLimits {
+    pub max_directory_entries: usize,
+    pub max_files: usize,
+    pub max_bytes_per_refresh: usize,
+    pub max_line_bytes: usize,
+    pub max_pending_per_file: usize,
+    pub max_keys_per_file: usize,
+    pub max_metadata_bytes: u64,
+    pub max_buffered_bytes: usize,
+    pub max_identifier_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,7 +149,11 @@ impl AssessmentConfig {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.schema_version != "lfg.assessment-config.v1" || self.revision.trim().is_empty() {
+        if self.schema_version != "lfg.assessment-config.v1"
+            || self.revision.trim().is_empty()
+            || self.max_scored_bytes == 0
+            || self.max_task_chars == 0
+        {
             return Err("unsupported assessment schema or empty revision".into());
         }
         let lowercase = |words: &[String]| {
@@ -197,6 +216,33 @@ impl AssessmentConfig {
             }
         }
         let m = &self.matching;
+        let scan = &self.knowledge_scan;
+        if [
+            scan.max_directory_entries,
+            scan.max_files,
+            scan.max_bytes_per_refresh,
+            scan.max_line_bytes,
+            scan.max_pending_per_file,
+            scan.max_keys_per_file,
+            scan.max_buffered_bytes,
+            scan.max_identifier_bytes,
+        ]
+        .contains(&0)
+            || scan.max_metadata_bytes == 0
+            || scan.max_metadata_bytes == u64::MAX
+            || scan.max_directory_entries < 2
+            || scan.max_files < 2
+            || scan
+                .max_line_bytes
+                .checked_add(1)
+                .is_none_or(|n| n > scan.max_bytes_per_refresh)
+            || scan
+                .max_files
+                .checked_mul(scan.max_line_bytes)
+                .is_none_or(|bytes| bytes > scan.max_buffered_bytes)
+        {
+            return Err("invalid knowledge scan limits".into());
+        }
         let unit = [
             m.usage_influence,
             m.minimum_fit,
@@ -348,6 +394,7 @@ pub struct PromptFacts {
     pub characters: usize,
     pub words: usize,
     pub tasks: Vec<String>,
+    pub scoring_truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -509,11 +556,11 @@ fn matched_words(text: &str, words: &[String], suffixes: &[String]) -> Vec<Strin
         .collect()
 }
 
-fn scored_slice(text: &str) -> &str {
-    if text.len() <= MAX_SCORED_BYTES {
+fn scored_slice(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
         return text;
     }
-    let mut end = MAX_SCORED_BYTES;
+    let mut end = max_bytes;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -539,8 +586,8 @@ fn task_clauses(normalized: &str, config: &AssessmentConfig) -> Vec<String> {
                 .any(|word| contains_word(clause, word, &config.word_suffixes))
         })
         .map(|clause| {
-            if clause.chars().count() > MAX_TASK_CHARS {
-                let short: String = clause.chars().take(MAX_TASK_CHARS).collect();
+            if clause.chars().count() > config.max_task_chars {
+                let short: String = clause.chars().take(config.max_task_chars).collect();
                 format!("{short}…")
             } else {
                 clause
@@ -567,7 +614,7 @@ fn round2(value: f64) -> f64 {
 }
 
 fn score_prompt(config: &AssessmentConfig, rules: &PreflightRuleConfig, text: &str) -> Scored {
-    let normalized = scored_slice(text).to_lowercase();
+    let normalized = scored_slice(text, config.max_scored_bytes).to_lowercase();
     let suffixes = &config.word_suffixes;
     let words = text.split_whitespace().count();
     let intents: Vec<WordHit> = rules
@@ -983,7 +1030,10 @@ fn subscription_statuses(
                 .map(|day| format!("last used {day}"))
                 .unwrap_or_else(|| "no recent sessions".into());
             let (status, detail) = match check {
-                Some(check) if check.active => ("verified", format!("Signed in; {used_text}.")),
+                Some(check) if check.active => (
+                    "signed-in",
+                    format!("Signed in; subscription entitlement is not verified; {used_text}."),
+                ),
                 Some(check) if !declared => ("signed-out", check.detail.clone()),
                 _ if recognized => ("recognized", format!("Found on this machine; {used_text}.")),
                 _ if declared => (
@@ -996,7 +1046,7 @@ fn subscription_statuses(
                 id: id.to_string(),
                 label: label.to_string(),
                 status: status.into(),
-                usable: declared || matches!(status, "verified" | "recognized"),
+                usable: declared,
                 declared,
                 plan,
                 last_used,
@@ -1128,6 +1178,7 @@ pub fn assess(
             characters: scored.characters,
             words: scored.words,
             tasks: scored.tasks,
+            scoring_truncated: request.text.len() > config.max_scored_bytes,
         },
         intent: IntentResult {
             primary,
@@ -1238,6 +1289,31 @@ mod tests {
 
     const MULTI: &str = "Fix the auth token refresh bug in the Rust server, add regression tests, and update the docs";
 
+    fn configured_fixture_models() -> AssessmentConfig {
+        let mut config = AssessmentConfig::default_alpha();
+        config.published_models = vec![
+            PublishedModel {
+                subscription_id: "claude".into(),
+                model: "fixture-frontier".into(),
+                label: "Fixture frontier".into(),
+                description: "frontier".into(),
+                efforts: vec!["low".into(), "high".into()],
+                source: "test".into(),
+                observed_at: "fixture".into(),
+            },
+            PublishedModel {
+                subscription_id: "claude".into(),
+                model: "fixture-fast".into(),
+                label: "Fixture fast".into(),
+                description: "fast".into(),
+                efforts: vec!["low".into(), "high".into()],
+                source: "test".into(),
+                observed_at: "fixture".into(),
+            },
+        ];
+        config
+    }
+
     #[test]
     fn bundled_configuration_is_valid() {
         let config = AssessmentConfig::default_alpha();
@@ -1269,7 +1345,7 @@ mod tests {
 
     #[test]
     fn all_four_results_come_from_one_formula() {
-        let config = AssessmentConfig::default_alpha();
+        let config = configured_fixture_models();
         let result = assess(
             &config,
             &rules(),
@@ -1296,7 +1372,7 @@ mod tests {
         );
         assert_eq!(result.models.role, "frontier");
         let suggested = result.models.suggested.unwrap();
-        assert_eq!(suggested.model, "claude-opus-5-5");
+        assert_eq!(suggested.model, "fixture-frontier");
         assert_eq!(suggested.origin, "published");
         assert_eq!(suggested.effort.as_deref(), Some("high"));
         assert!(result.rules.contains(&"bracket:complex".to_string()));
@@ -1305,7 +1381,7 @@ mod tests {
 
     #[test]
     fn simple_requests_stay_small() {
-        let config = AssessmentConfig::default_alpha();
+        let config = configured_fixture_models();
         for text in ["hey thanks", "What is a closure in Rust?"] {
             let result = assess(
                 &config,
@@ -1319,7 +1395,7 @@ mod tests {
             assert_eq!(result.intent.primary, "respond.general");
             assert!(result.intent.fallback);
             let suggested = result.models.suggested.unwrap();
-            assert_eq!(suggested.model, "claude-haiku-5-5");
+            assert_eq!(suggested.model, "fixture-fast");
             assert_eq!(suggested.effort.as_deref(), Some("low"));
         }
     }
@@ -1399,7 +1475,7 @@ mod tests {
             assess(
                 &config,
                 &rules(),
-                &request("hey thanks", &[]),
+                &request("hey thanks", &["codex"]),
                 &knowledge(models),
                 &BTreeMap::new(),
             )
@@ -1472,7 +1548,7 @@ mod tests {
         let result = assess(
             &config,
             &rules(),
-            &request("hey thanks", &[]),
+            &request("hey thanks", &["codex"]),
             &knowledge(vec![
                 retired,
                 model("codex", "gpt-6-luna", "Fast model.", 5),
@@ -1531,10 +1607,29 @@ mod tests {
                 .map(|s| (s.status.as_str(), s.usable))
                 .unwrap()
         };
-        assert_eq!(status("claude"), ("recognized", true));
+        assert_eq!(status("claude"), ("recognized", false));
         assert_eq!(status("codex"), ("signed-out", false));
         assert_eq!(status("mine"), ("declared", true));
         assert_eq!(status("stale"), ("not-found", false));
+    }
+
+    #[test]
+    fn remembered_use_does_not_enable_an_undeclared_subscription() {
+        let result = assess(
+            &AssessmentConfig::default_alpha(),
+            &rules(),
+            &request("hey", &[]),
+            &knowledge(vec![model("codex", "listed-model", "Fast model.", 1)]),
+            &BTreeMap::new(),
+        );
+        assert!(result.models.suggested.is_none());
+        let codex = result
+            .subscriptions
+            .iter()
+            .find(|item| item.id == "codex")
+            .unwrap();
+        assert_eq!(codex.status, "recognized");
+        assert!(!codex.usable);
     }
 
     #[test]
@@ -1562,5 +1657,27 @@ mod tests {
             serde_json::from_str(include_str!("../config/assessment.v1.json")).unwrap();
         value["brackets"][1]["minScore"] = serde_json::json!(0.0);
         assert!(AssessmentConfig::from_json_str(&value.to_string()).is_err());
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../config/assessment.v1.json")).unwrap();
+        value["knowledgeScan"]["maxBytesPerRefresh"] = serde_json::json!(1);
+        assert!(AssessmentConfig::from_json_str(&value.to_string()).is_err());
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../config/assessment.v1.json")).unwrap();
+        value["maxScoredBytes"] = serde_json::json!(0);
+        assert!(AssessmentConfig::from_json_str(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn scoring_limit_is_configurable_and_reported() {
+        let mut config = AssessmentConfig::default_alpha();
+        config.max_scored_bytes = 4;
+        let result = assess(
+            &config,
+            &rules(),
+            &request("fix the system", &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+        );
+        assert!(result.prompt.scoring_truncated);
     }
 }

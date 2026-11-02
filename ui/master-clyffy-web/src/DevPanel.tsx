@@ -48,7 +48,7 @@ export function DevPanel({ status, debounceMs, historyLimit, onDebounce, onHisto
     let timer: number | undefined
     const refresh = async () => {
       try {
-        const [snapshot, learned] = await Promise.all([getDevStats(), getKnowledge()])
+        const [snapshot, learned] = await Promise.all([getDevStats(), getKnowledge().catch(() => null)])
         if (!stopped) { setStats(snapshot); setKnowledge(learned); setError(null) }
       } catch (value) {
         if (!stopped) setError(value instanceof Error ? value.message : 'Could not load development statistics')
@@ -82,11 +82,12 @@ export function DevPanel({ status, debounceMs, historyLimit, onDebounce, onHisto
       <div className="dev-table-wrap"><table><thead><tr><th>Trace</th><th>Operation</th><th>Outcome</th><th>Elapsed</th><th>Queue</th><th>Work</th><th>Rules fired</th></tr></thead><tbody>
         {stats.traces.slice(-historyLimit).reverse().map((trace) => <tr key={trace.sequence}><td>{trace.sequence}</td><td>{trace.operation}</td><td>{trace.outcome}</td><td>{formatMicros(trace.totalMicros)}</td><td>{formatMicros(trace.queueMicros)}</td><td>{formatMicros(trace.workMicros)}</td><td className="dev-rules">{trace.rules?.join(' · ') ?? ''}</td></tr>)}
       </tbody></table></div>
+      {!knowledge && <p>Provider knowledge is unavailable; timing statistics remain available.</p>}
       {knowledge && <>
         <h3>What LFG has learned</h3>
         <p>{knowledge.state === 'ready' ? `${knowledge.promptsSeen.toLocaleString()} requests · updated ${knowledge.refreshedAt ?? 'unknown'}` : `Learning is ${knowledge.state}.`} {knowledge.sources.map((source) => `${source.id}: ${source.files} files, ${source.prompts} requests`).join(' · ')}</p>
         <div className="dev-table-wrap"><table><thead><tr><th>Model</th><th>Subscription</th><th>Role</th><th>Source</th><th>Offered</th><th>Requests by bracket</th><th>Last used</th></tr></thead><tbody>
-          {knowledge.models.map((model) => <tr key={`${model.subscriptionId}/${model.model}`}><td>{model.model}</td><td>{model.subscriptionId}</td><td>{model.role ?? 'unknown'}</td><td>{model.origin}</td><td>{model.available ? 'yes' : 'no'}</td><td>{model.usage.map((usage) => `${usage.bracket} ${usage.prompts}`).join(' · ') || 'none'}</td><td>{model.lastUsed ?? 'never'}</td></tr>)}
+          {knowledge.models.map((model) => <tr key={`${model.subscriptionId}/${model.model}`}><td>{model.model}</td><td>{model.subscriptionId}</td><td>{model.role ?? 'unknown'}</td><td>{model.origin}</td><td>{model.origin === 'session' ? 'unknown' : model.available ? 'listed' : 'unknown'}</td><td>{model.usage.map((usage) => `${usage.bracket} ${usage.prompts}`).join(' · ') || 'none'}</td><td>{model.lastUsed ?? 'never'}</td></tr>)}
         </tbody></table></div>
       </>}
     </>}

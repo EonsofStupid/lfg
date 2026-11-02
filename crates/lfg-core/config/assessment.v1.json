@@ -1,6 +1,8 @@
 {
   "schemaVersion": "lfg.assessment-config.v1",
   "revision": "baseline-1",
+  "maxScoredBytes": 65536,
+  "maxTaskChars": 80,
   "wordSuffixes": ["s", "es", "ed", "d", "ing"],
   "taskSeparators": ["\n", ";", ",", ". ", "? ", "! ", " and then ", " and ", " then ", " also ", " plus "],
   "actionWords": ["add", "analyze", "audit", "benchmark", "build", "clean up", "compare", "configure", "convert", "create", "debug", "delete", "deploy", "design", "document", "draft", "evaluate", "explain", "fix", "generate", "implement", "install", "integrate", "investigate", "merge", "migrate", "optimize", "plan", "port", "refactor", "release", "remove", "rename", "research", "review", "rewrite", "run", "set up", "ship", "summarize", "test", "train", "translate", "update", "upgrade", "verify", "write"],
@@ -53,14 +55,20 @@
     "effortFollowsHabit": false,
     "refreshSeconds": 300
   },
+  "knowledgeScan": {
+    "maxDirectoryEntries": 20000,
+    "maxFiles": 128,
+    "maxBytesPerRefresh": 4194304,
+    "maxLineBytes": 262144,
+    "maxPendingPerFile": 512,
+    "maxKeysPerFile": 2048,
+    "maxMetadataBytes": 8388608,
+    "maxBufferedBytes": 33554432,
+    "maxIdentifierBytes": 128
+  },
   "subscriptions": [
     {"id": "claude", "label": "Claude"},
     {"id": "codex", "label": "OpenAI Codex"}
   ],
-  "publishedModels": [
-    {"subscriptionId": "claude", "model": "claude-fable-5-1", "label": "Claude Fable 5.1", "description": "Most capable for the hardest and longest-running tasks", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
-    {"subscriptionId": "claude", "model": "claude-opus-5-5", "label": "Claude Opus 5.5", "description": "Frontier model for demanding coding and agentic work", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
-    {"subscriptionId": "claude", "model": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "description": "Balanced speed and capability for everyday coding and agent work", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"},
-    {"subscriptionId": "claude", "model": "claude-haiku-5-5", "label": "Claude Haiku 5.5", "description": "Fast and affordable model for simple tasks", "efforts": ["low", "medium", "high", "xhigh", "max"], "source": "Anthropic model reference", "observedAt": "2026-11-01"}
-  ]
+  "publishedModels": []
 }

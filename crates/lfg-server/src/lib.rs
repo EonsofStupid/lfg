@@ -184,8 +184,6 @@ impl AppState {
             return;
         }
         let store = self.knowledge.clone();
-        let checks = self.subscription_checks.clone();
-        let runner = self.codex.clone();
         let refresh = Duration::from_secs(self.assessment_config.matching.refresh_seconds);
         let mut learner = knowledge::Learner::new(
             self.assessment_config.clone(),
@@ -198,11 +196,9 @@ impl AppState {
         });
         tokio::spawn(async move {
             loop {
-                let runner = runner.clone();
-                let Ok((returned, knowledge, status)) = tokio::task::spawn_blocking(move || {
+                let Ok((returned, knowledge)) = tokio::task::spawn_blocking(move || {
                     let knowledge = learner.refresh();
-                    let status = runner.probe();
-                    (learner, knowledge, status)
+                    (learner, knowledge)
                 })
                 .await
                 else {
@@ -210,7 +206,6 @@ impl AppState {
                 };
                 learner = returned;
                 *store.write().unwrap_or_else(|error| error.into_inner()) = Arc::new(knowledge);
-                record_codex_check(&checks, &status);
                 tokio::time::sleep(refresh).await;
             }
         });
@@ -1114,11 +1109,7 @@ mod tests {
         assert_eq!(assessment["intent"]["primary"], "build.software");
         assert_eq!(assessment["complexity"]["bracket"], "moderate");
         assert_eq!(assessment["agents"]["total"], 2);
-        assert_eq!(
-            assessment["models"]["suggested"]["model"],
-            "claude-sonnet-5-5"
-        );
-        assert_eq!(assessment["models"]["suggested"]["origin"], "published");
+        assert!(assessment["models"]["suggested"].is_null());
 
         let (_, stats) = json_response(
             router(state.clone()),
@@ -1149,13 +1140,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(knowledge["state"], "disabled");
-        assert!(
-            knowledge["models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|model| model["model"] == "claude-haiku-5-5" && model["role"] == "fast")
-        );
+        assert!(knowledge["models"].as_array().unwrap().is_empty());
     }
 
     async fn json_response(app: Router, request: Request<Body>) -> (StatusCode, Value) {
