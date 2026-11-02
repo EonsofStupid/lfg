@@ -60,3 +60,41 @@ screened owner-project development documents and pinned byte teacher for one
 CPU step, then resumed for one more: 512 byte-token positions in total. It did
 not open the declared validation source. This was a pipeline check, not evidence
 of a useful or qualified model.
+
+## Spark real-project run, 2026-11-02
+
+On the owner's GB10, a separately initialized 679,680-parameter student ran
+400 steps over three authorized, screened project documents, totaling 65,946
+bytes. The run processed 102,400 next-byte training positions using a pinned
+1,927,936-parameter external byte teacher; that teacher is not the LFG model.
+The private screening policy replaced 25 long opaque strings and 43 lines
+containing credential-related terms. Automated screening can miss secrets;
+there was no claim of complete redaction or human review.
+
+The run resumed twice from private checkpoints, most recently at step 22. An
+independent uninterrupted execution on the same host and software produced the
+same weight digest and loss history. The peak PyTorch GPU allocation reported
+by the initial segment was 93,159,424 bytes, with a 0.01 allocator fraction;
+the host scope also limited CPU, memory and tasks. The existing SWAG service
+was observed running before and after, which does not establish zero
+interference. The installed environment was not wheel-locked. This confirms
+repeatability for this run, not across machines or software versions.
+
+No validation or test source was opened by training. This is byte-level
+pretraining and distillation, not training on assessment answers or proof of
+assessment quality. Three small documents and a 0.68-million-parameter student
+are far short of the intended model and representative training corpus. The
+inputs, checkpoints and weights remain private and outside Git.
+
+The same-architecture cross-entropy control was trained for the same number
+of steps and sampled from the same screened corpus on the Spark CPU. On the
+previously inspected SWAG development document described in
+[the byte evaluation](OWNED-BYTE-DEVELOPMENT-EVALUATION.md), the distilled
+student scored 3.633 bits per byte and 32.20% next-byte accuracy; the control
+scored 3.694 and 32.07%, respectively. Both were evaluated with 64-byte
+windows over 6,019 predicted bytes. The pretrained teacher scored 3.514 and
+51.20%. The control and candidate were trained on different devices, so the
+comparison includes possible device effects. This is one non-blind development
+document from a related project, with unknown overlap; it is not an independent
+assessment evaluation or a reliable estimate of product quality. The report
+and model identities are private.
