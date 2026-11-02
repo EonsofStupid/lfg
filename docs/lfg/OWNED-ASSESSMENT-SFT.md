@@ -105,6 +105,20 @@ no automatic retention policy or total disk quota. A partial run
 has no final `manifest.json` or final weights. Only a completed run produces
 those files.
 
+`probe_owned_sft_resume.py` runs an uninterrupted job, a one-step partial job,
+and a resumed job on an explicitly selected dataset and checkpoint, then writes
+a private report comparing their weight digests, loss histories and supervised
+token counts. It really trains and retains all three sets of derived artifacts;
+use only data selected for that purpose, set a bounded step count, provision
+disk and memory, and run it under the host's resource controls. It does not
+open a test split or establish assessment quality.
+
+```powershell
+python ml/lfg-encoder/probe_owned_sft_resume.py `
+  --dataset PRIVATE_PREPARED_DATASET --checkpoint PRIVATE_STARTING_CHECKPOINT `
+  --config PRIVATE_SFT_CONFIG.json --output NEW_PRIVATE_PROBE_DIRECTORY
+```
+
 Software fixtures verify masked loss, weighting, input separation, repeated
 CPU execution, optimizer-state resume, corruption rejection and recovery from
 a simulated checkpoint write failure. One fixture-trained checkpoint was also
@@ -116,3 +130,17 @@ single unreviewed real-request pilot had a 792-byte framed prompt and a
 additional position rows; the expanded model has 101,376 parameters. No real
 assessment fine-tuning or quality evaluation was performed by this check. One
 unreviewed example is not a representative training or evaluation corpus.
+
+On the same date, a bounded software-fixture smoke check on an owner-accessible
+NVIDIA GB10 ran the CUDA path using the code at commit `d2f80e0` and an
+existing PyTorch 2.14.1+cu130 environment. A 6,528-parameter fixture completed
+two steps; a one-step checkpoint resumed to the same final weight digest and
+loss history as the uninterrupted fixture run. The selected PyTorch allocator
+fraction was 0.01; peak allocated/reserved bytes reported by PyTorch were
+67,552,768/69,206,016. The process ran in a systemd user scope with a 3 GiB
+memory limit, 200% CPU quota and 128-task limit. These limits do not isolate the
+GPU. The existing SWAG vLLM container was running before and after the check;
+that observation does not prove there was no interference. The environment was
+not wheel-locked. The private report records source and configuration hashes
+under the local ignored `target` directory and on the Spark. No real training
+data or assessment-quality evaluation was used in this hardware check.

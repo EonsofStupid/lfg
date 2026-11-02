@@ -184,6 +184,18 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         self.assertEqual(full['weights_sha256'], resumed['weights_sha256'])
         self.assertEqual(full['losses'], resumed['losses'])
 
+    def test_resume_probe_retains_identity_and_reports_match(self):
+        import probe_owned_sft_resume
+        output = self.root / 'probe'
+        report = probe_owned_sft_resume.run(self.dataset, self.checkpoint, self.config_path, output)
+        self.assertTrue(report['same_weights'])
+        self.assertTrue(report['same_losses'])
+        self.assertTrue(report['same_supervised_tokens'])
+        self.assertFalse(report['assessment_quality_evaluated'])
+        self.assertEqual(report, json.loads((output / 'report.json').read_bytes()))
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            probe_owned_sft_resume.run(self.dataset, self.checkpoint, self.config_path, output)
+
     def test_private_output_tree_requires_ignored_and_untracked_directory(self):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
         target = self.root / 'private-output'
