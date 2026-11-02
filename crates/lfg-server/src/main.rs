@@ -9,6 +9,8 @@ mod baseline_predict;
 mod dev_log;
 mod kernel_journal;
 mod kernel_predict;
+#[cfg(feature = "owned-byte-onnx")]
+mod owned_byte;
 use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
 use lfg_server::{exemplar_suggest, onnx_embedding};
@@ -151,6 +153,58 @@ enum Command {
     },
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
+    /// Run an unqualified owned next-byte model on local JSONL input.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteProbe {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        include_logits: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Run the embedded unqualified owned next-byte model on local JSONL input.
+    #[cfg(feature = "embedded-owned-byte")]
+    EmbeddedOwnedByteProbe {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        include_logits: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with an unqualified owned model from local JSONL input.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteGenerate {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with the embedded unqualified owned model.
+    #[cfg(feature = "embedded-owned-byte")]
+    EmbeddedOwnedByteGenerate {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
     /// Probe an unpromoted frozen node encoder offline.
     #[cfg(feature = "onnx-shadow")]
     OnnxNodeEmbedding {
@@ -373,6 +427,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::BaselinePredict => baseline_predict::run()?,
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteProbe {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            include_logits,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte probe requires --experimental".into());
+            }
+            owned_byte::directory(&artifact, &manifest_sha256, &runtime_config, include_logits)?;
+        }
+        #[cfg(feature = "embedded-owned-byte")]
+        Command::EmbeddedOwnedByteProbe {
+            runtime_config,
+            include_logits,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte probe requires --experimental".into());
+            }
+            owned_byte::embedded(runtime_config.as_deref(), include_logits)?;
+        }
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteGenerate {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_directory(
+                &artifact,
+                &manifest_sha256,
+                &runtime_config,
+                max_new_bytes,
+                stop.as_deref(),
+            )?;
+        }
+        #[cfg(feature = "embedded-owned-byte")]
+        Command::EmbeddedOwnedByteGenerate {
+            runtime_config,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_embedded(
+                runtime_config.as_deref(),
+                max_new_bytes,
+                stop.as_deref(),
+            )?;
+        }
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxNodeEmbedding {
             artifact,

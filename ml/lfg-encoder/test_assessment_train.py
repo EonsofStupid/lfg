@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -83,6 +84,35 @@ class AssessmentTrainingTests(unittest.TestCase):
                     subject.build(args)
             self.assertFalse(args.output.exists())
 
+    def test_exploratory_rejects_test_before_source_open_and_requires_targets(self):
+        fixture = fixtures.AssessmentEvaluationTests('test_comparison_masks_unknowns_and_keeps_zero_distinct')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.plan_value['review_ledger'] = None
+        fixture.plan_value['sources'] = [{'path': 'missing-heldout', 'project': 'heldout', 'split': 'test'}]
+        fixture.plan.write_text(json.dumps(fixture.plan_value))
+        with self.assertRaisesRegex(ValueError, 'development plan'):
+            subject.exploratory_inputs(fixture.plan, self.config)
+        fixture.plan_value['sources'] = [fixture.sources[0]]
+        fixture.plan.write_text(json.dumps(fixture.plan_value))
+        with self.assertRaisesRegex(ValueError, 'explicit assessment target'):
+            subject.exploratory_inputs(fixture.plan, self.config)
+
+    def test_exact_private_output_file_must_be_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / '.gitignore').write_text('other.json\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'must be ignored'):
+                subject.require_private_file(root / 'pack.json')
+            (root / '.gitignore').write_text('pack.json\n', encoding='utf-8')
+            subject.require_private_file(root / 'pack.json')
+            (root / 'pack.json').write_text('fixture', encoding='utf-8')
+            subprocess.run(['git', '-C', str(root), 'add', '-f', 'pack.json'], check=True)
+            (root / 'pack.json').unlink()
+            with self.assertRaisesRegex(ValueError, 'already tracked'):
+                subject.require_private_file(root / 'pack.json')
+
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'torch is required for the numerical fit')
     def test_requested_cuda_does_not_fall_back_to_cpu(self):
         with patch('torch.cuda.is_available', return_value=False):
@@ -108,6 +138,59 @@ class AssessmentTrainingTests(unittest.TestCase):
         self.assertEqual(learned, subject.fit(examples, vectors, config))
         with self.assertRaisesRegex(ValueError, 'tensor estimate'):
             subject.fit(examples, vectors, {**config, 'max_fit_bytes': 1})
+
+    @unittest.skipUnless(importlib.util.find_spec('torch'), 'torch is required for the numerical fit')
+    def test_unreviewed_partial_target_trains_without_validation_or_support_gate(self):
+        fixture = fixtures.AssessmentEvaluationTests('test_comparison_masks_unknowns_and_keeps_zero_distinct')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        p = copy.deepcopy(fixture.validation[0]['assessment_targets']['project_profile'])
+        p['project'] = 'train'
+        fixture.train[0]['verified'] = False
+        fixture.train[0]['assessment_targets'] = assessment_targets.make_record(
+            {'complexity': None, 'models': None, 'agent_count': 2}, p, 'fixture', 'a' * 64)
+        fixture.write_rows()
+        fixture.plan_value['review_ledger'] = None
+        fixture.plan_value['sources'] = [fixture.sources[0]]
+        fixture.plan.write_text(json.dumps(fixture.plan_value))
+        observed = []
+        class FixtureEncoder:
+            def __init__(self, _model, _config):
+                self.versions = {'cublas_workspace_config': __import__('os').environ.get('CUBLAS_WORKSPACE_CONFIG'),
+                                 'cuda_visible_devices': __import__('os').environ.get('CUDA_VISIBLE_DEVICES')}
+            def encode(self, texts):
+                observed.extend(texts)
+                return {text: [(byte + 1) / 256 for byte in hashlib.sha256(text.encode()).digest()[:4]] for text in texts}
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(plan=fixture.plan, config=self.config_path, model=Path(directory) / 'model',
+                model_manifest=Path(directory) / 'manifest', revision='a' * 40, environment_lock=Path(directory) / 'lock',
+                wheelhouse=Path(directory) / 'wheels', output=Path(directory) / 'pack.json', allowed_extra=[],
+                exploratory=True)
+            with patch.object(subject, 'Encoder', FixtureEncoder), \
+                 patch.object(subject.training_inputs, 'verify_model', return_value={'fixture': True}), \
+                 patch.object(subject.training_inputs, 'verify_environment', return_value={'fixture': True}):
+                result = subject.build(args)
+            pack = json.loads(args.output.read_bytes())
+            self.assertEqual(result['trained_targets'], ['agent_count'])
+            self.assertEqual(set(pack['weights']), {'agent_count'})
+            self.assertEqual(pack['schema_version'], 'lfg.assessment-heads-exploratory.v1')
+            self.assertFalse(pack['promotion_eligible'])
+            self.assertFalse(pack['validation_used_for_training'])
+            self.assertTrue(pack['support_failures'])
+            self.assertEqual(pack['audit']['counts']['train']['ready_for_reviewed_subset'], 0)
+            self.assertIn('private train', observed)
+            self.assertNotIn('private train', json.dumps(pack))
+            observed.clear()
+            fixture.plan_value['sources'] = fixture.sources
+            fixture.plan.write_text(json.dumps(fixture.plan_value))
+            args.output = Path(directory) / 'pack-with-validation.json'
+            with patch.object(subject, 'Encoder', FixtureEncoder), \
+                 patch.object(subject.training_inputs, 'verify_model', return_value={'fixture': True}), \
+                 patch.object(subject.training_inputs, 'verify_environment', return_value={'fixture': True}):
+                subject.build(args)
+            second = json.loads(args.output.read_bytes())
+            self.assertEqual(pack['weights'], second['weights'])
+            self.assertFalse(any(text.startswith('private v') for text in observed))
 
     @unittest.skipUnless(importlib.util.find_spec('torch'), 'torch is required for the numerical fit')
     def test_reviewed_fixture_build_uses_training_text_only(self):

@@ -1,0 +1,11 @@
+{
+  "schema_version": "lfg.owned-byte-onnx-export.v1",
+  "opset": 17,
+  "cpu_threads": 1,
+  "max_model_bytes": 104857600,
+  "max_checkpoint_bytes": 104857600,
+  "max_manifest_bytes": 1048576,
+  "parity_lengths": [1, 4, 32, 64],
+  "absolute_tolerance": 0.00001,
+  "relative_tolerance": 0.00001
+}
