@@ -9,6 +9,7 @@ automatically.
 
 | Setting | Bundled file | Override |
 | --- | --- | --- |
+| [One assessment](ASSESSMENT.md): formula, brackets, how fit and habit combine | [`assessment.v1.json`](../../crates/lfg-core/config/assessment.v1.json) | `LFG_ASSESSMENT_CONFIG` |
 | Preflight rules, categories and agent/branch bounds | [`preflight.v1.json`](../../crates/lfg-core/config/preflight.v1.json) | `LFG_PREFLIGHT_CONFIG` |
 | Classification taxonomy, scoring, thresholds and model catalog | [`classifier.v2.json`](../../crates/lfg-core/config/classifier.v2.json) | `LFG_CLASSIFIER_CONFIG` |
 | Runtime provider inventory and explicit replay fixtures | [`providers.v1.json`](../../crates/lfg-runtime/config/providers.v1.json) | `LFG_PROVIDER_CONFIG` |
@@ -24,7 +25,9 @@ Version 1 classifier configuration files do not satisfy the v2 contract; update
 them explicitly. Preflight responses now use `lfg.preflight.v2`: uncalibrated
 confidence is `null`, and the encoder abstains from a confidence claim.
 
-The default model catalog is empty. For each project, populate the configured
+The one assessment learns models from local provider files and needs no catalog.
+The rest of this section applies to the older category classifier. Its default
+model catalog is empty. For each project, populate the configured
 catalog with the provider and model IDs actually available, subscription ID,
 applicable effort levels, stated strengths, configured scores and cost tier,
 and evidence source, basis and observation date. These entries are declarations,

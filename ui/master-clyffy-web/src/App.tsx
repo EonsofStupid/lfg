@@ -1,15 +1,16 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 
-import { classify, commitPlan, getGraph, getStatus, preflight } from './api'
+import { assess, classify, commitPlan, getGraph, getStatus } from './api'
 import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
+import { AssessmentView } from './AssessmentView'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
 import { BoundaryPanel } from './BoundaryPanel'
 import { SupervisionPanel } from './SupervisionPanel'
-import type { ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, PreflightSnapshot, RoutingNeed, RuntimeStatus } from './types'
+import type { Assessment, ClassificationSnapshot, EscalationTarget, GraphNode, GraphSnapshot, PlanCommit, RoutingNeed, RuntimeStatus } from './types'
 
 const SESSION_ID = `browser-${crypto.randomUUID()}`
 const GraphCanvas = lazy(() => import('./GraphCanvas'))
@@ -20,7 +21,7 @@ export default function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
   const [prompt, setPrompt] = useState('')
   const [revision, setRevision] = useState(1)
-  const [preview, setPreview] = useState<PreflightSnapshot | null>(null)
+  const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -48,26 +49,26 @@ export default function App() {
   useEffect(() => {
     const current = ++requestRevision.current
     const text = prompt
-    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setPreview(null); return }
+    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setAssessment(null); return }
     const timer = window.setTimeout(() => {
-      void preflight(SESSION_ID, revision, text).then((value) => {
-        if (requestRevision.current === current) setPreview(value)
+      void assess(SESSION_ID, revision, text, activeSubscriptions).then((value) => {
+        if (requestRevision.current === current) setAssessment(value)
       }).catch((value: Error) => setError(value.message))
     }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, status, promptTooLarge, debounceMs])
+  }, [prompt, revision, activeSubscriptions, status, promptTooLarge, debounceMs])
 
   useEffect(() => {
     const current = ++classifyRevision.current
     const text = prompt
-    if (!status || !debounceMs || !text.trim() || promptTooLarge) { setClassification(null); return }
+    if (mode !== 'inspector' || !status || !debounceMs || !text.trim() || promptTooLarge) { setClassification(null); return }
     const timer = window.setTimeout(() => {
       void classify(SESSION_ID, revision, text, activeSubscriptions, routingNeed).then((value) => {
         if (classifyRevision.current === current) setClassification(value)
       }).catch((value: Error) => setError(value.message))
     }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge, debounceMs])
+  }, [mode, prompt, revision, activeSubscriptions, routingNeed, status, promptTooLarge, debounceMs])
 
   const toggleSubscription = useCallback((id: string) => {
     setActiveSubscriptions((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
@@ -102,9 +103,8 @@ export default function App() {
     setGraph(await getGraph(commit.workflowId, value))
   }, [commit])
 
-  const displayedTotals = graph?.totals ?? { predicted: preview?.predictedAgents ?? 0, committed: 0, queued: 0, active: 0, blocked: 0, completed: 0, failed: 0 }
-  const narrative = useMemo(() => guidedNarrative(preview, graph), [preview, graph])
-  const subscriptions = [...new Set(classification?.escalationCatalog.map((candidate) => candidate.target.subscriptionId) ?? [])]
+  const displayedTotals = graph?.totals ?? { predicted: assessment?.agents.total ?? 0, committed: 0, queued: 0, active: 0, blocked: 0, completed: 0, failed: 0 }
+  const narrative = useMemo(() => guidedNarrative(assessment, graph), [assessment, graph])
 
   return (
     <div className={`lfg-shell ${publicEmbed ? 'is-embed' : ''}`}>
@@ -127,36 +127,25 @@ export default function App() {
           <div className="composer-footer">
             <button className="commit-button" onClick={handleCommit} disabled={busy || !status || !prompt.trim() || promptTooLarge}>{busy ? 'COMPILING…' : 'COMMIT ROUTE'}</button>
             <span>{promptBytes.toLocaleString()} / {status?.operations.maxPromptBytes.toLocaleString() ?? '…'} UTF-8 bytes</span>
-            <span>{preview ? `${(preview.durationMicros / 1000).toFixed(3)} ms elapsed` : 'waiting for signal'}</span>
-            <span>{preview?.mode ?? status?.encoder.id ?? 'encoder unavailable'}</span>
-            <span>{status ? `${status.liveProviders} live · ${status.configuredProviders} ready to probe · ${status.fixtureProviders} fixtures` : 'provider inventory loading'}</span>
+            <span>{assessment ? `${(assessment.durationMicros / 1000).toFixed(3)} ms elapsed` : 'waiting for signal'}</span>
+            <span>{status?.encoder.id ?? 'encoder unavailable'}</span>
+            {mode === 'inspector' && <span>{status ? `${status.liveProviders} live · ${status.configuredProviders} ready to probe · ${status.fixtureProviders} fixtures` : 'provider inventory loading'}</span>}
           </div>
           {promptTooLarge && <p className="error-message" role="alert">Prompt exceeds the configured UTF-8 byte limit.</p>}
-          <div className="subscription-row" role="group" aria-label="Active subscriptions">
-            <span className="subscription-row-label">Available subscriptions</span>
-            {subscriptions.map((id) => (
-              <button
-                key={id}
-                className={activeSubscriptions.includes(id) ? 'is-active' : ''}
-                onClick={() => toggleSubscription(id)}
-                title={`Manually mark ${id} as available for this session`}
-              >
-                {id}
-              </button>
-            ))}
-            <span className="subscription-row-note">{subscriptions.length ? 'Manual selection; subscription availability is not verified' : 'No model subscriptions configured'}</span>
-          </div>
           {error && <p className="error-message" role="alert">{error}</p>}
         </section>
 
+        <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
+
         <section className="signal-strip" aria-label="Live routing tallies">
-          <Metric label="Predicted" value={preview?.predictedAgents ?? 0} detail="advisory while typing" />
+          <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />
           <Metric label="Committed" value={displayedTotals.committed} detail="from canonical events" />
-          <Metric label="Branches" value={preview?.predictedBranches ?? 0} detail="natural task fan-out" />
-          <Metric label="Elapsed" value={preview ? `${(preview.durationMicros / 1000).toFixed(2)}ms` : '—'} detail="wall time, not CPU time" />
+          <Metric label="Complexity" value={assessment?.complexity.label ?? '—'} detail={assessment ? `score ${assessment.complexity.score}` : 'waiting for a request'} />
+          <Metric label="Elapsed" value={assessment ? `${(assessment.durationMicros / 1000).toFixed(2)}ms` : '—'} detail="wall time, not CPU time" />
         </section>
 
-        <section className="graph-stage" aria-label={graph ? 'LFG committed routing graph' : 'LFG live category branches'}>
+        {(graph || mode === 'inspector') && <section className="graph-stage" aria-label={graph ? 'LFG committed routing graph' : 'LFG live category branches'}>
+          {!graph && <p className="legacy-note">Older category classifier, being replaced by the assessment above. Its agent count can differ.</p>}
           {graph ? (
             <>
               <ParticleLayer pulse={graph.throughSequence + flow.nodes.length} />
@@ -173,7 +162,7 @@ export default function App() {
               onOverride={setOverrideTarget}
             />
           )}
-        </section>
+        </section>}
 
         {!publicEmbed && mode === 'inspector' && status && debounceMs && <IntakePanel
           prompt={prompt} promptTooLarge={promptTooLarge} revision={revision} classification={classification} activeSubscriptions={activeSubscriptions} debounceMs={debounceMs}
@@ -208,9 +197,9 @@ function Inspector({ node, onClose }: { node: GraphNode; onClose: () => void }) 
   </motion.aside>
 }
 
-function guidedNarrative(preview: PreflightSnapshot | null, graph: GraphSnapshot | null): string {
+function guidedNarrative(assessment: Assessment | null, graph: GraphSnapshot | null): string {
   if (graph) return `The route is committed. ${graph.totals.committed} agent${graph.totals.committed === 1 ? '' : 's'} and every provider connection shown here were reconstructed from ${graph.throughSequence + 1} validated events.`
-  if (preview?.risks.length) return 'A deterministic policy signal detected sensitive-data language. It remains advisory here, but the security gate is authoritative when the plan is committed.'
-  if (preview) return `The CPU preflight detected ${preview.rros.length} dynamic context categories and predicts ${preview.predictedAgents} specialist agents. Nothing has been committed or sent to a provider yet.`
+  if (assessment?.intent.risks.length) return 'A deterministic policy signal detected sensitive-data language. It remains advisory here, but the security gate is authoritative when the plan is committed.'
+  if (assessment) return `LFG rates this ${assessment.complexity.label.toLowerCase()} and suggests ${assessment.agents.total} agent${assessment.agents.total === 1 ? '' : 's'}. Nothing has been committed or sent to a provider yet.`
   return 'Your prompt becomes CPU signals first. The graph will grow only when the Rust runtime can explain each branch.'
 }

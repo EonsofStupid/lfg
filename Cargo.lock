@@ -956,6 +956,7 @@ dependencies = [
  "lfg-codex",
  "lfg-core",
  "lfg-runtime",
+ "memchr",
  "serde",
  "serde_json",
  "sha2",

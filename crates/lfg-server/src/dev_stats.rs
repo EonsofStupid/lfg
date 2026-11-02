@@ -10,6 +10,7 @@ use serde::Serialize;
 pub enum Operation {
     Preflight,
     Classification,
+    Assessment,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -22,6 +23,8 @@ pub struct Trace {
     total_micros: u64,
     queue_micros: Option<u64>,
     work_micros: Option<u64>,
+    /// Identifiers of the rules that fired. Never contains prompt words.
+    rules: Vec<String>,
 }
 
 #[derive(Default)]
@@ -58,6 +61,7 @@ pub struct Snapshot {
     operations_digest: String,
     encoder_digest: String,
     classifier_digest: String,
+    assessment_digest: String,
     summaries: Vec<Summary>,
     traces: Vec<Trace>,
 }
@@ -68,10 +72,12 @@ impl Snapshot {
         operations_digest: String,
         encoder_digest: String,
         classifier_digest: String,
+        assessment_digest: String,
     ) -> Self {
         self.operations_digest = operations_digest;
         self.encoder_digest = encoder_digest;
         self.classifier_digest = classifier_digest;
+        self.assessment_digest = assessment_digest;
         self
     }
 }
@@ -105,6 +111,25 @@ impl DevStats {
         work_micros: Option<u64>,
         succeeded: bool,
     ) {
+        self.record_with_rules(
+            operation,
+            started,
+            queue_micros,
+            work_micros,
+            succeeded,
+            Vec::new(),
+        );
+    }
+
+    pub fn record_with_rules(
+        &self,
+        operation: Operation,
+        started: Option<Instant>,
+        queue_micros: Option<u64>,
+        work_micros: Option<u64>,
+        succeeded: bool,
+        rules: Vec<String>,
+    ) {
         let Some(started) = started else { return };
         let total_micros = micros(started);
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
@@ -121,6 +146,7 @@ impl DevStats {
             total_micros,
             queue_micros,
             work_micros,
+            rules,
         });
     }
 
@@ -129,36 +155,40 @@ impl DevStats {
         let traces: Vec<_> = inner.traces.iter().cloned().collect();
         let total_recorded = inner.total;
         drop(inner);
-        let summaries = [Operation::Preflight, Operation::Classification]
-            .into_iter()
-            .map(|operation| {
-                let relevant: Vec<_> = traces
-                    .iter()
-                    .filter(|trace| trace.operation == operation)
-                    .collect();
-                let mut times: Vec<_> = relevant.iter().map(|trace| trace.total_micros).collect();
-                times.sort_unstable();
-                let percentile = |numerator: usize| -> Option<u64> {
-                    if times.is_empty() {
-                        None
-                    } else {
-                        let rank = (times.len() / 100) * numerator
-                            + ((times.len() % 100) * numerator).div_ceil(100);
-                        Some(times[rank.saturating_sub(1)])
-                    }
-                };
-                Summary {
-                    operation,
-                    samples: relevant.len(),
-                    errors: relevant
-                        .iter()
-                        .filter(|trace| trace.outcome == "error")
-                        .count(),
-                    p50_total_micros: percentile(50),
-                    p95_total_micros: percentile(95),
+        let summaries = [
+            Operation::Preflight,
+            Operation::Classification,
+            Operation::Assessment,
+        ]
+        .into_iter()
+        .map(|operation| {
+            let relevant: Vec<_> = traces
+                .iter()
+                .filter(|trace| trace.operation == operation)
+                .collect();
+            let mut times: Vec<_> = relevant.iter().map(|trace| trace.total_micros).collect();
+            times.sort_unstable();
+            let percentile = |numerator: usize| -> Option<u64> {
+                if times.is_empty() {
+                    None
+                } else {
+                    let rank = (times.len() / 100) * numerator
+                        + ((times.len() % 100) * numerator).div_ceil(100);
+                    Some(times[rank.saturating_sub(1)])
                 }
-            })
-            .collect();
+            };
+            Summary {
+                operation,
+                samples: relevant.len(),
+                errors: relevant
+                    .iter()
+                    .filter(|trace| trace.outcome == "error")
+                    .count(),
+                p50_total_micros: percentile(50),
+                p95_total_micros: percentile(95),
+            }
+        })
+        .collect();
         Snapshot {
             schema_version: "lfg.dev-stats.v1",
             enabled: self.enabled,
@@ -169,6 +199,7 @@ impl DevStats {
             operations_digest: String::new(),
             encoder_digest: String::new(),
             classifier_digest: String::new(),
+            assessment_digest: String::new(),
             summaries,
             traces,
         }

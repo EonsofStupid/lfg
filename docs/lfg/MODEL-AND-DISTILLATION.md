@@ -144,9 +144,52 @@ The same binary runs:
 A client can be told to switch to local when the service is unreachable or
 when local meets the latency budget.
 
+## Order of work
+
+Work in this order. Later steps can start early where they do not depend on
+earlier results. Gates decide trust, not whether to build.
+
+1. **One assessment.** One result with the formula, a layman view, traces of which
+   rules fired, and model knowledge learned from local provider files. See
+   [one assessment](ASSESSMENT.md). Next here: let a person correct a result in the
+   UI, and use the assessment's agent count when committing a plan.
+2. **Labels.** Collect them from three sources, and set aside whole projects for
+   evaluation rather than random prompts.
+   - **Outcomes:** session logs show the model, effort and subagents used and
+     whether the work merged. This is the best evidence for models and agents.
+   - **Teachers:** stronger models label intent and complexity with reasons.
+   - **Owner review:** corrections, especially where teachers and outcomes
+     disagree.
+3. **Yardstick and scorecard.** Train the existing assessment heads on those
+   labels to learn whether the task is learnable from this data. That result is
+   the score LFG's own model must beat, not the product. Show a scorecard per
+   model version comparing the rules, teachers, yardstick and LFG's model on the
+   held-out projects:
+   - intent accuracy
+   - complexity within one bracket
+   - agents exact and within one
+   - whether the model that succeeded is in the top one and top three suggestions
+   - calibration and how often it abstains
+   - latency, memory and size on each target machine
+4. **Architecture search and base model.** Run the hardware-in-the-loop search.
+   Build our own base: our architecture, pretrained by Top-K distillation from an
+   open teacher on open text and code. The owner's projects teach the task, not
+   language. A run of about 20 billion tokens for a 1 billion parameter model is
+   roughly two days on a rented 8-GPU H100 node and months on the Spark, by a
+   rough estimate. Renting GPUs is the owner's decision. Check that each teacher's
+   license and terms allow this use.
+5. **Fine-tune and ship.** Fine-tune on the owner's labels, quantize to 4-bit and
+   recheck accuracy. Embed the weights in the executable, run them with a
+   statically linked ggml engine, and release for Windows x64, Linux x64, Linux
+   ARM64 and macOS ARM64, tested on clean machines with networking off.
+6. **Trial alongside normal work.** LFG suggests while the owner works as usual.
+   Record whether a suggestion was accepted and whether matching work succeeded
+   and cost less. That record is the confirmation SWAG uses before weighting LFG
+   more heavily.
+
 ## What blocks this today
 
-As of 2026-10-31:
+As of 2026-11-01:
 
 1. `distill.py build-sft` prepares selected owner-project or chat teacher
    traces through an operator-supplied plan; provenance, authorization,
@@ -165,7 +208,9 @@ As of 2026-10-31:
    supports CPU and CUDA, but its weights cannot yet be used by the runtime;
    there is no complete user-side custom-weight training path. The intended
    learned network-service mode does not yet exist.
-6. The runtime's answers come from rules split across two classifiers. No
-   distilled model is bound into the binary.
+6. The runtime's answers come from rules. The
+   [one assessment](ASSESSMENT.md) carries all four results, but committing a
+   plan still uses the older preflight count. No distilled model is bound into
+   the binary.
 7. There is no organizational relationship record, cache-shard store, or
    periodic fold of organizational knowledge into the weights.

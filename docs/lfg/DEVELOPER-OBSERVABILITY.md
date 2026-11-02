@@ -1,7 +1,9 @@
 # Developer observability
 
 The inspector view displays process-local development statistics for the
-preflight and classification handlers. It offers browser-session controls for
+preflight, classification and assessment handlers, the rules each assessment
+fired, and what LFG has learned about models from `GET /api/lfg/knowledge`. It
+offers browser-session controls for
 analysis debounce and displayed history, bounded by the server's configured
 `devTools` ranges. Reset returns to server defaults; these controls do not write
 or change project configuration. They can help compare behavior but do not by
@@ -21,7 +23,8 @@ preflight encoder, and classifier digests to identify the active configuration.
 The sequence identifies a trace within this server process; it is not a
 distributed trace ID. Restart discards the ring and resets its counts.
 
-Only operation, outcome, timestamp, and elapsed microseconds are retained—no
+Only operation, outcome, timestamp, elapsed microseconds and, for assessments,
+the IDs of the rules that fired are retained—no
 prompt text, session IDs, provider content, or credential values. Preflight
 traces separate time waiting for the runtime lock from handler work;
 classification has no runtime-lock queue measurement. Elapsed time starts after

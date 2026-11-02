@@ -27,6 +27,7 @@ lfg-codex = { path = "../lfg-codex" }
 lfg-runtime = { path = "../lfg-runtime" }
 bytes = "1"
 http-body-util = "0.1"
+memchr = "2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 serde.workspace = true

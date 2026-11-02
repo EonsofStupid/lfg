@@ -49,11 +49,12 @@ design and the gap between it and the current implementation.
 
 ### Development path and current status
 
-- **Current foundation:** runtime answers come from deterministic rules. Intent,
-  a yes/no "needs a bigger model" signal, an agent estimate and a model choice
-  from a configured catalog (empty by default) exist, but they are split across
-  the preflight and category classifiers, whose agent estimates use different
-  formulas. No single output yet carries all four results.
+- **Current foundation:** runtime answers come from deterministic rules. The
+  [one assessment](docs/lfg/ASSESSMENT.md) returns all four results with the
+  formula behind them, and can derive provisional model listings and usage
+  counts from local Codex and Claude files. A listing or past use does not prove
+  current subscription entitlement or a successful outcome. The older preflight and category
+  classifiers remain for existing integrations and can disagree with it.
 - **Building the model:** `ml/lfg-encoder/` contains experimental training
   tools. The intent, capability and risk fine-tuner requires a GPU; an offline
   experimental assessment-head trainer can use CPU or CUDA with a frozen
