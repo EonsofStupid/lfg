@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.codex-turn-evidence-config.v1",
+  "max_plan_bytes": 1048576,
+  "max_candidate_file_bytes": 33554432,
+  "max_total_candidate_bytes": 134217728,
+  "max_source_prefix_bytes": 536870912,
+  "max_total_prefix_bytes": 2147483648,
+  "max_line_bytes": 16777216,
+  "max_candidates": 10000,
+  "max_contexts_per_session": 100000,
+  "max_metadata_chars": 256
+}
