@@ -48,7 +48,7 @@ diagnostic result, see the [development experiment](../../docs/lfg/REAL-REQUEST-
 
 ## Current lane (classifier)
 
-The promotion order is fixed:
+The reviewed classifier lane currently follows this order:
 
 1. Audit a reviewed, project-separated corpus plan and validate the assembled
    training snapshot with `python3 train.py validate --dataset DATASET`.
@@ -56,6 +56,13 @@ The promotion order is fixed:
 3. Export a versioned ONNX artifact and manifest.
 4. Benchmark through the Rust runtime.
 5. Promote only when `promotion-policy.json` passes.
+
+These reviewed-classifier checks are not a policy that authorized exploratory
+training must wait for promotion evidence. The separate assessment-head trainer
+offers `--exploratory` for explicit, potentially unreviewed target values and
+partial target coverage; its output is ineligible for promotion. The reviewed
+classifier supervisor still enforces its own review and support requirements
+and does not yet supervise that exploratory assessment mode.
 
 Training requires `requirements.txt`. Validation uses only the Python standard
 library and does not download a model.
