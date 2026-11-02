@@ -18,6 +18,7 @@ from torch.nn import functional as F
 
 import owned_student
 import train_owned_student as base
+import training_inputs
 
 
 def load_config(path: Path) -> tuple[dict, str]:
@@ -80,8 +81,43 @@ def load_teacher(manifest_path: Path, weights_path: Path, config: dict,
                      'quality_verified': False}
 
 
+def load_gpt2_teacher(snapshot: Path, manifest: Path, revision: str, config: dict,
+                      student_context: int) -> tuple[torch.nn.Module, dict]:
+    """Load a verified local GPT-2 snapshot; the operator asserts byte ID identity."""
+    import transformers
+    from transformers import GPT2Config, GPT2LMHeadModel
+    base.read_bounded(manifest, config['max_teacher_manifest_bytes'])
+    if sum(path.stat().st_size for path in snapshot.rglob('*') if path.is_file()) > config['max_teacher_bytes']:
+        raise ValueError('teacher snapshot exceeds configured byte limit')
+    identity = training_inputs.verify_model(snapshot, manifest, revision)
+    raw = base.read_bounded(snapshot / 'config.json', config['max_teacher_manifest_bytes'])
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or value.get('model_type') != 'gpt2'
+            or value.get('vocab_size') != 256 or value.get('auto_map')
+            or not isinstance(value.get('n_positions'), int) or value['n_positions'] < student_context):
+        raise ValueError('teacher is not a compatible local 256-token GPT-2')
+    model_config = GPT2Config.from_dict(value)
+    with torch.device('meta'):
+        template = GPT2LMHeadModel(model_config)
+    if sum(parameter.numel() for parameter in template.parameters()) > config['max_teacher_parameters']:
+        raise ValueError('teacher exceeds configured parameter limit')
+    del template
+    model = GPT2LMHeadModel(model_config)
+    weights = base.read_bounded(snapshot / 'model.safetensors', config['max_teacher_bytes'])
+    model.load_state_dict(load(weights), strict=True)
+    if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):
+        raise ValueError('teacher contains non-finite weights')
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    return model, {**identity, 'kind': 'local-gpt2-byte', 'byte_id_mapping': 'operator-asserted-identity',
+                   'weights_sha256': base.sha(weights), 'transformers': transformers.__version__,
+                   'quality_verified': False}
+
+
 def experiment(student_config_path: Path, distill_config_path: Path, source_path: Path,
-               teacher_manifest: Path, teacher_weights: Path, output: Path) -> dict:
+               teacher_manifest: Path, teacher_weights: Path, output: Path,
+               teacher_format: str = 'owned-byte', teacher_revision: str | None = None) -> dict:
     student_config, student_config_sha = base.load_config(student_config_path)
     distill_config, distill_config_sha = load_config(distill_config_path)
     source = base.read_bounded(source_path, student_config['max_data_bytes'])
@@ -91,14 +127,20 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
     if output.exists():
         raise ValueError('output already exists')
     base.require_private_outputs(output)
-    paths = (Path(__file__), Path(base.__file__), Path(owned_student.__file__))
+    paths = (Path(__file__), Path(base.__file__), Path(owned_student.__file__),
+             Path(training_inputs.__file__), Path(training_inputs.lock_wheelhouse.__file__))
     code = {path.name: base.sha(path.read_bytes()) for path in paths}
     torch.set_num_threads(student_config['cpu_threads'])
     torch.use_deterministic_algorithms(True)
     # Teacher construction uses random initialization before loading weights; seed
     # the student separately so initialization does not depend on teacher shape.
-    teacher, teacher_id = load_teacher(teacher_manifest, teacher_weights, distill_config, context,
-                                       code['owned_student.py'])
+    if teacher_format == 'owned-byte':
+        teacher, teacher_id = load_teacher(teacher_manifest, teacher_weights, distill_config, context,
+                                           code['owned_student.py'])
+    elif teacher_format == 'gpt2-byte' and teacher_revision:
+        teacher, teacher_id = load_gpt2_teacher(teacher_weights, teacher_manifest, teacher_revision, distill_config, context)
+    else:
+        raise ValueError('unsupported teacher format or missing revision')
     torch.manual_seed(student_config['seed'])
     with torch.device('meta'):
         template = owned_student.OwnedByteStudent(student_config['architecture'])
@@ -117,7 +159,7 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
         inputs = torch.tensor([list(source[start:start + context]) for start in starts], dtype=torch.long)
         targets = torch.tensor([list(source[start + 1:start + context + 1]) for start in starts], dtype=torch.long)
         with torch.inference_mode():
-            teacher_logits = teacher(inputs)
+            teacher_logits = (teacher(inputs, use_cache=False).logits if teacher_format == 'gpt2-byte' else teacher(inputs))
             indices, top_probabilities, tail_probability = teacher_distribution(teacher_logits, distill_config['top_k'])
         # Inference tensors must be copied before an autograd operation saves them.
         indices, top_probabilities, tail_probability = (value.clone() for value in (indices, top_probabilities, tail_probability))
@@ -134,10 +176,15 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
         history.append({'cross_entropy': float(cross_entropy.detach()),
                         'distillation': float(distillation.detach()), 'total': float(loss.detach())})
     elapsed = time.perf_counter() - start_time
+    if teacher_format == 'gpt2-byte':
+        teacher_unchanged = training_inputs.verify_model(teacher_weights, teacher_manifest, teacher_revision) == {
+            key: teacher_id[key] for key in ('model_id', 'revision', 'manifest_sha256', 'files')}
+    else:
+        teacher_unchanged = (base.sha(base.read_bounded(teacher_manifest, distill_config['max_teacher_manifest_bytes'])) == teacher_id['manifest_sha256']
+                             and base.sha(base.read_bounded(teacher_weights, distill_config['max_teacher_bytes'])) == teacher_id['weights_sha256'])
     if (base.load_config(student_config_path)[1] != student_config_sha or load_config(distill_config_path)[1] != distill_config_sha
             or base.read_bounded(source_path, student_config['max_data_bytes']) != source
-            or base.sha(base.read_bounded(teacher_manifest, distill_config['max_teacher_manifest_bytes'])) != teacher_id['manifest_sha256']
-            or base.sha(base.read_bounded(teacher_weights, distill_config['max_teacher_bytes'])) != teacher_id['weights_sha256']
+            or not teacher_unchanged
             or any(base.sha(path.read_bytes()) != code[path.name] for path in paths)):
         raise ValueError('distillation inputs changed during run')
     if any(not bool(torch.isfinite(value).all()) for value in student.state_dict().values()):
@@ -167,10 +214,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('student-config', 'distillation-config', 'source', 'teacher-manifest', 'teacher-weights', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--teacher-format', choices=('owned-byte', 'gpt2-byte'), default='owned-byte',
+                        help='gpt2-byte asserts the model uses raw byte values as token IDs')
+    parser.add_argument('--teacher-revision', help='full pinned revision, required for gpt2-byte')
     args = parser.parse_args()
     try:
         result = experiment(args.student_config, args.distillation_config, args.source,
-                            args.teacher_manifest, args.teacher_weights, args.output)
+                            args.teacher_manifest, args.teacher_weights, args.output,
+                            args.teacher_format, args.teacher_revision)
         print(json.dumps({key: result[key] for key in ('parameters', 'source_bytes', 'steps', 'tokens_processed',
               'weights_sha256', 'teacher_distillation_performed', 'validation_performed', 'promotion_eligible')}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError):

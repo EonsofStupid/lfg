@@ -71,6 +71,35 @@ class OwnedDistillationTests(unittest.TestCase):
             self.run_student('bad')
         self.assertFalse((self.root / 'bad').exists())
 
+    @unittest.skipUnless(importlib.util.find_spec('transformers'), 'transformers required')
+    def test_local_gpt2_snapshot_is_verified_and_frozen(self):
+        import torch
+        from transformers import GPT2Config, GPT2LMHeadModel
+        from safetensors.torch import save_file
+        import training_inputs
+        snapshot = self.root / 'external-snapshot'
+        snapshot.mkdir()
+        config = GPT2Config(vocab_size=256, n_positions=8, n_embd=8, n_layer=1, n_head=2,
+                            tie_word_embeddings=False)
+        (snapshot / 'config.json').write_text(config.to_json_string())
+        model = GPT2LMHeadModel(config)
+        save_file({key: value.contiguous() for key, value in model.state_dict().items()},
+                  str(snapshot / 'model.safetensors'))
+        manifest = self.root / 'external-manifest.json'
+        revision = 'a' * 40
+        manifest.write_bytes(training_inputs.model_manifest(snapshot, 'fixture/model', revision))
+        trained = self.subject.experiment(self.student_path, self.distill_path, self.source,
+                                         manifest, snapshot, self.root / 'external-out', 'gpt2-byte', revision)
+        self.assertEqual(trained['teacher']['kind'], 'local-gpt2-byte')
+        self.assertEqual(trained['teacher']['byte_id_mapping'], 'operator-asserted-identity')
+        self.assertTrue(trained['teacher_distillation_performed'])
+        self.assertFalse(trained['promotion_eligible'])
+        (snapshot / 'config.json').write_text((snapshot / 'config.json').read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'snapshot does not match'):
+            self.subject.experiment(self.student_path, self.distill_path, self.source,
+                                    manifest, snapshot, self.root / 'tampered', 'gpt2-byte', revision)
+        self.assertFalse((self.root / 'tampered').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

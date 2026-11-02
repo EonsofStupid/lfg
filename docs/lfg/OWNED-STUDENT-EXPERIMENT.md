@@ -20,9 +20,13 @@ teacher; an aligned teacher or a justified alignment method is still needed.
 The original CPU experiment below uses next-byte cross-entropy only.
 
 `distill_owned_student.py` adds an online CPU path that combines next-byte
-cross-entropy and weighted Top-K distillation. Its currently supported teacher
-is a local `OwnedByteStudent` checkpoint with the same byte vocabulary and a
-compatible implementation hash. The teacher manifest and safetensors bytes
+cross-entropy and weighted Top-K distillation. It supports a local
+`OwnedByteStudent` checkpoint with a compatible implementation hash, or a
+verified local GPT-2 snapshot whose 256 token IDs the operator explicitly
+asserts correspond to raw byte values. A 256-token vocabulary alone does not
+prove that mapping. The GPT-2 adapter uses the installed Transformers code,
+loads local safetensors directly, and does not run remote model code. The
+teacher manifest and safetensors bytes
 are checked before use and rechecked after training, the teacher is frozen, and
 the student is independently initialized. Top-K selection uses a stable tie
 order; both the selected probabilities and the remaining full-vocabulary mass
@@ -30,7 +34,9 @@ are computed from the teacher. Teacher and student architecture, source,
 configuration, code and output hashes are recorded. The manifest's identity
 claims are not a signature or proof of teacher quality. The teacher must have
 at least the student's context length. An externally trained subword model is
-not supported by this path.
+not supported by this path. For GPT-2, specify `--teacher-format gpt2-byte`,
+the full `--teacher-revision`, a snapshot `--teacher-manifest`, and the snapshot
+directory as `--teacher-weights`.
 
 ```powershell
 python ml/lfg-encoder/distill_owned_student.py `
@@ -52,6 +58,21 @@ Neither validation nor assessment training was performed.
 A cross-entropy-only control using the same student configuration, seed and
 source produced different weights, confirming that the added objective affected
 the update path; it does not show that distillation improved model quality.
+
+The same day, a pinned local snapshot of [BananaMind Completor V1](https://huggingface.co/Banaxi-Tech/BananaMind-Completor-V1)
+provided a separately pretrained teacher. Its model card describes an Apache
+2.0 1,927,936-parameter GPT-2 autocomplete model with raw byte IDs 0–255;
+its source dataset has separately documented terms. Snapshot revision
+`454c7fa5a18e047a53a693a547712dd5e8895156`, license, notice, configuration and
+weights were fetched and verified against the source metadata. The owner's
+inspected README supplied 11,637 input bytes. The independently initialized
+37,888-parameter student trained for 80 steps on 20,480 byte-token positions.
+This is local teacher distillation, not adoption of the teacher as LFG; no
+source text was sent to the provider. The teacher was designed for autocomplete,
+and this tiny run has no independent task-quality evaluation or baseline
+comparison. Two runs with the same inputs produced identical weight hashes and
+loss sequences on this machine. The software environment is recorded but not
+wheel-locked; cross-platform reproducibility is not established.
 
 `train_owned_student.py` accepts an explicitly selected, already redacted local
 file and configuration. It uses random initialization, CPU PyTorch, a
