@@ -376,6 +376,11 @@ pub fn router(state: AppState) -> Router {
             get(lfg_promotions).post(lfg_decide_promotion),
         )
         .route("/api/lfg/assess", post(lfg_assess))
+        .route(
+            "/api/lfg/observations/capabilities",
+            get(lfg_observation_capabilities),
+        )
+        .route("/api/lfg/observations", post(lfg_observe))
         .route("/api/lfg/knowledge", get(lfg_knowledge))
         .route("/api/lfg/classify", post(lfg_classify))
         .route("/api/lfg/dev-stats", get(lfg_dev_stats))
@@ -489,6 +494,102 @@ async fn lfg_classify(
         result.is_ok(),
     );
     result
+}
+
+async fn lfg_observation_capabilities(
+    State(state): State<AppState>,
+) -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<lfg_core::observation::Capabilities>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(lfg_core::observation::capabilities(
+            &state.assessment_config,
+            &state.preflight_rules,
+            state.operations.max_prompt_bytes(),
+            state.operations.max_http_body_bytes(),
+        )),
+    )
+}
+
+fn observation_now_ms() -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or_else(|| {
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "clock_unavailable",
+                "Clock unavailable",
+            )
+        })
+}
+
+async fn lfg_observe(
+    State(state): State<AppState>,
+    Json(request): Json<lfg_core::observation::ObservationRequest>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        Json<lfg_core::observation::Observation>,
+    ),
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let start = state.dev_stats.start();
+    let work = state.dev_stats.start();
+    let result = observation_now_ms()
+        .and_then(|now| {
+            lfg_core::observation::observe(
+                &state.assessment_config,
+                &state.preflight_rules,
+                &request,
+                state.operations.max_prompt_bytes(),
+                state.operations.max_http_body_bytes(),
+                now,
+            )
+            .map_err(|code| {
+                let status = match code {
+                    "configuration_changed" => StatusCode::CONFLICT,
+                    "deadline_expired" => StatusCode::REQUEST_TIMEOUT,
+                    "response_limit_exceeded" | "serialization_failed" | "nonfinite_score" => {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                error_response(status, code, code)
+            })
+        })
+        .and_then(|observation| {
+            if let Some(deadline) = request.deadline_unix_ms
+                && observation_now_ms()? >= deadline
+            {
+                return Err(error_response(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "deadline_expired",
+                    "deadline_expired",
+                ));
+            }
+            Ok(observation)
+        });
+    state.dev_stats.record_with_rules(
+        Operation::Assessment,
+        start,
+        None,
+        DevStats::elapsed(work),
+        result.is_ok(),
+        result
+            .as_ref()
+            .map(|observation| observation.reason_ids.clone())
+            .unwrap_or_default(),
+    );
+    result.map(|observation| {
+        (
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(observation),
+        )
+    })
 }
 
 async fn lfg_assess(
@@ -1150,6 +1251,168 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn observation_matches_standalone_assessment_and_ignores_extensions() {
+        let state = AppState::new();
+        let text = "Fix the zebra-private-canary bug and add tests";
+        let caps = lfg_core::observation::capabilities(
+            &state.assessment_config,
+            &state.preflight_rules,
+            state.operations.max_prompt_bytes(),
+            state.operations.max_http_body_bytes(),
+        );
+        let body = json!({"schemaVersion": lfg_core::observation::REQUEST_VERSION,
+            "requestId": "integration-fixture", "revision": 4, "text": text,
+            "inputSha256": lfg_core::digest_text(text),
+            "expectedAssessmentSha256": caps.assessment_sha256,
+            "expectedRulesSha256": caps.rules_sha256,
+            "newClientField": {"private": "extension-canary", "grantPermission": true}});
+        let (_, ordinary) = json_response(
+            router(state.clone()),
+            Request::builder()
+                .method("POST")
+                .uri("/api/lfg/assess")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sessionId":"integration-fixture", "revision":4, "text":text})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/lfg/observations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            result["schemaVersion"],
+            lfg_core::observation::RESPONSE_VERSION
+        );
+        assert_eq!(result["intent"]["category"], ordinary["intent"]["primary"]);
+        assert_eq!(
+            result["complexity"]["bracket"],
+            ordinary["complexity"]["bracket"]
+        );
+        assert_eq!(result["agents"]["suggested"], ordinary["agents"]["total"]);
+        assert_eq!(result["ignoredExtensionCount"], 1);
+        assert_eq!(result["advisory"], true);
+        assert!(result["confidence"].is_null());
+        let serialized = result.to_string();
+        assert!(!serialized.contains("zebra-private-canary"));
+        assert!(!serialized.contains("extension-canary"));
+        assert!(!serialized.contains("grantPermission"));
+    }
+
+    #[tokio::test]
+    async fn observation_rejects_stale_or_invalid_inputs_and_expired_deadlines() {
+        let state = AppState::new();
+        let text = "Please check the task";
+        let caps = lfg_core::observation::capabilities(
+            &state.assessment_config,
+            &state.preflight_rules,
+            state.operations.max_prompt_bytes(),
+            state.operations.max_http_body_bytes(),
+        );
+        let valid = json!({"schemaVersion": lfg_core::observation::REQUEST_VERSION,
+            "requestId":"request-1", "revision": 1, "text": text,
+            "inputSha256": lfg_core::digest_text(text),
+            "expectedAssessmentSha256":caps.assessment_sha256, "expectedRulesSha256":caps.rules_sha256});
+        for (field, value, expected_status, code) in [
+            (
+                "schemaVersion",
+                json!("future"),
+                StatusCode::BAD_REQUEST,
+                "unsupported_schema",
+            ),
+            (
+                "inputSha256",
+                json!("wrong"),
+                StatusCode::BAD_REQUEST,
+                "input_digest_mismatch",
+            ),
+            (
+                "expectedRulesSha256",
+                json!("wrong"),
+                StatusCode::CONFLICT,
+                "configuration_changed",
+            ),
+            (
+                "deadlineUnixMs",
+                json!(1),
+                StatusCode::REQUEST_TIMEOUT,
+                "deadline_expired",
+            ),
+            (
+                "requestId",
+                json!("invalid id"),
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+            ),
+        ] {
+            let mut body = valid.clone();
+            body[field] = value;
+            let (status, response) = json_response(
+                router(state.clone()),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/lfg/observations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, expected_status, "{field}");
+            assert_eq!(response["code"], code, "{field}");
+            assert!(!response.to_string().contains(text));
+        }
+    }
+
+    #[test]
+    fn observation_reports_truncation_and_enforces_response_limit() {
+        let state = AppState::new();
+        let mut config = (*state.assessment_config).clone();
+        config.max_scored_bytes = 4;
+        let text = "Fix a larger task with tests";
+        let caps =
+            lfg_core::observation::capabilities(&config, &state.preflight_rules, 1024, 1024 * 1024);
+        let request: lfg_core::observation::ObservationRequest = serde_json::from_value(json!({
+            "schemaVersion":lfg_core::observation::REQUEST_VERSION,
+            "requestId":"partial", "revision":1, "text":text,
+            "inputSha256":lfg_core::digest_text(text),
+            "expectedAssessmentSha256":caps.assessment_sha256,
+            "expectedRulesSha256":caps.rules_sha256
+        }))
+        .unwrap();
+        let result = lfg_core::observation::observe(
+            &config,
+            &state.preflight_rules,
+            &request,
+            1024,
+            1024 * 1024,
+            1,
+        )
+        .unwrap();
+        assert_eq!(result.status, "partial");
+        assert_eq!(
+            lfg_core::observation::observe(&config, &state.preflight_rules, &request, 1024, 1, 1)
+                .unwrap_err(),
+            "response_limit_exceeded"
+        );
     }
 
     #[tokio::test]

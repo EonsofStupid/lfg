@@ -6,6 +6,11 @@ each. It is the only assessment the default UI shows. The older preflight and
 category classifiers remain for existing integrations and can disagree with it;
 new work should build on this one.
 
+The separately versioned [integration observation](OBSERVATION-CONTRACT.md)
+projects this deterministic analysis without consulting local subscription
+history and accepts opaque extra request fields. It is an advisory interface;
+it is not yet connected to RRFlow, SWAG or MCP.
+
 These are rule outputs, not calibrated probabilities. `confidence` stays `null`
 until a trained model and measured evidence can support a number.
 
