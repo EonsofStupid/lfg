@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train experimental candidate-conditioned assessment heads from reviewed data."""
+"""Train unqualified candidate-conditioned assessment heads."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 from pathlib import Path
 
 import assessment_evaluate
@@ -153,6 +154,79 @@ def checked_inputs(plan_path: Path, config: dict) -> tuple[dict, dict, dict]:
     return audit, examples, support
 
 
+def exploratory_inputs(plan_path: Path, config: dict) -> tuple[dict, dict, dict]:
+    """Load explicit target values without claiming review or qualification."""
+    raw = plan_path.read_bytes()
+    plan = json.loads(raw)
+    sources = plan.get('sources') if isinstance(plan, dict) else None
+    if (not isinstance(plan, dict) or plan.get('schema_version') != corpus_audit.DEVELOPMENT_PLAN_SCHEMA
+            or not isinstance(sources, list) or not sources
+            or any(not isinstance(source, dict) or source.get('split') not in ('train', 'validation') for source in sources)
+            or not any(source['split'] == 'train' for source in sources)):
+        raise ValueError('exploratory training requires a development plan with training sources only or train and validation')
+    audit, _ = corpus_audit.audit(plan_path, development_only=True)
+    if digest(raw) != audit['plan_sha256']:
+        raise ValueError('assessment plan changed')
+    rows = {'train': [], 'validation': []}
+    for source, evidence in zip(sources, audit['sources'], strict=True):
+        loaded, source_sha = train.load_dataset(corpus_audit.resolve(plan_path.parent, source['path']),
+                                                allow_unlabeled_review=True)
+        if source_sha != evidence['sha256']:
+            raise ValueError('assessment source changed')
+        rows[source['split']].extend(loaded)
+    examples, support = {}, {}
+    for split in ('train', 'validation'):
+        examples[split], support[split] = project_examples(rows[split], config)
+    if not any(examples['train'][group] for group in GROUPS):
+        raise ValueError('exploratory training requires at least one explicit assessment target')
+    if corpus_audit.audit(plan_path, development_only=True)[0] != audit:
+        raise ValueError('assessment inputs changed during exploratory preparation')
+    return audit, examples, support
+
+
+def support_failures(support: dict, config: dict) -> list[dict]:
+    failures = []
+    for group, required in config['requirements'].items():
+        for key, minimum in required.items():
+            split, field = key.split('_', 1)
+            actual = support[split][group].get(field, 0)
+            if actual < minimum:
+                failures.append({'target': group, 'requirement': key, 'actual': actual, 'minimum': minimum})
+    return failures
+
+
+def require_private_file(path: Path) -> None:
+    """Within a Git worktree the exact output file must be ignored."""
+    path = path.resolve()
+    ancestor = path.parent
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    try:
+        result = subprocess.run(['git', '-C', str(ancestor), 'rev-parse', '--show-toplevel'],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, text=True)
+        if result.returncode != 0:
+            if any((directory / '.git').exists() for directory in (ancestor, *ancestor.parents)):
+                raise ValueError('cannot verify output privacy')
+            return
+        root = Path(result.stdout.rstrip('\r\n')).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError('cannot verify output privacy')
+        relative = path.relative_to(root).as_posix()
+        tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--', relative],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if tracked.returncode == 0:
+            raise ValueError('assessment output is already tracked by Git')
+        if tracked.returncode != 1:
+            raise ValueError('cannot verify output privacy')
+        ignored = subprocess.run(['git', '-C', str(root), 'check-ignore', '-q', '--no-index', '--',
+                                  relative],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if ignored.returncode != 0:
+            raise ValueError('assessment output in Git must be ignored')
+    except OSError:
+        raise ValueError('cannot verify output privacy') from None
+
+
 class Encoder:
     def __init__(self, model: Path, config: dict):
         import torch
@@ -217,7 +291,7 @@ class Encoder:
         return dict(zip(texts, vectors, strict=True))
 
 
-def fit(examples: dict, vectors: dict, config: dict) -> dict:
+def fit(examples: dict, vectors: dict, config: dict, allow_partial: bool = False) -> dict:
     import torch
     if config['device'] == 'cuda' and not torch.cuda.is_available():
         raise ValueError('requested CUDA device is unavailable')
@@ -231,7 +305,10 @@ def fit(examples: dict, vectors: dict, config: dict) -> dict:
                                                     for value in vector) for vector in vectors.values())):
         raise ValueError('invalid assessment training vectors')
     width = 4 * dimensions + 1
-    for group in GROUPS:
+    groups = [group for group in GROUPS if examples[group]] if allow_partial else list(GROUPS)
+    if not groups:
+        raise ValueError('assessment training requires at least one target')
+    for group in groups:
         n = len(examples[group])
         if not n:
             raise ValueError('assessment target has no training examples')
@@ -242,7 +319,7 @@ def fit(examples: dict, vectors: dict, config: dict) -> dict:
     indices = {text: index for index, text in enumerate(texts)}
     embeddings = torch.tensor([vectors[text] for text in texts], dtype=torch.float64, device=device)
     weights = {}
-    for group in GROUPS:
+    for group in groups:
         rows = examples[group]
         query_indices = torch.tensor([indices[row[0]] for row in rows], dtype=torch.long, device=device)
         context_indices = torch.tensor([indices[row[1]] for row in rows], dtype=torch.long, device=device)
@@ -273,11 +350,13 @@ def build(args: argparse.Namespace) -> dict:
             Path(training_inputs.lock_wheelhouse.__file__), Path(corpus_audit.evaluate.__file__)]
     code_hashes = {path.name: digest(path.read_bytes()) for path in code}
     config, config_sha = load_config(args.config)
-    # Review and support gates run before the model, wheelhouse or output is touched.
-    audit, examples, support = checked_inputs(args.plan, config)
+    exploratory = getattr(args, 'exploratory', False)
+    inputs = exploratory_inputs if exploratory else checked_inputs
+    audit, examples, support = inputs(args.plan, config)
     if (args.output.exists() or args.output.resolve().is_relative_to(args.model.resolve())
             or args.output.resolve().is_relative_to(args.plan.parent.resolve())):
         raise ValueError('output must be new and outside the model snapshot and corpus plan directory')
+    require_private_file(args.output)
     model = training_inputs.verify_model(args.model, args.model_manifest, args.revision)
     environment = training_inputs.verify_environment(args.environment_lock, args.wheelhouse, args.allowed_extra,
                                                      verify_payload=True)
@@ -286,8 +365,8 @@ def build(args: argparse.Namespace) -> dict:
                     for text in (query, context, candidate) if text is not None})
     encoder = Encoder(args.model, config)
     vectors = encoder.encode(texts)
-    learned = fit(train_examples, vectors, config)
-    if (checked_inputs(args.plan, config)[0] != audit or load_config(args.config)[1] != config_sha
+    learned = fit(train_examples, vectors, config, allow_partial=exploratory)
+    if (inputs(args.plan, config)[0] != audit or load_config(args.config)[1] != config_sha
             or os.environ.get('CUBLAS_WORKSPACE_CONFIG') != encoder.versions['cublas_workspace_config']
             or os.environ.get('CUDA_VISIBLE_DEVICES') != encoder.versions['cuda_visible_devices']
             or training_inputs.verify_model(args.model, args.model_manifest, args.revision) != model
@@ -295,11 +374,17 @@ def build(args: argparse.Namespace) -> dict:
                                                    verify_payload=True) != environment
             or any(digest(path.read_bytes()) != code_hashes[path.name] for path in code)):
         raise ValueError('assessment training inputs changed during build')
-    pack = {'schema_version': 'lfg.assessment-heads.v1', 'promotion_eligible': False,
-            'feature_schema': 'lfg.assessment-candidate-features.v1', 'trained_targets': list(GROUPS),
+    trained_targets = list(learned['weights'])
+    pack = {'schema_version': 'lfg.assessment-heads-exploratory.v1' if exploratory else 'lfg.assessment-heads.v1',
+            'promotion_eligible': False,
+            'feature_schema': 'lfg.assessment-candidate-features.v1', 'trained_targets': trained_targets,
             'audit': audit, 'support': support, 'config': config, 'config_sha256': config_sha,
             'model': model, 'environment': environment, 'encoder_versions': encoder.versions,
             'code_sha256': code_hashes, **learned}
+    if exploratory:
+        pack.update(training_mode='exploratory', review_required=False,
+                    support_failures=support_failures(support, config),
+                    validation_used_for_training=False)
     raw = (encoded(pack) + '\n').encode('utf-8')
     if len(raw) > config['max_pack_bytes']:
         raise ValueError('assessment weight pack exceeds configured limit')
@@ -307,7 +392,8 @@ def build(args: argparse.Namespace) -> dict:
     with os.fdopen(descriptor, 'wb') as stream:
         stream.write(raw)
     return {'schema_version': 'lfg.assessment-training-result.v1', 'pack_sha256': digest(raw),
-            'support': support, 'trained_targets': list(GROUPS), 'promotion_eligible': False}
+            'support': support, 'trained_targets': trained_targets, 'promotion_eligible': False,
+            'training_mode': 'exploratory' if exploratory else 'reviewed'}
 
 
 def main() -> None:
@@ -316,6 +402,8 @@ def main() -> None:
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--revision', required=True)
     parser.add_argument('--allowed-extra', action='append', default=[])
+    parser.add_argument('--exploratory', action='store_true',
+                        help='fit explicit available targets without review or support thresholds; never promotion-eligible')
     args = parser.parse_args()
     try:
         print(json.dumps(build(args), sort_keys=True, allow_nan=False))

@@ -13,15 +13,37 @@ for this pack. Its choice scores are uncalibrated numbers, not probabilities.
 The count head produces a continuous number. These gaps must be addressed and
 evaluated before claiming that the binary uses the learned assessments.
 
-## Data and review gates
+## Reviewed and exploratory data
 
-The input must be a development plan with separate train and validation sources,
+By default, the input must be a development plan with separate train and validation sources,
 current verified and approved review attestations for every record, and no
 within-split normalized duplicates. Plans containing a test source are rejected
 before its data is opened. The trainer checks configured minimum support for
 each target in both splits. Only training examples are passed to the encoder
 and fitted; validation is used for support checks, not training. Project and
 family separation are declarations and require independent review.
+
+For owner-authorized, secret-redacted data, `--exploratory` instead accepts a
+development plan with train sources and optional validation sources without
+requiring reviewed records, reviewed validation, or minimum target support.
+The plan still rejects test sources before opening them and checks declared
+project, family and normalized-text separation. It fits only non-null explicit
+assessment targets in the training split. Unknowns stay unknown; if no target
+exists, there is no assessment objective to fit. Missing heads are omitted, not
+filled with invented weights or labels. Validation data is inspected for audit
+and support counts when supplied but is never fitted. Configured support shortfalls
+are reported in the pack rather than preventing this exploratory run.
+
+Exploratory output has the distinct schema
+`lfg.assessment-heads-exploratory.v1`, lists its actual trained targets, and is
+always ineligible for promotion. It cannot be substituted for the complete
+reviewed pack. Unreviewed target values are supplied claims, not ground truth;
+the flag does not assert permission to use a particular teacher's labels or
+that secrets have been removed. The owner authorizes their own project and chat
+data, which must remain local and be redacted. The current screened text staging
+files contain no assessment targets and are not directly accepted by this
+trainer. Exploratory training does not establish quality or replace independent
+evaluation against the deterministic baseline.
 
 An unknown answer generates no positive or negative examples; zero agents is a
 known count. For a reviewed non-null model list, available models omitted from
@@ -65,7 +87,8 @@ That result does not establish training quality or Spark capacity.
 
 Before and after fitting, the trainer checks the audited inputs, source code,
 configuration, locked installed wheel payload and pinned model snapshot. The
-output must be new and outside the snapshot and plan directory. It contains
+output must be new and outside the snapshot and plan directory. An output in a
+Git working tree must be ignored and not already tracked. It contains
 weights, support counts and provenance, not raw request text, but derived
 weights and metadata may reveal information from training data. Protect the
 pack accordingly; excluding text is not anonymization.
@@ -85,9 +108,12 @@ python ml/lfg-encoder/assessment_train.py --plan PRIVATE_DEVELOPMENT_PLAN.json `
 Additional installed packages must be explicitly allowed with repeatable
 `--allowed-extra` arguments. See the existing environment verifier for the
 accepted model manifest and lock formats. Never put private packs in Git.
+Add `--exploratory` only for the separate exploratory mode described above.
 
-As of the latest local audit, the combined training workspace has 598 pending
-records and no current approved assessments. It has no validation split and is
-rejected by the plan-scope gate. No assessment heads have been trained on those
-records. The automated trainer tests use fixtures to exercise code paths; they
-are not a real training run or evidence of assessment quality.
+The current private development plan has 598 training and 47 validation
+candidates, with no explicit assessment targets. The exploratory loader confirms
+that there is currently no target to fit. No assessment heads have been trained
+on those records. Automated tests use fixtures to exercise code paths; they are
+not a real training run or evidence of assessment quality. This experimental
+head uses a separately supplied frozen encoder; it is not the owner's own
+from-scratch LFG language model or its final binary.
