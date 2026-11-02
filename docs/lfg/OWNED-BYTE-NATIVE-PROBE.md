@@ -82,3 +82,10 @@ embedded UI page and script returned HTTP 200. This verifies that specific
 local executable and inputs, not a release build, target-sized model, operating
 system compatibility, independent assessment quality, or CPU latency under
 load. The private debug executable is under the ignored `target` directory.
+
+A separate optimized Windows build of the same Rust source, using static CRT,
+was 32,150,528 bytes and passed the same embedded parity and isolated UI smoke
+checks. Its PE import table listed Windows system DLLs. It remains a private
+developer experiment: the learned model is tiny, no clean-machine test or task
+quality evaluation has been performed, and same-machine build reproducibility
+is not established by that single build.
