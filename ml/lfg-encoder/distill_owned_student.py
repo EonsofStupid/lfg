@@ -115,20 +115,20 @@ def load_gpt2_teacher(snapshot: Path, manifest: Path, revision: str, config: dic
                    'quality_verified': False}
 
 
-def experiment(student_config_path: Path, distill_config_path: Path, source_path: Path,
+def experiment(student_config_path: Path, distill_config_path: Path, source_path: Path | None,
                teacher_manifest: Path, teacher_weights: Path, output: Path,
-               teacher_format: str = 'owned-byte', teacher_revision: str | None = None) -> dict:
+               teacher_format: str = 'owned-byte', teacher_revision: str | None = None, *,
+               corpus_plan: Path | None = None, screen_policy: Path | None = None) -> dict:
     student_config, student_config_sha = base.load_config(student_config_path)
     distill_config, distill_config_sha = load_config(distill_config_path)
-    source = base.read_bounded(source_path, student_config['max_data_bytes'])
+    source = base.prepare_source(source_path, corpus_plan, screen_policy, student_config)
     context = student_config['architecture']['context']
-    if len(source) <= context:
-        raise ValueError('source is shorter than the configured context')
     if output.exists():
         raise ValueError('output already exists')
     base.require_private_outputs(output)
     paths = (Path(__file__), Path(base.__file__), Path(owned_student.__file__),
-             Path(training_inputs.__file__), Path(training_inputs.lock_wheelhouse.__file__))
+             Path(training_inputs.__file__), Path(training_inputs.lock_wheelhouse.__file__),
+             Path(base.corpus_documents.__file__), Path(base.screen_private_corpus.__file__))
     code = {path.name: base.sha(path.read_bytes()) for path in paths}
     torch.set_num_threads(student_config['cpu_threads'])
     torch.use_deterministic_algorithms(True)
@@ -152,12 +152,13 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
     optimizer = torch.optim.AdamW(student.parameters(), lr=student_config['learning_rate'],
                                   weight_decay=student_config['weight_decay'])
     generator = random.Random(student_config['seed'])
+    sampler = base.corpus_documents.sampler(source, context)
     history = []
     start_time = time.perf_counter()
     for _ in range(student_config['steps']):
-        starts = [generator.randrange(len(source) - context) for _ in range(student_config['batch_size'])]
-        inputs = torch.tensor([list(source[start:start + context]) for start in starts], dtype=torch.long)
-        targets = torch.tensor([list(source[start + 1:start + context + 1]) for start in starts], dtype=torch.long)
+        input_rows, target_rows = base.corpus_documents.batch(source, generator, student_config['batch_size'], context, sampler)
+        inputs = torch.tensor(input_rows, dtype=torch.long)
+        targets = torch.tensor(target_rows, dtype=torch.long)
         with torch.inference_mode():
             teacher_logits = (teacher(inputs, use_cache=False).logits if teacher_format == 'gpt2-byte' else teacher(inputs))
             indices, top_probabilities, tail_probability = teacher_distribution(teacher_logits, distill_config['top_k'])
@@ -182,8 +183,8 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
     else:
         teacher_unchanged = (base.sha(base.read_bounded(teacher_manifest, distill_config['max_teacher_manifest_bytes'])) == teacher_id['manifest_sha256']
                              and base.sha(base.read_bounded(teacher_weights, distill_config['max_teacher_bytes'])) == teacher_id['weights_sha256'])
+    base.verify_source(source, student_config)
     if (base.load_config(student_config_path)[1] != student_config_sha or load_config(distill_config_path)[1] != distill_config_sha
-            or base.read_bounded(source_path, student_config['max_data_bytes']) != source
             or not teacher_unchanged
             or any(base.sha(path.read_bytes()) != code[path.name] for path in paths)):
         raise ValueError('distillation inputs changed during run')
@@ -192,7 +193,7 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
     weights = save({name: value.detach().contiguous() for name, value in student.state_dict().items()})
     manifest = {'schema_version': 'lfg.owned-distillation-result.v1', 'architecture': student_config['architecture'],
                 'student_config_sha256': student_config_sha, 'distillation_config_sha256': distill_config_sha,
-                'source_sha256': base.sha(source), 'source_bytes': len(source), 'code_sha256': code,
+                'source_sha256': source['source_sha256'], 'source_bytes': source['source_bytes'], 'code_sha256': code,
                 'teacher': teacher_id, 'parameters': parameter_count, 'steps': student_config['steps'],
                 'tokens_processed': student_config['steps'] * student_config['batch_size'] * context,
                 'losses': history, 'elapsed_seconds': elapsed, 'weights_sha256': base.sha(weights),
@@ -201,6 +202,8 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
                 'deterministic_algorithms': torch.are_deterministic_algorithms_enabled(),
                 'teacher_distillation_performed': True, 'validation_performed': False,
                 'assessment_training_performed': False, 'promotion_eligible': False}
+    if source['corpus'] is not None:
+        manifest['corpus'] = source['corpus']['identity']
     output.mkdir(mode=0o700)
     for name, raw in (('weights.safetensors', weights),
                       ('manifest.json', (json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + '\n').encode())):
@@ -212,8 +215,12 @@ def experiment(student_config_path: Path, distill_config_path: Path, source_path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('student-config', 'distillation-config', 'source', 'teacher-manifest', 'teacher-weights', 'output'):
+    for name in ('student-config', 'distillation-config', 'teacher-manifest', 'teacher-weights', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--source', type=Path)
+    inputs.add_argument('--corpus-plan', type=Path)
+    parser.add_argument('--screen-policy', type=Path)
     parser.add_argument('--teacher-format', choices=('owned-byte', 'gpt2-byte'), default='owned-byte',
                         help='gpt2-byte asserts the model uses raw byte values as token IDs')
     parser.add_argument('--teacher-revision', help='full pinned revision, required for gpt2-byte')
@@ -221,7 +228,8 @@ def main() -> None:
     try:
         result = experiment(args.student_config, args.distillation_config, args.source,
                             args.teacher_manifest, args.teacher_weights, args.output,
-                            args.teacher_format, args.teacher_revision)
+                            args.teacher_format, args.teacher_revision,
+                            corpus_plan=args.corpus_plan, screen_policy=args.screen_policy)
         print(json.dumps({key: result[key] for key in ('parameters', 'source_bytes', 'steps', 'tokens_processed',
               'weights_sha256', 'teacher_distillation_performed', 'validation_performed', 'promotion_eligible')}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError):

@@ -84,8 +84,32 @@ def load_student(manifest_path: Path, weights_path: Path, schema: str, config: d
     model.load_state_dict(load(weights), strict=True)
     if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):
         raise ValueError('student weights are not finite')
+    corpus = manifest.get('corpus')
+    if corpus is None:
+        source_members = [manifest.get('source_sha256')]
+        validation_members = []
+    else:
+        if (not isinstance(corpus, dict) or corpus.get('schema_version') != 'lfg.screened-document-corpus.v1'
+                or not isinstance(corpus.get('sources'), list) or not corpus['sources']
+                or base.sha(json.dumps(corpus, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
+                   != manifest.get('source_sha256')):
+            raise ValueError('invalid training corpus identity')
+        source_members = []
+        for item in corpus['sources']:
+            if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or len(item[key]) != 64
+                                                 for key in ('original_sha256', 'screened_sha256')):
+                raise ValueError('invalid training source identities')
+            source_members.extend((item['original_sha256'], item['screened_sha256']))
+        source_members = sorted(set(source_members))
+        validations = corpus.get('declared_validation_sources', [])
+        if (not isinstance(validations, list) or any(not isinstance(item, dict) or
+                not isinstance(item.get('sha256'), str) or len(item['sha256']) != 64 for item in validations)):
+            raise ValueError('invalid declared validation identities')
+        validation_members = sorted(set(item['sha256'] for item in validations))
     return model.eval(), {'manifest_sha256': base.sha(raw), 'weights_sha256': base.sha(weights),
                           'architecture': architecture, 'source_sha256': manifest.get('source_sha256'),
+                          'source_members': source_members,
+                          'validation_members': validation_members,
                           'student_config_sha256': manifest.get('student_config_sha256', manifest.get('config_sha256')),
                           'teacher': manifest.get('teacher')}
 
@@ -116,7 +140,9 @@ def evaluate(config_path: Path, student_config_path: Path, source_path: Path, ou
             or control_id['student_config_sha256'] != student_config_sha
             or not isinstance(candidate_id['source_sha256'], str)
             or candidate_id['source_sha256'] != control_id['source_sha256']
-            or candidate_id['source_sha256'] == base.sha(data)):
+            or candidate_id['source_members'] != control_id['source_members']
+            or candidate_id['validation_members'] != control_id['validation_members']
+            or base.sha(data) in candidate_id['source_members']):
         raise ValueError('models must share a training configuration and a different source')
     if sum(value.numel() for value in candidate.parameters()) > student_config['max_parameters']:
         raise ValueError('student exceeds training parameter limit')
@@ -177,6 +203,7 @@ def evaluate(config_path: Path, student_config_path: Path, source_path: Path, ou
               'student_config_sha256': student_config_sha, 'candidate': candidate_id, 'control': control_id,
               'teacher': teacher_id, 'code_sha256': code, 'python': platform.python_version(),
               'platform': platform.platform(), 'torch': str(torch.__version__), 'device': 'cpu', 'results': results,
+              'declared_validation_match': (base.sha(data) in candidate_id['validation_members']) if candidate_id['validation_members'] else None,
               'assessment_evaluated': False, 'independent_project_verified': False, 'promotion_eligible': False}
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'wb') as stream:

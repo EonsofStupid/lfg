@@ -80,6 +80,40 @@ class ByteEvaluationTests(unittest.TestCase):
             self.run_evaluation(self.validation, self.root / 'changed.json')
         self.assertFalse((self.root / 'changed.json').exists())
 
+    def test_multidocument_training_and_evaluation_rejects_a_member(self):
+        import corpus_documents
+        import distill_owned_student as distill
+        import train_owned_student as base
+        extra = self.root / 'second-training.txt'
+        extra.write_text('Second source Bearer fixtureSecret0123456789 for fixture training.')
+        def record(path, project):
+            return {'path': str(path), 'project': project, 'project_group': project,
+                    'split': 'train', 'sha256': corpus_documents.digest(path.read_bytes())}
+        plan = self.root / 'corpus-plan.json'
+        plan.write_text(json.dumps({'schema_version': 'lfg.document-development-plan.v1',
+                                    'sources': [record(self.source, 'one'), record(extra, 'two'),
+                                                {**record(self.validation, 'validation'), 'split': 'validation'}]}))
+        policy = Path(corpus_documents.__file__).with_name('private-corpus-screen.example.json')
+        control, candidate = self.root / 'corpus-control', self.root / 'corpus-candidate'
+        control_result = base.experiment(self.training_config, None, control, corpus_plan=plan, screen_policy=policy)
+        candidate_result = distill.experiment(self.training_config, self.distill_config, None,
+            self.teacher_manifest, self.snapshot, candidate, 'gpt2-byte', self.revision,
+            corpus_plan=plan, screen_policy=policy)
+        self.assertEqual(control_result['source_sha256'], candidate_result['source_sha256'])
+        self.assertEqual(candidate_result['corpus']['redaction_counts']['bearer-credential'], 1)
+        self.assertNotIn('fixtureSecret0123456789', json.dumps(candidate_result))
+        self.assertNotIn(str(extra), json.dumps(candidate_result))
+        def evaluate(source, output):
+            return self.subject.evaluate(self.config, self.training_config, source, output,
+                candidate / 'manifest.json', candidate / 'weights.safetensors',
+                control / 'manifest.json', control / 'weights.safetensors',
+                self.teacher_manifest, self.snapshot, self.revision)
+        with self.assertRaisesRegex(ValueError, 'different source'):
+            evaluate(extra, self.root / 'corpus-leak.json')
+        result = evaluate(self.validation, self.root / 'corpus-eval.json')
+        self.assertFalse(result['promotion_eligible'])
+        self.assertTrue(result['declared_validation_match'])
+
 
 if __name__ == '__main__':
     unittest.main()
