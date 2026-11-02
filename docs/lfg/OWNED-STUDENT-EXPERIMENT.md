@@ -73,6 +73,8 @@ and this tiny run has no independent task-quality evaluation or baseline
 comparison. Two runs with the same inputs produced identical weight hashes and
 loss sequences on this machine. The software environment is recorded but not
 wheel-locked; cross-platform reproducibility is not established.
+For a separate next-byte development measurement, see
+[owned byte-model evaluation](OWNED-BYTE-DEVELOPMENT-EVALUATION.md).
 
 `train_owned_student.py` accepts an explicitly selected, already redacted local
 file and configuration. It uses random initialization, CPU PyTorch, a

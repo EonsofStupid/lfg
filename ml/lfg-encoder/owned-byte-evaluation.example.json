@@ -1,0 +1,11 @@
+{
+  "schema_version": "lfg.owned-byte-evaluation-config.v1",
+  "context": 64,
+  "cpu_threads": 2,
+  "warmup_windows": 2,
+  "max_windows": 1000,
+  "max_data_bytes": 1048576,
+  "max_model_bytes": 20000000,
+  "max_model_parameters": 3000000,
+  "max_manifest_bytes": 1048576
+}
