@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 pub mod assessment;
 pub mod kernel;
+pub mod observation;
 
 pub const PROTOCOL_VERSION: &str = "lfg.payload-signal.v0.3.0";
 pub const CLOUD_EVENTS_VERSION: &str = "1.0";
