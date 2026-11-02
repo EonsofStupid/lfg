@@ -4,5 +4,6 @@
   "max_model_bytes": 104857600,
   "max_context": 4096,
   "max_line_bytes": 65536,
-  "max_examples": 1000
+  "max_examples": 1000,
+  "max_generation_bytes": 512
 }

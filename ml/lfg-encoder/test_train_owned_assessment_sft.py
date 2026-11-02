@@ -233,11 +233,18 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         self.assertFalse(manifest['assessment_quality_checked'])
         if os.environ.get('LFG_OWNED_BYTE_TEST_BINARY'):
             import compare_owned_byte_native
+            import compare_owned_generation
             native = compare_owned_byte_native.compare(Path(os.environ['LFG_OWNED_BYTE_TEST_BINARY']), output, source,
                 [1, 4, 8], absolute_tolerance=1e-5, relative_tolerance=1e-5, timeout=120,
                 artifact=self.root / 'onnx', manifest_sha256=result['manifest_sha256'],
                 runtime_config=Path(__file__).resolve().parents[2] / 'crates/lfg-server/config/owned-byte-runtime.example.json')
             self.assertFalse(native['assessment_quality_checked'])
+            generated = compare_owned_generation.compare(Path(os.environ['LFG_OWNED_BYTE_TEST_BINARY']), output, source,
+                prefix_bytes=8, max_new_bytes=8, cpu_threads=1, timeout=120,
+                artifact=self.root / 'onnx', manifest_sha256=result['manifest_sha256'],
+                runtime_config=Path(__file__).resolve().parents[2] / 'crates/lfg-server/config/owned-byte-runtime.example.json')
+            self.assertEqual(generated['generated_bytes'], 8)
+            self.assertFalse(generated['assessment_quality_checked'])
 
     def test_heldout_and_prompt_truncation_require_explicit_handling(self):
         manifest_path = self.dataset / 'manifest.json'

@@ -26,6 +26,7 @@ struct Config {
     max_context: usize,
     max_line_bytes: usize,
     max_examples: usize,
+    max_generation_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -55,8 +56,69 @@ struct Response<'a> {
     logits: Option<&'a [f32]>,
 }
 
+#[derive(Serialize)]
+struct Generation<'a> {
+    schema_version: &'static str,
+    id: &'a str,
+    input_bytes: usize,
+    generated_bytes: &'a [u8],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    stop_reason: &'static str,
+}
+
+enum Mode<'a> {
+    Probe {
+        include_logits: bool,
+    },
+    Generate {
+        limit: usize,
+        stop: Option<&'a [u8]>,
+    },
+}
+
 fn digest(raw: &[u8]) -> String {
     format!("{:x}", Sha256::digest(raw))
+}
+
+fn greedy(logits: &[f32]) -> Result<u8> {
+    if logits.len() != 256 || logits.iter().any(|value| !value.is_finite()) {
+        return Err("invalid owned byte logits".into());
+    }
+    // Strictly greater preserves the first index when logits tie, matching torch.argmax.
+    let mut best = 0;
+    for index in 1..logits.len() {
+        if logits[index] > logits[best] {
+            best = index;
+        }
+    }
+    Ok(best as u8)
+}
+
+fn generate_bytes<F>(
+    input: &[u8],
+    context_limit: usize,
+    limit: usize,
+    stop: Option<&[u8]>,
+    mut predict: F,
+) -> Result<(Vec<u8>, &'static str)>
+where
+    F: FnMut(&[u8]) -> Result<u8>,
+{
+    let mut context = input.to_vec();
+    let mut generated = Vec::new();
+    while generated.len() < limit {
+        if context.len() > context_limit {
+            return Ok((generated, "context_limit"));
+        }
+        let next = predict(&context)?;
+        context.push(next);
+        generated.push(next);
+        if stop.is_some_and(|value| generated.ends_with(value)) {
+            return Ok((generated, "stop_sequence"));
+        }
+    }
+    Ok((generated, "byte_limit"))
 }
 
 fn bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -103,7 +165,7 @@ fn execute(
     artifact: Artifact<'_>,
     manifest_sha: &str,
     config_path: Option<&Path>,
-    include_logits: bool,
+    mode: Mode<'_>,
 ) -> Result<()> {
     let raw_config: Cow<'_, [u8]> = match config_path {
         Some(path) => Cow::Owned(std::fs::read(path)?),
@@ -118,6 +180,16 @@ fn execute(
         || config.max_examples == 0
     {
         return Err("invalid owned byte runtime configuration".into());
+    }
+    if let Mode::Generate { limit, stop } = &mode {
+        if *limit == 0
+            || config
+                .max_generation_bytes
+                .is_none_or(|maximum| *limit > maximum)
+            || stop.is_some_and(|value| value.is_empty() || value.len() > *limit)
+        {
+            return Err("invalid or unconfigured generation limit or stop sequence".into());
+        }
     }
     let manifest_raw = artifact.read("manifest.json", config.max_manifest_bytes)?;
     if digest(&manifest_raw) != manifest_sha {
@@ -181,32 +253,51 @@ fn execute(
         if input.is_empty() || input.len() > manifest.context {
             return Err("input exceeds model context or is empty".into());
         }
-        let token_ids: Vec<i64> = input.iter().map(|&byte| i64::from(byte)).collect();
-        let outputs = runnable.run([Tensor::from_slice(&[1, input.len()], &token_ids)?])?;
-        if outputs.len() != 1 || outputs[0].shape()? != [1, input.len(), 256] {
-            return Err("invalid owned byte output shape".into());
+        let logits_for = |bytes: &[u8]| -> Result<Vec<f32>> {
+            let ids: Vec<i64> = bytes.iter().map(|&byte| i64::from(byte)).collect();
+            let outputs = runnable.run([Tensor::from_slice(&[1, bytes.len()], &ids)?])?;
+            if outputs.len() != 1 || outputs[0].shape()? != [1, bytes.len(), 256] {
+                return Err("invalid owned byte output shape".into());
+            }
+            let all = outputs[0].as_slice::<f32>()?;
+            let logits = &all[all.len() - 256..];
+            if logits.iter().any(|value| !value.is_finite()) {
+                return Err("non-finite logits".into());
+            }
+            Ok(logits.to_vec())
+        };
+        match &mode {
+            Mode::Probe { include_logits } => {
+                let logits = logits_for(input)?;
+                serde_json::to_writer(
+                    &mut writer,
+                    &Response {
+                        schema_version: "lfg.owned-byte-probe.v1",
+                        id: &request.id,
+                        input_bytes: input.len(),
+                        next_byte: greedy(&logits)?,
+                        logits: include_logits.then_some(logits.as_slice()),
+                    },
+                )?;
+            }
+            Mode::Generate { limit, stop } => {
+                let (generated, reason) =
+                    generate_bytes(input, manifest.context, *limit, *stop, |bytes| {
+                        greedy(&logits_for(bytes)?)
+                    })?;
+                serde_json::to_writer(
+                    &mut writer,
+                    &Generation {
+                        schema_version: "lfg.owned-byte-generation.v1",
+                        id: &request.id,
+                        input_bytes: input.len(),
+                        generated_bytes: &generated,
+                        text: std::str::from_utf8(&generated).ok(),
+                        stop_reason: reason,
+                    },
+                )?;
+            }
         }
-        let all_logits = outputs[0].as_slice::<f32>()?;
-        let logits = &all_logits[all_logits.len() - 256..];
-        if logits.iter().any(|v| !v.is_finite()) {
-            return Err("non-finite logits".into());
-        }
-        let index = logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .ok_or("empty logits")?
-            .0;
-        serde_json::to_writer(
-            &mut writer,
-            &Response {
-                schema_version: "lfg.owned-byte-probe.v1",
-                id: &request.id,
-                input_bytes: input.len(),
-                next_byte: index as u8,
-                logits: include_logits.then_some(logits),
-            },
-        )?;
         writeln!(writer)?;
     }
     if ids.is_empty() {
@@ -225,7 +316,7 @@ pub fn directory(
         Artifact::Directory(root),
         manifest_sha,
         Some(config),
-        include_logits,
+        Mode::Probe { include_logits },
     )
 }
 
@@ -235,6 +326,71 @@ pub fn embedded(config: Option<&Path>, include_logits: bool) -> Result<()> {
         Artifact::Embedded,
         embedded::MANIFEST_SHA256,
         config,
-        include_logits,
+        Mode::Probe { include_logits },
     )
+}
+
+pub fn generate_directory(
+    root: &Path,
+    manifest_sha: &str,
+    config: &Path,
+    limit: usize,
+    stop: Option<&str>,
+) -> Result<()> {
+    execute(
+        Artifact::Directory(root),
+        manifest_sha,
+        Some(config),
+        Mode::Generate {
+            limit,
+            stop: stop.map(str::as_bytes),
+        },
+    )
+}
+
+#[cfg(feature = "embedded-owned-byte")]
+pub fn generate_embedded(config: Option<&Path>, limit: usize, stop: Option<&str>) -> Result<()> {
+    execute(
+        Artifact::Embedded,
+        embedded::MANIFEST_SHA256,
+        config,
+        Mode::Generate {
+            limit,
+            stop: stop.map(str::as_bytes),
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn greedy_uses_first_tied_byte_and_rejects_invalid_logits() {
+        let mut logits = vec![0.0; 256];
+        logits[3] = 1.0;
+        logits[7] = 1.0;
+        assert_eq!(greedy(&logits).unwrap(), 3);
+        logits[0] = f32::NAN;
+        assert!(greedy(&logits).is_err());
+        assert!(greedy(&[0.0]).is_err());
+    }
+
+    #[test]
+    fn generation_stops_at_sequence_byte_and_context_limits() {
+        let mut next = [b'A', b'B', b'C'].into_iter();
+        let (bytes, reason) =
+            generate_bytes(b"x", 8, 3, Some(b"AB"), |_| Ok(next.next().unwrap())).unwrap();
+        assert_eq!(
+            (bytes.as_slice(), reason),
+            (b"AB".as_slice(), "stop_sequence")
+        );
+        let (bytes, reason) = generate_bytes(b"x", 8, 2, None, |_| Ok(b'A')).unwrap();
+        assert_eq!((bytes.as_slice(), reason), (b"AA".as_slice(), "byte_limit"));
+        let (bytes, reason) = generate_bytes(b"xy", 2, 3, None, |_| Ok(b'A')).unwrap();
+        assert_eq!(
+            (bytes.as_slice(), reason),
+            (b"A".as_slice(), "context_limit")
+        );
+    }
 }

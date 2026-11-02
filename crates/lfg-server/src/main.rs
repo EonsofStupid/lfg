@@ -177,6 +177,34 @@ enum Command {
         #[arg(long)]
         experimental: bool,
     },
+    /// Generate bounded bytes with an unqualified owned model from local JSONL input.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteGenerate {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with the embedded unqualified owned model.
+    #[cfg(feature = "embedded-owned-byte")]
+    EmbeddedOwnedByteGenerate {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
     /// Probe an unpromoted frozen node encoder offline.
     #[cfg(feature = "onnx-shadow")]
     OnnxNodeEmbedding {
@@ -422,6 +450,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("owned byte probe requires --experimental".into());
             }
             owned_byte::embedded(runtime_config.as_deref(), include_logits)?;
+        }
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteGenerate {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_directory(
+                &artifact,
+                &manifest_sha256,
+                &runtime_config,
+                max_new_bytes,
+                stop.as_deref(),
+            )?;
+        }
+        #[cfg(feature = "embedded-owned-byte")]
+        Command::EmbeddedOwnedByteGenerate {
+            runtime_config,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_embedded(
+                runtime_config.as_deref(),
+                max_new_bytes,
+                stop.as_deref(),
+            )?;
         }
         #[cfg(feature = "onnx-shadow")]
         Command::OnnxNodeEmbedding {

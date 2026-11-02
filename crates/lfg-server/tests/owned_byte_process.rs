@@ -71,3 +71,51 @@ fn embedded_probe_runs_in_empty_directory_and_checks_context() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("context"));
 }
+
+#[cfg(feature = "embedded-owned-byte")]
+#[test]
+fn embedded_generation_obeys_configured_and_context_limits() {
+    use std::{io::Write, process::Stdio};
+    let root = std::env::var_os("LFG_EMBEDDED_OWNED_BYTE_DIR").unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(std::path::Path::new(&root).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let context = manifest["context"].as_u64().unwrap() as usize;
+    let run = |text: String, limit: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_lfg-server"))
+            .args([
+                "embedded-owned-byte-generate",
+                "--experimental",
+                "--max-new-bytes",
+                limit,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.take().unwrap(),
+            "{}",
+            serde_json::json!({"id":"fixture", "text":text, "extra":true})
+        )
+        .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let good = run("x".repeat(context), "3");
+    assert!(
+        good.status.success(),
+        "{}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let row: serde_json::Value = serde_json::from_slice(&good.stdout).unwrap();
+    assert_eq!(row["generated_bytes"].as_array().unwrap().len(), 1);
+    assert_eq!(row["stop_reason"], "context_limit");
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../config/owned-byte-runtime.example.json")).unwrap();
+    let too_many_count = (config["max_generation_bytes"].as_u64().unwrap() + 1).to_string();
+    let too_many = run("x".to_owned(), &too_many_count);
+    assert!(!too_many.status.success());
+    assert!(String::from_utf8_lossy(&too_many.stderr).contains("generation limit"));
+}
