@@ -113,10 +113,11 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false \
 The actual project review workspaces still have zero approvals, and the
 validation candidates come from one session. No persistent training service,
 reviewed training run, full-length GPU benchmark, model quality result or
-qualified CPU binary follows from these checks. A real run still needs reviewed,
-authorized data and adequate label support, a durable supervised job with
-resource isolation, independent evaluation, ONNX/CPU qualification and release
-checks. Do not lower the review or quality gates to use this environment.
+qualified CPU binary follows from these checks. A trustworthy release still
+needs appropriate task evidence, independent evaluation, ONNX/CPU qualification
+and release checks. Authorized development training can proceed without review
+or quality thresholds; those thresholds affect trust and promotion, not
+permission to train.
 
 The trainer's versioned local-file marker now uses an operating-system lock.
 On 2026-10-31, Windows and Spark tests verified that a second process is

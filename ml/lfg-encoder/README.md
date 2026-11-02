@@ -57,12 +57,11 @@ The reviewed classifier lane currently follows this order:
 4. Benchmark through the Rust runtime.
 5. Promote only when `promotion-policy.json` passes.
 
-These reviewed-classifier checks are not a policy that authorized exploratory
-training must wait for promotion evidence. The separate assessment-head trainer
-offers `--exploratory` for explicit, potentially unreviewed target values and
-partial target coverage; its output is ineligible for promotion. The reviewed
-classifier supervisor still enforces its own review and support requirements
-and does not yet supervise that exploratory assessment mode.
+Authorized classifier training does not wait for review or promotion evidence.
+It is the CLI default and includes unverified records; the output is not
+promotion eligible. Use `--require-reviewed` to select the separate audited
+classifier workflow. The systemd supervisor supports configurable `authorized`
+and `reviewed` modes, but does not supervise the separate assessment-head trainer.
 
 Training requires `requirements.txt`. Validation uses only the Python standard
 library and does not download a model.
@@ -123,28 +122,31 @@ as `MODEL_COMMIT` (the example model and override are for plumbing only):
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r ml/lfg-encoder/requirements.txt
 .\.venv\Scripts\python.exe ml/lfg-encoder/train.py validate
-.\.venv\Scripts\python.exe ml/lfg-encoder/train.py train --model-revision MODEL_COMMIT --output ml/lfg-encoder/artifacts/smoke --allow-below-gate --checkpoint-steps 1
+.\.venv\Scripts\python.exe ml/lfg-encoder/train.py train --dataset ml/lfg-encoder/dataset/synthetic.v1.jsonl --model-revision MODEL_COMMIT --output ml/lfg-encoder/artifacts/smoke --allow-below-gate --checkpoint-steps 1
 ```
 
 Training requires an available CUDA GPU and may download the selected pinned model. The
 six-example run tests plumbing only; its output is ineligible for promotion and
 is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
-The `--allow-below-gate` flag is for development only and allows unverified rows
-into the experiment. Without it, training requires the policy's minimum number
-of verified records and an audited project-separated plan with current review
-attestations for every included example. A development-only plan includes train
-and validation; the legacy complete plan also includes test. The input must
-exactly match its reviewed train partition and contain no unverified rows. See
-[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run writes
-the seed, dataset hash, row IDs and family assignments to `split-manifest.json`
-in the ignored output directory. Development override requires at least two
-families.
-With `--allow-below-gate`, the family split is for development only and is not
-stratified. Without that override, the complete audited train partition trains
-the model and the separate audited validation partition selects checkpoints. The
-trainer rejects validation labels absent from the training partition instead of
-silently discarding them. For every configured taxonomy label, it also requires
+Training requires an explicitly selected `--dataset`; it never silently selects
+the bundled synthetic fixture. By default, selected authorized records,
+including unverified rows, can train.
+`--allow-below-gate` remains an explicit alias for this mode. A grouped
+development split is used when the available families and labels support it;
+otherwise all selected rows train and validation is recorded as not performed.
+The final checkpoint is saved in either case. This fallback does not evaluate
+quality or establish independence. A run writes the seed, dataset hash, row IDs
+and family assignments to `split-manifest.json` in the ignored output directory.
+
+With `--require-reviewed`, training instead requires the policy's minimum
+verified count, an audited project-separated plan and current review
+attestations. A development-only plan includes train and validation; the legacy
+complete plan also includes test. The reviewed input must exactly match its
+reviewed train partition. See [corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md).
+In reviewed mode, the separate audited validation partition selects checkpoints.
+The trainer rejects validation labels absent from the training partition. For
+every configured taxonomy label, reviewed mode also requires
 positive and negative examples in both partitions, using configurable minimums
 from `training-support-policy.v1.json` or `--support-policy`. A threshold of
 one only establishes basic coverage; it does not qualify model quality. The

@@ -1,6 +1,7 @@
 {
   "schema_version": "lfg.reviewed-training-service.v1",
   "python": "/ABSOLUTE/PATH/TO/VENV/bin/python",
+  "training_mode": "authorized",
   "trainer_sha256": "REPLACE_WITH_TRAIN_PY_SHA256",
   "recovery": "resume",
   "resource_limits": {
@@ -10,7 +11,6 @@
   },
   "trainer_arguments": [
     "--dataset", "/ABSOLUTE/PATH/TO/REVIEWED_TRAIN.jsonl",
-    "--audited-plan", "/ABSOLUTE/PATH/TO/DEVELOPMENT_PLAN.json",
     "--output", "/ABSOLUTE/PATH/TO/NEW_RUN_DIRECTORY",
     "--base-model", "/ABSOLUTE/PATH/TO/MODEL_SNAPSHOT",
     "--model-revision", "REPLACE_WITH_FULL_MODEL_COMMIT",

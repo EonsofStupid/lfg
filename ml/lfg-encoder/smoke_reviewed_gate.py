@@ -70,7 +70,7 @@ payload, _ = corpus_audit.assemble_training(plan_path)
 policy = json.loads((root / "ml/lfg-encoder/promotion-policy.json").read_text(encoding="utf-8"))
 policy["minimum_human_verified_examples"] = len(rows[:2])
 (work / "fixture-policy.json").write_text(json.dumps(policy), encoding="utf-8")
-cmd = [sys.executable, "ml/lfg-encoder/train.py", "train", "--dataset", str(work / "training.jsonl"),
+cmd = [sys.executable, "ml/lfg-encoder/train.py", "train", "--require-reviewed", "--dataset", str(work / "training.jsonl"),
        "--promotion-policy", str(work / "fixture-policy.json"),
        "--audited-plan", str(plan_path),
        "--base-model", args.base_model, "--model-revision", args.model_revision, "--output", str(work / "model"),
