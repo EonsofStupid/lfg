@@ -1,0 +1,9 @@
+{
+  "schema_version": "lfg.owned-distillation-config.v1",
+  "top_k": 16,
+  "temperature": 2.0,
+  "distillation_weight": 0.5,
+  "max_teacher_parameters": 1000000,
+  "max_teacher_bytes": 10485760,
+  "max_teacher_manifest_bytes": 1048576
+}
