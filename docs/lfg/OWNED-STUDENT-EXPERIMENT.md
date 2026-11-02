@@ -17,8 +17,41 @@ remaining probability mass; Top-K logits alone do not determine that mass.
 Teacher and student token indices must refer to the same vocabulary. This byte
 student cannot directly consume logits from an arbitrary subword-tokenized
 teacher; an aligned teacher or a justified alignment method is still needed.
-The CPU experiment below uses next-byte cross-entropy only. The Top-K function
-is tested independently but is not yet connected to a teacher or training loop.
+The original CPU experiment below uses next-byte cross-entropy only.
+
+`distill_owned_student.py` adds an online CPU path that combines next-byte
+cross-entropy and weighted Top-K distillation. Its currently supported teacher
+is a local `OwnedByteStudent` checkpoint with the same byte vocabulary and a
+compatible implementation hash. The teacher manifest and safetensors bytes
+are checked before use and rechecked after training, the teacher is frozen, and
+the student is independently initialized. Top-K selection uses a stable tie
+order; both the selected probabilities and the remaining full-vocabulary mass
+are computed from the teacher. Teacher and student architecture, source,
+configuration, code and output hashes are recorded. The manifest's identity
+claims are not a signature or proof of teacher quality. The teacher must have
+at least the student's context length. An externally trained subword model is
+not supported by this path.
+
+```powershell
+python ml/lfg-encoder/distill_owned_student.py `
+  --student-config STUDENT_CONFIG.json `
+  --distillation-config DISTILLATION_CONFIG.json `
+  --source PRIVATE_REDACTED_SOURCE `
+  --teacher-manifest PRIVATE_TEACHER_MANIFEST.json `
+  --teacher-weights PRIVATE_TEACHER.safetensors `
+  --output NEW_PRIVATE_OUTPUT_DIRECTORY
+```
+
+On 2026-11-02, two local distillation runs used the same inspected README and the
+tiny earlier owned checkpoint as teacher. Each trained a 37,888-parameter
+student for 80 steps on 20,480 byte-token positions. The teacher had itself
+seen the same file and has no established task quality; this is an end-to-end
+distillation mechanics check, not evidence of a useful teacher or generalizing
+model. The runs produced identical weights and loss sequences on the local CPU.
+Neither validation nor assessment training was performed.
+A cross-entropy-only control using the same student configuration, seed and
+source produced different weights, confirming that the added objective affected
+the update path; it does not show that distillation improved model quality.
 
 `train_owned_student.py` accepts an explicitly selected, already redacted local
 file and configuration. It uses random initialization, CPU PyTorch, a
@@ -56,7 +89,16 @@ generalize. PyTorch documents that [deterministic settings do not guarantee
 reproducibility across releases or platforms](https://pytorch.org/docs/stable/notes/randomness.html).
 
 The next substantive steps are a real, license-reviewed open pretraining corpus,
-an aligned teacher and Top-K data path, reproducible larger-scale and Spark
+a capable aligned teacher and scalable Top-K data path, reproducible larger-scale and Spark
 execution, project-separated assessment targets and evaluation, target-machine
 latency and memory measurements, and a native embedded runtime. None of those
 requirements is satisfied by the recorded mechanics run.
+
+One research lead is [EvaByte's model card](https://huggingface.co/EvaByte/EvaByte),
+which lists a 6.5B byte-level model under Apache 2.0 and describes byte IDs
+offset by 64 plus special tokens. Its example requires custom model code. It is
+not downloaded, assessed, integrated, or selected as a teacher here; its exact
+license, code, byte/special-token probability mapping and hardware requirements
+still need verification. Separately, [cross-tokenizer byte-level distillation](https://arxiv.org/abs/2604.07466)
+is an active research direction, not evidence that arbitrary teacher logits can
+be used with the present 256-way loss unchanged.
