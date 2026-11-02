@@ -1,0 +1,19 @@
+{
+  "schema_version": "lfg.local-teacher-collection.v1",
+  "endpoint": "http://127.0.0.1:PORT/v1/chat/completions",
+  "model": "REPLACE_WITH_SERVED_MODEL_ID",
+  "teacher_identity": "REPLACE_WITH_OPERATOR_RECORDED_MODEL_IDENTITY",
+  "source_origin": "owner_chat",
+  "api_key_env": "REPLACE_WITH_ENVIRONMENT_VARIABLE_NAME",
+  "system_prompt": "REPLACE_WITH_OWNER_APPROVED_ASSESSMENT_INSTRUCTION",
+  "required_fields": ["intent", "complexity", "suggested_models", "agent_count", "reasons"],
+  "json_mode": true,
+  "temperature": 0.0,
+  "max_tokens": 384,
+  "timeout_seconds": 120,
+  "max_requests": 26,
+  "max_request_bytes": 4096,
+  "max_http_response_bytes": 65536,
+  "max_response_bytes": 8192,
+  "max_manifest_bytes": 1048576
+}

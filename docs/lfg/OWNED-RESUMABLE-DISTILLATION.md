@@ -132,3 +132,13 @@ while the machine was also building software. Threads were not controlled and
 the benchmark does not test assessment behavior. The executable contains
 derived private weights and should be protected accordingly. It has not been
 tested on a clean machine or compared across independent builds.
+
+Separately, two isolated Windows release builds of commit
+`4e4ef27263486e76227ebd399cd6d8943ef2ea7c`, using the earlier three-project
+checkpoint (without the authored notes) and the same local toolchain, produced
+identical 34,760,704-byte executables and UI assets. Both binaries had SHA-256
+`303132cc74bba53bfc7b49c37e469dbf4506d1b95da5aaa3fc8b7dcf05c941ba`.
+One matched the source checkpoint in native next-byte comparisons through 128
+bytes. This is same-machine, same-toolchain reproducibility for that commit
+and artifact, not a clean-machine test or reproducibility evidence for the
+later notes-inclusive or assessment-pilot models.
