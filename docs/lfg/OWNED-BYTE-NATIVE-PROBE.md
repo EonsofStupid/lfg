@@ -53,6 +53,24 @@ executable with these weights embedded can disclose the owner's training data
 and must remain private. Build products are not independently reviewed or
 distributed.
 
+The existing Windows two-build tool also accepts this artifact. It checks and
+snapshots the manifest and model, builds the selected committed source twice
+with static CRT, `/Brepro`, offline locked dependencies and remapped paths, and
+compares executable and UI-asset hashes. For model builds inside Git, its entire
+new output directory must be ignored and untracked. Supply a full commit ID and
+the private artifact identity:
+
+```powershell
+scripts/build-windows-baseline.ps1 -Commit FULL_COMMIT_SHA `
+  -OutputDir NEW_PRIVATE_BUILD_DIRECTORY `
+  -OwnedByteArtifactDir PRIVATE_EXPORT_DIRECTORY `
+  -OwnedByteManifestSha256 PRIVATE_MANIFEST_SHA256
+```
+
+The result is a same-machine comparison and does not by itself establish
+cross-machine reproducibility or release qualification. A mismatch fails the
+command and leaves the artifacts and report for investigation.
+
 On 2026-11-02, the 37,888-parameter private multi-document checkpoint was
 exported with source-prefix lengths 1, 4, 32 and 64 from the owner's LFG
 README. ONNX Runtime's largest absolute difference from PyTorch was 0.00000167.

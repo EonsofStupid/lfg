@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputDir,
     [ValidateRange(1, 256)][int]$Jobs = 2,
     [string]$ModelArtifactDir,
-    [string]$ModelManifestSha256
+    [string]$ModelManifestSha256,
+    [string]$OwnedByteArtifactDir,
+    [string]$OwnedByteManifestSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,9 +28,22 @@ if (($hasModelDirectory -ne $hasModelDigest) -or
 if ($hasModelDigest -and $ModelManifestSha256 -cnotmatch '^[0-9a-f]{64}$') {
     throw 'ModelManifestSha256 must be a lowercase SHA-256 digest.'
 }
+$hasOwnedDirectory = -not [string]::IsNullOrWhiteSpace($OwnedByteArtifactDir)
+$hasOwnedDigest = -not [string]::IsNullOrWhiteSpace($OwnedByteManifestSha256)
+if (($hasOwnedDirectory -ne $hasOwnedDigest) -or
+    (($PSBoundParameters.ContainsKey('OwnedByteArtifactDir') -or $PSBoundParameters.ContainsKey('OwnedByteManifestSha256')) -and
+     (-not $hasOwnedDirectory -or -not $hasOwnedDigest))) {
+    throw 'OwnedByteArtifactDir and OwnedByteManifestSha256 must be supplied together.'
+}
+if ($hasOwnedDigest -and $OwnedByteManifestSha256 -cnotmatch '^[0-9a-f]{64}$') {
+    throw 'OwnedByteManifestSha256 must be a lowercase SHA-256 digest.'
+}
+if ($hasModelDirectory -and $hasOwnedDirectory) { throw 'Select one embedded model type per build.' }
+$hasAnyModel = $hasModelDirectory -or $hasOwnedDirectory
 $environmentNames = @('CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS', 'CARGO_ENCODED_RUSTFLAGS',
     'RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'LFG_UI_DIST',
-    'LFG_EMBEDDED_ONNX_DIR', 'LFG_EMBEDDED_ONNX_SHA256')
+    'LFG_EMBEDDED_ONNX_DIR', 'LFG_EMBEDDED_ONNX_SHA256',
+    'LFG_EMBEDDED_OWNED_BYTE_DIR', 'LFG_EMBEDDED_OWNED_BYTE_MANIFEST_SHA256')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -97,23 +112,83 @@ function Get-ModelHashes([string]$Root, [string]$ExpectedManifest) {
     return $hashes
 }
 
+function Get-OwnedByteHashes([string]$Root, [string]$ExpectedManifest) {
+    $directory = Get-Item -LiteralPath $Root -Force
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Owned byte artifact root must be a real directory.'
+    }
+    $hashes = [ordered]@{}
+    foreach ($name in @('manifest.json', 'model.onnx')) {
+        $item = Get-Item -LiteralPath (Join-Path $directory.FullName $name) -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Owned byte artifact files must be regular files.'
+        }
+        $hashes[$name] = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    if ($hashes['manifest.json'] -cne $ExpectedManifest) { throw 'Owned byte manifest digest mismatch.' }
+    $manifest = Get-Content -LiteralPath (Join-Path $directory.FullName 'manifest.json') -Raw | ConvertFrom-Json
+    if ($manifest.schema_version -cne 'lfg.owned-byte-onnx.v1' -or $manifest.promotion_eligible -cne $false -or
+        $manifest.model_sha256 -isnot [string] -or $manifest.model_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $hashes['model.onnx'] -cne $manifest.model_sha256) {
+        throw 'Owned byte model manifest or digest is invalid.'
+    }
+    return $hashes
+}
+
+function Get-SelectedModelHashes([string]$Root) {
+    if ($hasOwnedDirectory) { return Get-OwnedByteHashes $Root $OwnedByteManifestSha256 }
+    return Get-ModelHashes $Root $ModelManifestSha256
+}
+
+function Assert-PrivateOutput([string]$Directory) {
+    $ancestor = Split-Path -Parent $Directory
+    while (-not (Test-Path -LiteralPath $ancestor)) { $ancestor = Split-Path -Parent $ancestor }
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $root = (& git -C $ancestor rev-parse --show-toplevel 2>$null)
+        $rootStatus = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($rootStatus -ne 0) {
+        $current = $ancestor
+        while ($current) {
+            if (Test-Path -LiteralPath (Join-Path $current '.git')) { throw 'Cannot verify output privacy.' }
+            $parent = Split-Path -Parent $current
+            if ($parent -eq $current) { break }
+            $current = $parent
+        }
+        return
+    }
+    $repoRoot = (Resolve-Path -LiteralPath $root.Trim()).Path.TrimEnd('\') + '\'
+    if (-not $Directory.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Cannot resolve output within its Git working tree.'
+    }
+    $relative = $Directory.Substring($repoRoot.Length).TrimEnd('\').Replace('\', '/') + '/'
+    & git -C $repoRoot check-ignore -q --no-index -- $relative
+    $ignored = $LASTEXITCODE
+    $tracked = @(& git -C $repoRoot ls-files -- $relative)
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot verify output privacy.' }
+    if ($ignored -ne 0 -or $tracked.Count -ne 0) { throw 'Model build outputs must be ignored and untracked.' }
+}
+
 Push-Location $repo
 try {
     $resolved = (& git rev-parse --verify "$Commit^{commit}").Trim()
     if ($LASTEXITCODE -ne 0 -or $resolved -cne $Commit) { throw 'Commit could not be verified.' }
-    if ($hasModelDirectory) {
-        $modelSource = (Resolve-Path -LiteralPath $ModelArtifactDir).Path
-        $modelHashes = Get-ModelHashes $modelSource $ModelManifestSha256
+    if ($hasAnyModel) {
+        $modelSource = (Resolve-Path -LiteralPath $(if ($hasOwnedDirectory) { $OwnedByteArtifactDir } else { $ModelArtifactDir })).Path
+        $modelHashes = Get-SelectedModelHashes $modelSource
+        Assert-PrivateOutput $destination
     }
     New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
-    if ($hasModelDirectory) {
+    if ($hasAnyModel) {
         $modelSnapshot = Join-Path $destination 'model-snapshot'
         New-Item -ItemType Directory -Path $modelSnapshot -ErrorAction Stop | Out-Null
         foreach ($name in $modelHashes.Keys) {
             Copy-Item -LiteralPath (Join-Path $modelSource $name) -Destination (Join-Path $modelSnapshot $name) -ErrorAction Stop
         }
-        if ((ConvertTo-Json (Get-ModelHashes $modelSource $ModelManifestSha256) -Compress) -cne (ConvertTo-Json $modelHashes -Compress) -or
-            (ConvertTo-Json (Get-ModelHashes $modelSnapshot $ModelManifestSha256) -Compress) -cne (ConvertTo-Json $modelHashes -Compress)) {
+        if ((ConvertTo-Json (Get-SelectedModelHashes $modelSource) -Compress) -cne (ConvertTo-Json $modelHashes -Compress) -or
+            (ConvertTo-Json (Get-SelectedModelHashes $modelSnapshot) -Compress) -cne (ConvertTo-Json $modelHashes -Compress)) {
             throw 'Model artifact changed during snapshot creation.'
         }
     }
@@ -142,12 +217,15 @@ try {
         $env:LFG_UI_DIST = $assets
         $env:LFG_EMBEDDED_ONNX_DIR = if ($hasModelDirectory) { $modelSnapshot } else { $null }
         $env:LFG_EMBEDDED_ONNX_SHA256 = if ($hasModelDirectory) { $ModelManifestSha256 } else { $null }
-        $features = if ($hasModelDirectory) { 'embedded-ui,embedded-onnx' } else { 'embedded-ui' }
+        $env:LFG_EMBEDDED_OWNED_BYTE_DIR = if ($hasOwnedDirectory) { $modelSnapshot } else { $null }
+        $env:LFG_EMBEDDED_OWNED_BYTE_MANIFEST_SHA256 = if ($hasOwnedDirectory) { $OwnedByteManifestSha256 } else { $null }
+        $features = if ($hasOwnedDirectory) { 'embedded-ui,embedded-owned-byte' }
+                    elseif ($hasModelDirectory) { 'embedded-ui,embedded-onnx' } else { 'embedded-ui' }
         Push-Location $source
         try {
             Invoke-Checked { cargo build --offline --locked --release -p lfg-server --features $features --target x86_64-pc-windows-msvc } 'Cargo build failed'
         } finally { Pop-Location }
-        if ($hasModelDirectory -and (ConvertTo-Json (Get-ModelHashes $modelSnapshot $ModelManifestSha256) -Compress) -cne (ConvertTo-Json $modelHashes -Compress)) {
+        if ($hasAnyModel -and (ConvertTo-Json (Get-SelectedModelHashes $modelSnapshot) -Compress) -cne (ConvertTo-Json $modelHashes -Compress)) {
             throw 'Model snapshot changed during the build.'
         }
         $binary = Join-Path $target 'x86_64-pc-windows-msvc\release\lfg-server.exe'
@@ -163,7 +241,7 @@ try {
         throw 'Build script changed during the build.'
     }
     $report = [ordered]@{
-        schemaVersion = if ($hasModelDirectory) { 'lfg.windows-embedded-model-build.v1' } else { 'lfg.windows-baseline-build.v1' }
+        schemaVersion = if ($hasOwnedDirectory) { 'lfg.windows-owned-byte-build.v1' } elseif ($hasModelDirectory) { 'lfg.windows-embedded-model-build.v1' } else { 'lfg.windows-baseline-build.v1' }
         commit = $Commit
         archiveSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         rustc = (& rustc --version).Trim()
@@ -176,10 +254,10 @@ try {
         outputs = $outputs
         scope = 'Same-machine build comparison; not model or release qualification.'
     }
-    if ($hasModelDirectory) {
-        $report['features'] = 'embedded-ui,embedded-onnx'
+    if ($hasAnyModel) {
+        $report['features'] = $features
         $report['builderSha256'] = $builderSha256
-        $report['modelManifestSha256'] = $ModelManifestSha256
+        $report['modelManifestSha256'] = if ($hasOwnedDirectory) { $OwnedByteManifestSha256 } else { $ModelManifestSha256 }
         $report['modelFilesSha256'] = $modelHashes
     }
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $destination 'build-report.json') -Encoding UTF8
