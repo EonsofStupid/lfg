@@ -98,3 +98,26 @@ comparison includes possible device effects. This is one non-blind development
 document from a related project, with unknown overlap; it is not an independent
 assessment evaluation or a reliable estimate of product quality. The report
 and model identities are private.
+
+An additional 400-step GB10 run used the same student architecture and
+teacher with a new corpus of 13 screened documents: the three project
+documents above and the ten recovered, owner-authored question-bank,
+curriculum, routing and addendum notes. The original notes were checked
+against their private archive manifest before staging. The 189,715-byte corpus
+used four uniformly sampled project groups, including a separate owner-notes
+group. Screening the added material replaced one long opaque string and 21
+credential-context lines; rescanning the staged corpus on the training host
+made no further replacements. This remains pattern screening, not a guarantee
+of complete redaction. The run processed 102,400 byte positions; it did not
+open a test source or train assessment answers. SWAG was observed running before
+and after the bounded run. Reading the authored questions as byte text does not
+establish that the student understands or can apply them.
+
+On the same previously inspected SWAG development document and 64-byte-window
+setup, the notes-inclusive student scored 3.628 bits per byte and 32.35%
+next-byte accuracy, compared with 3.684 and 31.67% for its matching
+cross-entropy control. Its 3.628 bits per byte compares with 3.633 for the
+earlier project-only student on this one document. Those small differences
+are not evidence of a reliable improvement, question answering ability, or
+independent assessment quality; training devices differ between each student
+and its CPU control, and the evaluation document has been used repeatedly.
