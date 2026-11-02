@@ -64,7 +64,8 @@ def _write(path: Path, raw: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def snapshot(root: Path, model, optimizer, rng, progress: dict, identity: dict, config: dict) -> Path:
+def snapshot(root: Path, model, optimizer, rng, progress: dict, identity: dict, config: dict, *,
+             schema: str = 'lfg.owned-assessment-sft-checkpoint.v1') -> Path:
     states = optimizer.state_dict()
     tensors = {'rng.cpu': torch.get_rng_state().cpu().contiguous()}
     for index, values in states['state'].items():
@@ -82,7 +83,7 @@ def snapshot(root: Path, model, optimizer, rng, progress: dict, identity: dict, 
         raise ValueError('non-finite model checkpoint state')
     model_raw = save(model_state)
     optimizer_raw = save(tensors)
-    state = {'schema_version': 'lfg.owned-assessment-sft-checkpoint.v1', 'identity': identity,
+    state = {'schema_version': schema, 'identity': identity,
              'progress': progress, 'sampler_state': rng.getstate(), 'param_groups': states['param_groups'],
              'model_sha256': sha(model_raw), 'optimizer_sha256': sha(optimizer_raw), 'device': config['device']}
     state_raw = canonical(state)
@@ -101,7 +102,7 @@ def snapshot(root: Path, model, optimizer, rng, progress: dict, identity: dict, 
     os.replace(temporary, final)
     # The checkpoint itself is authoritative. A failed pointer update leaves a
     # complete step directory that can be selected explicitly.
-    pointer = canonical({'schema_version': 'lfg.owned-assessment-sft-latest.v1', 'checkpoint': final.name,
+    pointer = canonical({'schema_version': 'lfg.owned-training-latest.v1', 'checkpoint': final.name,
                          'step': progress['step'], 'state_sha256': sha(state_raw)})
     fd, name = tempfile.mkstemp(prefix='.latest-', dir=root)
     with os.fdopen(fd, 'wb') as stream:
@@ -124,7 +125,8 @@ def _tuples(value):
     return tuple(_tuples(item) for item in value) if isinstance(value, list) else value
 
 
-def restore(path: Path, expected_state_sha256: str, model, optimizer, rng, identity: dict, config: dict) -> dict:
+def restore(path: Path, expected_state_sha256: str, model, optimizer, rng, identity: dict, config: dict, *,
+            schema: str = 'lfg.owned-assessment-sft-checkpoint.v1') -> dict:
     state_raw = _read(path / 'state.json', config['max_manifest_bytes'])
     if not isinstance(expected_state_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', expected_state_sha256) \
             or sha(state_raw) != expected_state_sha256:
@@ -132,7 +134,7 @@ def restore(path: Path, expected_state_sha256: str, model, optimizer, rng, ident
     state = json.loads(state_raw)
     weights = _read(path / 'weights.safetensors', config['max_checkpoint_bytes'])
     optimizer_raw = _read(path / 'optimizer.safetensors', config['max_optimizer_bytes'])
-    if (not isinstance(state, dict) or state.get('schema_version') != 'lfg.owned-assessment-sft-checkpoint.v1'
+    if (not isinstance(state, dict) or state.get('schema_version') != schema
             or state.get('identity') != identity or state.get('device') != config['device']
             or state.get('model_sha256') != sha(weights) or state.get('optimizer_sha256') != sha(optimizer_raw)
             or not isinstance(state.get('progress'), dict) or type(state['progress'].get('step')) is not int
