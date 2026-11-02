@@ -57,8 +57,12 @@ digests, code hashes, status/outcome claim counts, context changes, sampled
 supervised positions, loss history and runtime settings. It does not assert
 that data is properly redacted, the source claims are true, the model is useful,
 or evaluation has occurred. CUDA is used only when explicitly selected and
-available; deterministic algorithms and TF32 are configurable. Identical
-results across devices or software versions are not guaranteed. This version
+available; the CUDA device index, PyTorch allocator fraction, deterministic
+algorithms and TF32 are configurable. The allocator fraction is not a hard GPU
+or host-memory isolation limit and does not cover CUDA context or non-PyTorch
+allocations. The manifest records PyTorch's peak allocated and reserved GPU
+bytes for CUDA runs. Identical results across devices or software versions are
+not guaranteed. This version
 does not provide a serving or update path for the resulting assessment model.
 
 ## Checkpoints and resume

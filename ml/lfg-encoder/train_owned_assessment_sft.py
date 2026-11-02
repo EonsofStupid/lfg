@@ -38,6 +38,9 @@ def configuration(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
     if (not isinstance(config, dict) or config.get('schema_version') != 'lfg.owned-assessment-sft-config.v1'
             or any(type(config.get(k)) is not int or config[k] < (0 if k == 'seed' else 1) for k in integers)
             or config.get('device') not in ('cpu', 'cuda')
+            or type(config.get('cuda_device_index')) is not int or config['cuda_device_index'] < 0
+            or type(config.get('cuda_memory_fraction')) not in (int, float)
+            or not math.isfinite(config['cuda_memory_fraction']) or not 0 < config['cuda_memory_fraction'] <= 1
             or type(config.get('deterministic_algorithms')) is not bool
             or type(config.get('allow_tf32')) is not bool
             or type(config.get('allow_truncated_prompt')) is not bool
@@ -197,13 +200,20 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     checkpoints.private_directory(output)
     if config['device'] == 'cuda' and not torch.cuda.is_available():
         raise ValueError('requested CUDA device is unavailable')
+    if config['device'] == 'cuda' and config['cuda_device_index'] >= torch.cuda.device_count():
+        raise ValueError('requested CUDA device index is unavailable')
     torch.set_num_threads(config['cpu_threads'])
     torch.use_deterministic_algorithms(config['deterministic_algorithms'])
     torch.backends.cuda.matmul.allow_tf32 = config['allow_tf32']
     torch.backends.cudnn.allow_tf32 = config['allow_tf32']
     torch.manual_seed(config['seed'])
+    device = torch.device('cpu')
     if config['device'] == 'cuda':
-        torch.cuda.manual_seed_all(config['seed'])
+        device = torch.device('cuda', config['cuda_device_index'])
+        torch.cuda.set_device(device)
+        torch.cuda.set_per_process_memory_fraction(config['cuda_memory_fraction'], device=device)
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.manual_seed(config['seed'])
     model = owned_student.OwnedByteStudent(architecture)
     state = load(initial_weights)
     if config['context'] > old_context:
@@ -215,7 +225,7 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     model.load_state_dict(state, strict=True)
     if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):
         raise ValueError('source checkpoint has non-finite weights')
-    model.to(config['device']).train()
+    model.to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     rng, losses, supervised = random.Random(config['seed']), [], 0
     identity = {'dataset_manifest_sha256': base.sha(dataset_manifest), 'training_file_sha256': base.sha(train_raw),
@@ -239,9 +249,9 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     latest = None
     for step in range(initial_step + 1, end_step + 1):
         input_rows, target_rows, correction_rows = sample_batch(records, rng, config['batch_size'], config['context'])
-        inputs = torch.tensor(input_rows, dtype=torch.long, device=config['device'])
-        targets = torch.tensor(target_rows, dtype=torch.long, device=config['device'])
-        correction = torch.tensor(correction_rows, dtype=torch.float32, device=config['device'])
+        inputs = torch.tensor(input_rows, dtype=torch.long, device=device)
+        targets = torch.tensor(target_rows, dtype=torch.long, device=device)
+        correction = torch.tensor(correction_rows, dtype=torch.float32, device=device)
         supervised += int((targets != -100).sum().item())
         optimizer.zero_grad(set_to_none=True)
         token_loss = F.cross_entropy(model(inputs).reshape(-1, 256), targets.reshape(-1),
@@ -292,7 +302,11 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                 'teacher_claims_verified': False, 'validation_opened': False, 'test_opened': False,
                 'assessment_quality_evaluated': False, 'promotion_eligible': False}
     if config['device'] == 'cuda':
-        manifest['cuda_device'] = torch.cuda.get_device_name()
+        manifest['cuda_device'] = torch.cuda.get_device_name(device)
+        manifest['cuda_device_index'] = config['cuda_device_index']
+        manifest['cuda_memory_fraction'] = config['cuda_memory_fraction']
+        manifest['cuda_peak_allocated_bytes'] = torch.cuda.max_memory_allocated(device)
+        manifest['cuda_peak_reserved_bytes'] = torch.cuda.max_memory_reserved(device)
         manifest['cuda_version'] = torch.version.cuda
     for name, raw in (('weights.safetensors', trained),
                       ('manifest.json', (json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + '\n').encode())):

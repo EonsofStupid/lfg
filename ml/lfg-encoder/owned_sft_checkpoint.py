@@ -75,8 +75,8 @@ def snapshot(root: Path, model, optimizer, rng, progress: dict, identity: dict, 
                 raise ValueError('non-finite optimizer checkpoint state')
             tensors[f'optimizer.{index}.{name}'] = tensor.detach().cpu().contiguous()
     if config['device'] == 'cuda':
-        for index, tensor in enumerate(torch.cuda.get_rng_state_all()):
-            tensors[f'rng.cuda.{index}'] = tensor.cpu().contiguous()
+        index = config['cuda_device_index']
+        tensors[f'rng.cuda.{index}'] = torch.cuda.get_rng_state(index).cpu().contiguous()
     model_state = {key: value.detach().cpu().contiguous() for key, value in model.state_dict().items()}
     if any(not bool(torch.isfinite(value).all()) for value in model_state.values()):
         raise ValueError('non-finite model checkpoint state')
@@ -166,9 +166,10 @@ def restore(path: Path, expected_state_sha256: str, model, optimizer, rng, ident
     cuda_keys = sorted((key for key in tensors if key.startswith('rng.cuda.')),
                        key=lambda key: int(key.rsplit('.', 1)[1]))
     if config['device'] == 'cuda':
-        if cuda_keys != [f'rng.cuda.{index}' for index in range(torch.cuda.device_count())]:
-            raise ValueError('checkpoint CUDA device count changed')
-        torch.cuda.set_rng_state_all([tensors[key] for key in cuda_keys])
+        index = config['cuda_device_index']
+        if cuda_keys != [f'rng.cuda.{index}']:
+            raise ValueError('checkpoint CUDA device index changed')
+        torch.cuda.set_rng_state(tensors[cuda_keys[0]], device=index)
     elif cuda_keys:
         raise ValueError('unexpected CUDA random state in CPU checkpoint')
     if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):

@@ -281,6 +281,18 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
             self.subject.configuration(self.config_path, 8)
         self.assertEqual(self.subject.configuration(self.config_path, 16384)[0]['context'], 128)
 
+    def test_cuda_requires_a_valid_fraction_and_never_falls_back(self):
+        self.config['cuda_memory_fraction'] = 0
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, 'invalid supervised training configuration'):
+            self.subject.configuration(self.config_path)
+        self.config.update(device='cuda', cuda_memory_fraction=0.01)
+        self.write_config()
+        with patch('torch.cuda.is_available', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'CUDA device is unavailable'):
+                self.subject.experiment(self.dataset, self.checkpoint, self.config_path, self.root / 'blocked')
+        self.assertFalse((self.root / 'blocked').exists())
+
     def test_heldout_source_rejected_before_training_file_open_and_provenance_checked(self):
         manifest_path = self.dataset / 'manifest.json'
         original = json.loads(manifest_path.read_bytes())

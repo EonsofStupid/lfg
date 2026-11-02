@@ -1,6 +1,8 @@
 {
   "schema_version": "lfg.owned-assessment-sft-config.v1",
   "device": "cpu",
+  "cuda_device_index": 0,
+  "cuda_memory_fraction": 0.01,
   "seed": 730,
   "cpu_threads": 1,
   "batch_size": 2,
