@@ -22,6 +22,9 @@ jobs:
       - name: Cargo test
         run: cargo test --workspace --locked
 
+      - name: Test owned byte native probe
+        run: cargo test --locked -p lfg-server --features owned-byte-onnx --test owned_byte_process
+
   python-ml:
     runs-on: ubuntu-latest
     steps:

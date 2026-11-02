@@ -179,10 +179,58 @@ fn embed_node() {
     std::fs::write(out, source).expect("write embedded node index");
 }
 
+fn embed_owned_byte() {
+    let root = PathBuf::from(
+        std::env::var_os("LFG_EMBEDDED_OWNED_BYTE_DIR")
+            .expect("embedded-owned-byte requires LFG_EMBEDDED_OWNED_BYTE_DIR"),
+    )
+    .canonicalize()
+    .expect("resolve owned byte artifact directory");
+    let expected = std::env::var("LFG_EMBEDDED_OWNED_BYTE_MANIFEST_SHA256")
+        .expect("embedded-owned-byte requires a manifest digest");
+    assert!(
+        expected.len() == 64
+            && expected
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "owned byte manifest digest must be lowercase SHA-256"
+    );
+    let mut source = format!("pub const MANIFEST_SHA256: &str = {expected:?};\n");
+    for (constant, name) in [("MANIFEST", "manifest.json"), ("MODEL", "model.onnx")] {
+        let path = root.join(name);
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("owned byte artifact file missing")
+                .file_type()
+                .is_file(),
+            "owned byte artifact must contain regular files"
+        );
+        if name == "manifest.json" {
+            assert_eq!(
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(&path).expect("read manifest"))
+                ),
+                expected,
+                "owned byte manifest digest mismatch"
+            );
+        }
+        println!("cargo:rerun-if-changed={}", path.display());
+        source.push_str(&format!(
+            "pub static {constant}: &[u8] = include_bytes!({:?});\n",
+            path.to_string_lossy()
+        ));
+    }
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("embedded_owned_byte.rs");
+    std::fs::write(out, source).expect("write owned byte artifact index");
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=LFG_UI_DIST");
     println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_ONNX_DIR");
     println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_ONNX_SHA256");
+    println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_OWNED_BYTE_DIR");
+    println!("cargo:rerun-if-env-changed=LFG_EMBEDDED_OWNED_BYTE_MANIFEST_SHA256");
     for name in [
         "LFG_EMBEDDED_NODE_DIR",
         "LFG_EMBEDDED_NODE_MANIFEST_SHA256",
@@ -202,5 +250,8 @@ fn main() {
     }
     if std::env::var_os("CARGO_FEATURE_EMBEDDED_NODE").is_some() {
         embed_node();
+    }
+    if std::env::var_os("CARGO_FEATURE_EMBEDDED_OWNED_BYTE").is_some() {
+        embed_owned_byte();
     }
 }
