@@ -158,10 +158,16 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
             or any(base.sha(path.read_bytes()) != code[path.name] for path in code_paths)):
         raise ValueError('distillation inputs changed during execution')
     if end_step < student_config['steps']:
-        return {'schema_version': 'lfg.owned-distillation-partial.v1', 'completed': False, 'steps': end_step,
+        partial = {'schema_version': 'lfg.owned-distillation-partial.v1', 'completed': False, 'steps': end_step,
                 'tokens_processed': tokens, 'latest_checkpoint': str(latest),
                 'latest_checkpoint_state_sha256': base.sha(base.read_bounded(latest / 'state.json', runtime['max_manifest_bytes'])),
+                'elapsed_seconds': elapsed, 'device': runtime['device'],
                 'assessment_quality_evaluated': False, 'promotion_eligible': False}
+        if runtime['device'] == 'cuda':
+            partial.update(cuda_device=torch.cuda.get_device_name(device), cuda_memory_fraction=runtime['cuda_memory_fraction'],
+                           cuda_peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                           cuda_peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
+        return partial
     weights = save({name: value.detach().cpu().contiguous() for name, value in model.state_dict().items()})
     manifest = {'schema_version': 'lfg.owned-distillation-result.v1', 'completed': True, 'resumed_from_step': initial_step,
                 'resume_checkpoint_state_sha256': resume_state_sha256, 'architecture': student_config['architecture'],
@@ -209,6 +215,8 @@ if __name__ == '__main__':
                 args.teacher_revision, args.output, resume=args.resume, resume_state_sha256=args.resume_state_sha256,
                 max_steps_this_run=args.max_steps_this_run, max_runtime_config_bytes=args.max_runtime_config_bytes)
         print(json.dumps({key: result.get(key) for key in ('completed', 'steps', 'tokens_processed', 'weights_sha256',
-             'latest_checkpoint', 'latest_checkpoint_state_sha256', 'assessment_quality_evaluated', 'promotion_eligible')}))
+             'latest_checkpoint', 'latest_checkpoint_state_sha256', 'elapsed_seconds', 'device', 'cuda_device',
+             'cuda_memory_fraction', 'cuda_peak_allocated_bytes', 'cuda_peak_reserved_bytes',
+             'assessment_quality_evaluated', 'promotion_eligible')}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError) as error:
         raise SystemExit(f'Owned distillation failed ({type(error).__name__}): {error}') from None
