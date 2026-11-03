@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Assessment } from './types'
 import { ownedAssessmentBody, ownedAssessmentClient, sha256Utf8, type OwnedAssessmentClient, type OwnedResult, type OwnedStatus } from './ownedAssessmentApi'
+import { getKnowledge } from './api'
+import { suggestedProjectContext } from './suggestedProjectContext'
 
 const STATUS_MESSAGE: Record<OwnedResult['status'], string> = {
   ok: 'Model output received. It has not been verified.',
@@ -35,11 +37,13 @@ function display(value: unknown): string {
   return JSON.stringify(value)
 }
 
-export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult }: {
+export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
   prompt: string
   assessment: Assessment | null
   client?: OwnedAssessmentClient
   onResult?: (result: OwnedResult | null) => void
+  declaredSubscriptions?: string[]
+  loadKnowledge?: () => Promise<unknown>
 }) {
   const [tokenInput, setTokenInput] = useState('')
   const [token, setToken] = useState<string | null>(null)
@@ -50,17 +54,27 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const [connecting, setConnecting] = useState(false)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState('')
+  const [draft, setDraft] = useState<{ text: string; sourceText: string; declarations: string } | null>(null)
+  const [draftBusy, setDraftBusy] = useState(false)
+  const [draftError, setDraftError] = useState('')
+  const [appliedDeclarations, setAppliedDeclarations] = useState<string | null>(null)
+  const [appliedSnapshot, setAppliedSnapshot] = useState<string | null>(null)
+  const [appliedSuperseded, setAppliedSuperseded] = useState(false)
   const requestGeneration = useRef(0)
   const busyGeneration = useRef(0)
   const connectionGeneration = useRef(0)
+  const draftGeneration = useRef(0)
   const onResultRef = useRef(onResult)
   const promptRef = useRef(prompt)
   const projectContextRef = useRef(projectContext)
   const tokenInputRef = useRef(tokenInput)
+  const declarationKey = JSON.stringify([...new Set(declaredSubscriptions)].sort())
+  const declarationRef = useRef(declarationKey)
   onResultRef.current = onResult
   promptRef.current = prompt
   projectContextRef.current = projectContext
   tokenInputRef.current = tokenInput
+  declarationRef.current = declarationKey
 
   function invalidate() {
     requestGeneration.current += 1
@@ -74,10 +88,18 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
 
   useEffect(() => { invalidate() }, [prompt])
 
+  useEffect(() => {
+    draftGeneration.current += 1
+    setDraftBusy(false)
+    setDraftError('')
+    if (appliedDeclarations !== null && appliedDeclarations !== declarationKey) invalidate()
+  }, [declarationKey])
+
   useEffect(() => () => {
     requestGeneration.current += 1
     busyGeneration.current += 1
     connectionGeneration.current += 1
+    draftGeneration.current += 1
     onResultRef.current?.(null)
   }, [])
 
@@ -110,12 +132,14 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     && contextBytes > status.limits.maxContextBytes
   const bodyTooLarge = bodyLimit !== undefined && bodyBytes > bodyLimit
   const tooLarge = requestTooLarge || contextTooLarge || bodyTooLarge
+  const appliedDraftStale = appliedDeclarations !== null && (appliedDeclarations !== declarationKey || appliedSuperseded)
   const proposal = result && ['ok', 'incomplete_output', 'truncated'].includes(result.status) ? result.output : null
 
   function runOwnedAssessment() {
     const current = ++requestGeneration.current
     const submittedPrompt = prompt
     const submittedContext = projectContext
+    const submittedDeclarations = appliedDeclarations
     setResult(null)
     setContextBinding(null)
     onResultRef.current?.(null)
@@ -124,7 +148,8 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       if (submittedContext.length > 0) {
         const contextSha256 = await sha256Utf8(submittedContext)
         if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
-            || projectContextRef.current !== submittedContext) return
+            || projectContextRef.current !== submittedContext
+            || (submittedDeclarations !== null && declarationRef.current !== submittedDeclarations)) return
         boundContext = { context: submittedContext, contextSha256 }
       }
       const body = ownedAssessmentBody(submittedPrompt, boundContext)
@@ -136,7 +161,8 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
         ? await client.assess(submittedPrompt, token!, boundContext)
         : await client.assess(submittedPrompt, token!)
       if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
-          || projectContextRef.current !== submittedContext) return
+          || projectContextRef.current !== submittedContext
+          || (submittedDeclarations !== null && declarationRef.current !== submittedDeclarations)) return
       if (boundContext) {
         setResult(next)
         if (next.projectContextSha256 === boundContext.contextSha256) {
@@ -176,12 +202,64 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     }
   }
 
+  async function buildSuggestedContext() {
+    const current = ++draftGeneration.current
+    const declarations = declarationKey
+    if (declaredSubscriptions.length === 0) {
+      setDraftError('No subscriptions are declared. Model listings and entitlement remain unknown.')
+      return
+    }
+    const limit = status?.limits?.maxContextBytes
+    if (!Number.isSafeInteger(limit) || !limit || limit < 1) {
+      setDraftError('Connect the owned model to obtain a context byte limit before building a draft.')
+      return
+    }
+    setDraftBusy(true)
+    setDraftError('')
+    try {
+      const knowledge = await loadKnowledge()
+      if (draftGeneration.current !== current || declarationRef.current !== declarations) return
+      const suggested = suggestedProjectContext(knowledge, declaredSubscriptions, limit)
+      if (appliedSnapshot !== null && appliedSnapshot !== suggested.text) {
+        setAppliedSuperseded(true)
+        invalidate()
+      }
+      setDraft({ text: suggested.text, sourceText: suggested.text, declarations })
+    } catch (value) {
+      if (draftGeneration.current === current && declarationRef.current === declarations) {
+        setDraftError(value instanceof Error ? value.message : 'Provider knowledge is unavailable.')
+      }
+    } finally {
+      if (draftGeneration.current === current) setDraftBusy(false)
+    }
+  }
+
   return <section className="dev-panel owned-assessment" aria-label="Experimental owned model">
     <div className="dev-heading"><div><p className="eyebrow">EXPERIMENTAL OWNED MODEL</p><h2>Compare LFG's model</h2></div></div>
     <p>Run the current request through the experimental owned model. Its output is a proposal, not a verified assessment; the existing rules remain available above. Availability, project outcomes, and entitlement remain unknown unless separately verified. This run does not automatically include subscription settings or project profile answers.</p>
+    <div className="suggested-context">
+      <button type="button" disabled={draftBusy || !!draft} onClick={() => void buildSuggestedContext()}>{draftBusy ? 'Building draft…' : 'Build suggested context'}</button>
+      <p>Uses your declared subscriptions and server-reported cached model listings. These do not establish current access or entitlement. Review before applying; nothing is sent to the model until you run it.</p>
+      {draftError && <p role="alert">{draftError}</p>}
+      {draft && <>
+        <label>Suggested context draft <textarea rows={6} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })} /></label>
+        {draft.declarations !== declarationKey && <p role="status">Declarations changed since this draft was built. Dismiss it to build a current draft; your edits are preserved here until then.</p>}
+        <button type="button" disabled={appliedDraftStale || draft.declarations !== declarationKey || !draft.text} onClick={() => {
+          setProjectContext(current => current ? `${current}\n\n${draft.text}` : draft.text)
+          setAppliedDeclarations(draft.declarations)
+          setAppliedSnapshot(draft.sourceText)
+          setAppliedSuperseded(false)
+          setDraft(null)
+          invalidate()
+        }}>Append draft to project context</button>
+        <button type="button" onClick={() => { draftGeneration.current += 1; setDraft(null); setDraftError('') }}>Dismiss draft</button>
+      </>}
+      {appliedDraftStale && <><p role="alert">Declared subscriptions changed, or cached knowledge changed after this context was applied. Review the existing text and rebuild the draft, or explicitly keep it as manual context.</p><button type="button" onClick={() => { setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); invalidate() }}>Keep as manual context</button></>}
+    </div>
     <label>Optional project context (owner-supplied, unverified)
       <textarea rows={4} value={projectContext} onChange={(event) => {
         setProjectContext(event.target.value)
+        if (!event.target.value) { setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false) }
         invalidate()
       }} />
     </label>
@@ -204,8 +282,8 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {bodyLimit !== undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} / {bodyLimit.toLocaleString()} UTF-8 bytes.</p>}
       {bodyLimit === undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} UTF-8 bytes. The owned route HTTP body limit is not advertised; the server may reject this request.</p>}
       <div className="feedback-actions">
-        <button type="button" disabled={running || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : 'Run owned model'}</button>
-        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; setToken(null); setStatus(null); setProjectContext('') }}>Disconnect</button>
+        <button type="button" disabled={running || appliedDraftStale || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : 'Run owned model'}</button>
+        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
       </div>
       {requestTooLarge && <p role="alert">The request exceeds the model's configured UTF-8 input limit.</p>}
       {contextTooLarge && <p role="alert">The supplied context exceeds the model's configured context byte limit.</p>}
