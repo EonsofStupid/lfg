@@ -273,24 +273,15 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ignored and untracked'):
             self.subject.checkpoints.private_directory(target)
 
-    def test_user_request_cli_redacts_os_paths_without_changing_legacy_errors(self):
-        user_config = json.loads(Path(self.subject.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
-        user_config_path = self.root / 'user-request-config.json'
-        user_config_path.write_text(json.dumps(user_config), encoding='utf-8')
+    def test_legacy_cli_os_errors_keep_existing_path_detail(self):
         private_marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
-        user_dataset = self.root / private_marker / 'missing-user-dataset.json'
-        common = [sys.executable, str(Path(self.subject.__file__)), '--checkpoint', str(self.checkpoint)]
-        user_run = subprocess.run(common + ['--dataset', str(user_dataset), '--config', str(user_config_path),
-            '--output', str(self.root / 'user-output')], capture_output=True, text=True)
-        self.assertNotEqual(user_run.returncode, 0)
-        self.assertIn('FileNotFoundError', user_run.stderr)
-        self.assertIn('filesystem operation failed', user_run.stderr)
-        self.assertNotIn(private_marker, user_run.stderr)
-        legacy_dataset = self.root / private_marker / 'missing-legacy-dataset'
-        legacy_run = subprocess.run(common + ['--dataset', str(legacy_dataset), '--config', str(self.config_path),
-            '--output', str(self.root / 'legacy-output')], capture_output=True, text=True)
+        missing_checkpoint = self.root / private_marker / 'missing-checkpoint'
+        legacy_run = subprocess.run([sys.executable, str(Path(self.subject.__file__)),
+            '--dataset', str(self.dataset), '--checkpoint', str(missing_checkpoint),
+            '--config', str(self.config_path), '--output', str(self.root / 'legacy-output')],
+            capture_output=True, text=True)
         self.assertNotEqual(legacy_run.returncode, 0)
-        self.assertIn(str(legacy_dataset), legacy_run.stderr)
+        self.assertIn(str(missing_checkpoint), legacy_run.stderr)
 
     def test_additional_input_and_config_fields_are_accepted(self):
         train_path = self.dataset / 'train.jsonl'

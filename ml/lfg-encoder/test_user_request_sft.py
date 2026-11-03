@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -522,6 +524,23 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertFalse(result['runtime_compatible'])
         self.assertFalse(result['deployment_ready'])
         self.assertFalse(result['promotion_eligible'])
+
+    def test_user_request_cli_os_error_does_not_print_private_path(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config_path = self.root / 'user-request-config.json'
+        config_path.write_text(json.dumps(config), encoding='utf-8')
+        marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
+        missing_checkpoint = self.root / marker / 'missing-checkpoint'
+        run = subprocess.run([sys.executable, str(Path(trainer.__file__)),
+            '--dataset', str(self.root / 'dataset.json'), '--checkpoint', str(missing_checkpoint),
+            '--config', str(config_path), '--output', str(self.root / 'unused-output')],
+            capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('FileNotFoundError', run.stderr)
+        self.assertIn('filesystem operation failed', run.stderr)
+        self.assertNotIn(marker, run.stderr)
 
     def test_completed_sft_checkpoint_provenance_validator_rejects_tampering(self):
         import owned_student
