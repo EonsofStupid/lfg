@@ -153,7 +153,9 @@ def build(plan_path: Path, output: Path) -> dict:
             raise ValueError('source must contain nonempty JSONL records')
         for line in rows:
             row = json.loads(line)
-            if (not isinstance(row, dict) or not RECORD_FIELDS.issubset(row)
+            if (not isinstance(row, dict)
+                    or row.get('schema_version') == 'lfg.user-requested-routing-observation.v1'
+                    or not RECORD_FIELDS.issubset(row)
                     or any(not nonempty(row[field]) for field in ('id', 'request', 'response', 'teacher', 'source_ref'))
                     or not isinstance(row['source_sha256'], str) or len(row['source_sha256']) != 64
                     or any(char not in '0123456789abcdef' for char in row['source_sha256'])
