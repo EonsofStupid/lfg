@@ -142,7 +142,7 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
         {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={ownedSnapshot?.revision === revision ? ownedSnapshot.result : null} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">

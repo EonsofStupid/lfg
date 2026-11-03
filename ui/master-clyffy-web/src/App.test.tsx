@@ -246,3 +246,20 @@ test('shows local traces and applies browser-only tuning', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Use server defaults' }))
   expect(screen.getByRole('slider', { name: 'Browser debounce' })).toHaveValue('10')
 })
+
+test('suggested context uses the actual user-declared subscription state', async () => {
+  render(<App />)
+  enterPrompt()
+  const toggle = await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(toggle)
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'owned-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  await screen.findByText(/Model status: ready/)
+  fireEvent.click(screen.getByRole('button', { name: 'Build suggested context' }))
+  const draft = await screen.findByLabelText('Suggested context draft') as HTMLTextAreaElement
+  expect(draft.value).toContain('["project-seat"]')
+  expect(draft.value).toContain('Unknown: no qualifying')
+  expect(draft.value).not.toContain('gpt-learned')
+  expect(screen.getByLabelText('Optional project context (owner-supplied, unverified)')).toHaveValue('')
+})
