@@ -3,7 +3,7 @@
   "id": "lfg-developer-feedback-v1",
   "status": "ready",
   "objective": "Build an owned-model LFG developer prototype grounded in real user corrections and observed outcomes, with local and hosted paths and future RRFlow/SWAG integration.",
-  "baseline_commit": "03078c1170441a7e6027fd4d15a613db1565fd8a",
+  "baseline_commit": "59d95e2baeabbcdea3e104c3dbd00a2d7489abf0",
   "evidence": [
     {
       "kind": "repository",
@@ -24,6 +24,16 @@
       "kind": "review",
       "location": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
       "claim": "Defines the private local feedback security, record, revision and tests contract."
+    },
+    {
+      "kind": "implementation",
+      "location": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
+      "claim": "The local feedback milestone is implemented; hosted multi-user access and source recovery remain separate work."
+    },
+    {
+      "kind": "private-artifact",
+      "location": "operator-configured private owned checkpoint and framing",
+      "claim": "An experimental Spark checkpoint was exported to ONNX and checked against PyTorch at selected short input lengths; task accuracy and target CPU latency remain unqualified."
     }
   ],
   "constraints": [
@@ -47,7 +57,7 @@
     },
     {
       "path": "crates/lfg-server/src/lib.rs",
-      "sha256": "af6f32739cdc2bfa9316af4d6b3220ba2b8fd4f0448ed1c9a381f9b9c3e7826e",
+      "sha256": "2ea9805d30ca6933eb3a85b4e3e19664f7203676fae1fc88db5d1961160a4ed4",
       "normalization": "text-lf"
     },
     {
@@ -72,7 +82,7 @@
     },
     {
       "path": "crates/lfg-server/src/main.rs",
-      "sha256": "3d56eaa0018ece7e30506376cbb73e1fa12776f8d6659f0afdbec802b8b66152",
+      "sha256": "d8df0ad8543ffd1e6173f2a4030540463254eb48f842505e00bffedb2724e979",
       "normalization": "text-lf"
     },
     {
@@ -82,12 +92,27 @@
     },
     {
       "path": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
-      "sha256": "9c0affb46ca69d1d8041f36fe59d5e5bccb7d0b3811350f026dbffd1abeac2fb",
+      "sha256": "9b261c1df4a76bb6b730afdb491c44f4901c46ff0f0abebf008ddfc6a60e00b0",
       "normalization": "text-lf"
     },
     {
       "path": "docs/lfg/GROUNDED-EXECUTION-PLAN-2026-11-03.md",
       "sha256": "1a4994412a0ffcd3e4f039f7f471eee201a9fc458eb8d6cb5fe5db67534f1ce3",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "crates/lfg-server/src/owned_byte.rs",
+      "sha256": "f2a7db81a82c184bf427559c76b7bdff66cebd30daf80fbb893cbc1317655594",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "crates/lfg-server/src/feedback.rs",
+      "sha256": "c128aa95d823ef63a34a136aa10869a6a409420ea362c6d3d311e888d2a46847",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "ui/master-clyffy-web/src/FeedbackPanel.tsx",
+      "sha256": "86b4b87e806f9aa98cf37dd40fce0249aff284bfaf79e4b546e5a70492db751b",
       "normalization": "text-lf"
     }
   ],
@@ -95,7 +120,7 @@
     {
       "id": "feedback_journal",
       "title": "Persist and review real assessment corrections",
-      "status": "pending",
+      "status": "complete",
       "paths": [
         "Cargo.lock",
         "crates/lfg-server/Cargo.toml",
@@ -147,14 +172,23 @@
         "The complete record and access contract in docs/lfg/FEEDBACK-JOURNAL-DESIGN.md is implemented and tested, including persistence across restart, conflict handling, extensions, rollback, concurrent writes, permission failures, local-only and origin restrictions.",
         "The UI distinguishes recommendations, corrections and confirmed or unknown outcomes and reports unavailable feedback.",
         "No private data or session tokens are logged or committed; raw prompt content is not retained by default."
+      ],
+      "completion_evidence": [
+        "Commit b38a807 implements the private journal and Inspector review UI.",
+        "Windows cargo test --locked -p lfg-server passed 47 library and 7 binary tests; Linux container equivalent passed 43 library and 7 binary tests, plus integration/doc targets.",
+        "UI suite passed 34 tests and production build; embedded Windows server passed real local authentication, create/revise/conflict, restart, paged history, rollback and concurrent-write exercise.",
+        "PR 145 merged into main as 4db6466 with required checks passing."
       ]
     },
     {
       "id": "owned_assessment",
       "title": "Connect and inspect an experimental owned-model assessment",
-      "status": "pending",
+      "status": "complete",
       "paths": [
-        "crates/lfg-server",
+        "Cargo.lock",
+        "crates/lfg-server/Cargo.toml",
+        "crates/lfg-server/src",
+        "crates/lfg-server/config",
         "ui/master-clyffy-web/src",
         "docs/lfg"
       ],
@@ -162,9 +196,11 @@
         "feedback_journal"
       ],
       "steps": [
-        "Inspect existing owned-byte runtime and model artifact contract.",
-        "Add configurable, explicitly selected model backend with bounded input, output and execution time, explicit malformed, truncated, unavailable and timeout states; retain deterministic assessment.",
-        "Show engine identity, checkpoint provenance and results side by side in the developer UI; capture actual failures."
+        "Inspect current owned-byte CLI/runtime, feedback changes, current endpoint and UI, plus the private artifact and verified training framing supplied through operator configuration. Preserve all unrelated tracked and untracked work.",
+        "Implement a configurable experimental owned-assessment service, off by default, using the actual owned artifact and exact configured framing; preserve the existing deterministic endpoint and never silently substitute its results.",
+        "Bound request bytes, model context, generated bytes, concurrent requests and elapsed time; ensure timeout terminates outstanding inference work rather than allowing uncontrolled background CPU. Report unavailable, timeout, malformed, incomplete/truncated and inference errors explicitly.",
+        "Show the selected engine, checkpoint identity, actual result or explicit failure separately from deterministic suggestions in the developer UI. Keep prompts and model outputs private by default and preserve extension fields.",
+        "Add focused runtime/API/UI tests for real limits, cancellation, malformed output and unavailable artifacts. Run one real inference with a locally authorized development request and the verified private checkpoint, keeping private text/output outside Git; report observed result and timing without claiming accuracy."
       ],
       "checks": [
         {
@@ -179,6 +215,18 @@
         },
         {
           "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "lfg-server",
+            "--features",
+            "owned-byte-onnx"
+          ],
+          "expected": "Real optional owned-model runtime and backend tests pass with bounded failure behavior."
+        },
+        {
+          "argv": [
             "npm",
             "--prefix",
             "ui/master-clyffy-web",
@@ -188,8 +236,14 @@
         }
       ],
       "acceptance": [
-        "Run a real owned-model inference and record its actual output and artifact hash, or document the concrete operational blocker.",
-        "No synthetic output is represented as model output; deterministic behavior remains selectable."
+        "A real owned-model inference runs through the service/UI path with verified private artifact identity and exact configured training framing, or a concrete operational blocker is recorded.",
+        "The deterministic path remains available; model failures, truncation and timeouts are explicit and never treated as verified assessment facts.",
+        "Limits and settings are configurable, no raw prompts or generated responses are logged by default, and tests demonstrate process cancellation and bounded concurrency."
+      ],
+      "completion_evidence": [
+        "Release-mode real checkpoint API smoke test on an actual owner request returned truncated after 8 generated bytes in 3.926 seconds; no accuracy was established.",
+        "The longer 512-byte native trial took 423.594 seconds and returned invalid JSON; it is not performance or quality qualified.",
+        "The optional-feature and normal backend tests, the process EOF/cancellation regressions, and 44 UI tests passed; production UI and embedded release executable built."
       ]
     },
     {
@@ -342,7 +396,7 @@
       ]
     }
   ],
-  "next_task": "feedback_journal",
+  "next_task": "real_supervision",
   "escalation_triggers": [
     "Relevant source anchor changed or Git baseline is no longer an ancestor.",
     "Scope conflicts with current user direction or a later instruction.",
