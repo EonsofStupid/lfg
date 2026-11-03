@@ -9,6 +9,21 @@ import subprocess
 import time
 
 
+class ApiFailure(Exception):
+    """Sanitized API failure metadata; never retains provider error text."""
+
+    def __init__(self, *, status: int | None = None, kind: str = 'gh-cli') -> None:
+        self.status = status
+        self.kind = kind
+        super().__init__(self.label)
+
+    @property
+    def label(self) -> str:
+        if self.status is not None:
+            return f'HTTP {self.status}' + (' rate-limit' if self.kind == 'rate-limit' else '')
+        return self.kind
+
+
 def matching_run(runs: list[dict], pr: int, head: str, base: str) -> dict | None:
     candidates = []
     for run in runs:
@@ -39,8 +54,18 @@ def still_eligible(pr: dict, repository: str, head: str, base: str) -> bool:
 
 
 def api(endpoint: str) -> dict:
-    result = subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True, check=True, timeout=30)
-    return json.loads(result.stdout)
+    result = subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True, check=False, timeout=30)
+    if result.returncode != 0:
+        diagnostic = (result.stderr or '') + '\n' + (result.stdout or '')
+        match = re.search(r'\bHTTP\s+([1-5][0-9]{2})\b', diagnostic, re.IGNORECASE)
+        status = int(match.group(1)) if match else None
+        kind = ('rate-limit' if status == 403 and 'rate limit' in diagnostic.lower()
+                else 'http' if status is not None else 'gh-cli')
+        raise ApiFailure(status=status, kind=kind)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ApiFailure(kind='invalid-json') from error
 
 
 def main() -> None:
@@ -62,6 +87,8 @@ def main() -> None:
     deadline = time.monotonic() + args.timeout_seconds
     endpoint = (f'repos/{args.repository}/actions/workflows/ci.yml/runs'
                 f'?event=pull_request&head_sha={args.head}&per_page=100')
+    last_permanent_failure = None
+    repeated_permanent_failures = 0
     while time.monotonic() < deadline:
         try:
             pr = api(f'repos/{args.repository}/pulls/{args.pull_request}')
@@ -82,8 +109,28 @@ def main() -> None:
                     raise SystemExit('matching CI run is missing a successful required job')
                 print(f"matching CI run {run['id']} attempt {attempt} passed all required jobs")
                 return
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError, KeyError):
-            print('CI status unavailable; retrying', flush=True)
+        except ApiFailure as error:
+            if error.status in (403, 404) and error.kind != 'rate-limit':
+                failure = (error.status, error.kind)
+                if failure == last_permanent_failure:
+                    repeated_permanent_failures += 1
+                else:
+                    last_permanent_failure = failure
+                    repeated_permanent_failures = 1
+                if repeated_permanent_failures >= 3:
+                    raise SystemExit(
+                        f'GitHub API repeatedly returned HTTP {error.status}; verify repository access, '
+                        'workflow visibility, and the requested PR before retrying the exact check')
+                print(f'CI status unavailable ({error.label}; retry {repeated_permanent_failures}/3)', flush=True)
+            else:
+                last_permanent_failure = None
+                repeated_permanent_failures = 0
+                print(f'CI status unavailable ({error.label}); retrying', flush=True)
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, KeyError) as error:
+            last_permanent_failure = None
+            repeated_permanent_failures = 0
+            label = 'timeout' if isinstance(error, subprocess.TimeoutExpired) else type(error).__name__
+            print(f'CI status unavailable ({label}); retrying', flush=True)
         time.sleep(min(args.poll_seconds, max(0, deadline - time.monotonic())))
     raise SystemExit('timed out waiting for a matching successful CI run')
 
