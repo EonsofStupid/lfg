@@ -172,7 +172,7 @@ class UserRequestSFTTests(unittest.TestCase):
             'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
             'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
             'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
-            'user_text_sha256_claim': '3' * 64,
+            'user_text_sha256_claim': hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
         }
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
         self._build()
@@ -191,6 +191,16 @@ class UserRequestSFTTests(unittest.TestCase):
         records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', train_config)
         self.assertEqual(coverage['training_task'], user_request_sft.TASK)
         self.assertEqual(len(records), 1)
+        forged = json.loads((self.root / 'dataset.json').read_bytes())
+        forged_claim = 'f' * 64
+        forged['manifest']['windows_origin_claims']['user_text_sha256_claim'] = forged_claim
+        forged['train_records'][0]['metadata']['windows_origin_claims']['user_text_sha256_claim'] = forged_claim
+        forged['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(row) for row in forged['train_records'])).hexdigest()
+        forged_path = self.root / 'forged-projection-dataset.json'
+        forged_path.write_text(json.dumps(forged), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'screened POSIX projection provenance'):
+            trainer.read_training(forged_path, train_config)
 
     def test_projection_claims_malformed_or_screened_content_changed_rejected(self):
         caller = json.loads(self.caller_input_path.read_bytes())
@@ -204,6 +214,12 @@ class UserRequestSFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unverified Windows-origin'):
             self._build()
         caller['windows_origin_projection_claims']['origin_verification'] = 'unverified_claim'
+        caller['windows_origin_projection_claims']['user_text_sha256_claim'] = 'f' * 64
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'does not match the verified POSIX projection'):
+            self._build()
+        caller['windows_origin_projection_claims']['user_text_sha256_claim'] = (
+            hashlib.sha256(self.text.encode('utf-8')).hexdigest())
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
         altered_policy = json.loads(self.policy.read_bytes())
         altered_policy['rules'] = [{'id': 'fixture-model', 'pattern': 'Model Z', 'replacement': '[redacted]'}]

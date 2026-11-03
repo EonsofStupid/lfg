@@ -267,7 +267,8 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                 or claims.get('origin_platform') != 'windows'
                 or claims.get('origin_verification') != 'unverified_claim'
                 or any(not isinstance(claims.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', claims[key])
-                       for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))):
+                       for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))
+                or claims.get('user_text_sha256_claim') != manifest.get('projection_sha256')):
             raise ValueError('invalid screened POSIX projection provenance')
     elif manifest.get('source_representation') != 'verified_posix_source':
         raise ValueError('unknown user-request source representation')
@@ -331,7 +332,9 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             if (metadata.get('projection_sha256') != manifest['projection_sha256']
                     or metadata.get('byte_exact_to_screened') is not True
                     or metadata.get('windows_origin_claims') != manifest['windows_origin_claims']
-                    or metadata.get('projection_sha256') != metadata.get('user_text_sha256')):
+                    or metadata.get('projection_sha256') != metadata.get('user_text_sha256')
+                    or metadata['windows_origin_claims']['user_text_sha256_claim']
+                       != metadata.get('projection_sha256')):
                 raise ValueError('record projection evidence differs from the manifest')
         system, user, assistant = (message['content'] for message in messages)
         if (sha(system.encode('utf-8')) != manifest['system_prompt_sha256']

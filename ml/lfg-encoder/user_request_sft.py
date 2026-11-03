@@ -264,6 +264,8 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
                 or source_record.get('source_prefix_bytes') != projection_stat.st_size
                 or screened_request != raw_request):
             raise ValueError('Windows-origin projection must be a complete, already-screened single-message POSIX file')
+        if windows_origin_claims['user_text_sha256_claim'] != _sha(request_bytes):
+            raise ValueError('claimed Windows user-text digest does not match the verified POSIX projection')
     baseline, baseline_rules, _ = screen_private_corpus.load_policy(
         source_bound_snapshot._default_screen_policy_path(), min(config['max_config_bytes'], 1024 * 1024))
     policy, policy_rules, loaded_policy_sha = screen_private_corpus.load_policy(
