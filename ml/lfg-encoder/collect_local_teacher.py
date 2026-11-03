@@ -61,6 +61,16 @@ def config_file(path: Path) -> tuple[dict, bytes]:
     if (url.scheme != 'http' or not local or port is None or url.username is not None or url.password is not None
             or url.path != '/v1/chat/completions' or url.query or url.fragment):
         raise ValueError('teacher endpoint must be a loopback chat-completions URL')
+    extensions = value.get('request_extensions', {})
+    if (not isinstance(extensions, dict) or any(not isinstance(k, str) or not k for k in extensions)
+            or set(extensions) & {'model', 'messages', 'max_tokens', 'temperature', 'response_format', 'stream'}):
+        raise ValueError('invalid or reserved teacher request extension')
+    if value.get('on_incomplete', 'fail') not in ('fail', 'skip'):
+        raise ValueError('invalid incomplete-response policy')
+    try:
+        json.dumps(extensions, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError('teacher request extensions must be JSON values') from None
     return value, raw
 
 
@@ -81,6 +91,7 @@ def ask(config: dict, text: str, key: str) -> str:
                'temperature': config['temperature']}
     if config['json_mode']:
         payload['response_format'] = {'type': 'json_object'}
+    payload.update(config.get('request_extensions', {}))
     request = urllib.request.Request(config['endpoint'], data=encoded(payload), method='POST',
                                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -175,27 +186,55 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
         records_dir = output / 'records'
         if not records_dir.is_dir() or records_dir.is_symlink():
             raise ValueError('invalid record directory')
-        traces = []
+        failure_dir = output / 'failures'
+        if config.get('on_incomplete', 'fail') == 'skip':
+            failure_dir.mkdir(mode=0o700, exist_ok=True)
+            if failure_dir.is_symlink() or not failure_dir.is_dir():
+                raise ValueError('invalid failure directory')
+        traces, failures = [], []
         for index, row in enumerate(rows):
             record_path = records_dir / f'{index:06d}.json'
+            failure_path = failure_dir / f'{index:06d}.json'
             if record_path.is_symlink():
                 raise ValueError('record must not be a symbolic link')
+            if failure_path.is_symlink() or (record_path.exists() and failure_path.exists()):
+                raise ValueError('ambiguous or symbolic failure record')
+            failed = {'schema_version': 'lfg.local-teacher-failure.v1', 'id': row['id'],
+                      'request_sha256': row['screened_text_sha256'], 'reason': 'incomplete_or_invalid_response'}
+            if failure_path.exists():
+                if config.get('on_incomplete', 'fail') != 'skip' or screen._read(
+                        failure_path, config['max_manifest_bytes'], 'failure_unavailable') != encoded(failed):
+                    raise ValueError('failure record does not match request')
+                failures.append(failed)
+                continue
             if record_path.exists():
                 envelope = screen._json(screen._read(record_path, config['max_http_response_bytes'], 'record_unavailable'), 'invalid_record')
                 trace = envelope.get('trace') if isinstance(envelope, dict) else None
                 if not isinstance(trace, dict) or envelope.get('trace_sha256') != sha(encoded(trace)):
                     raise ValueError('record digest mismatch')
             else:
-                response = ask(config, row['text'], key)
-                parsed = screen._json(response.encode(), 'invalid_assessment_json')
-                if not isinstance(parsed, dict) or any(field not in parsed for field in config['required_fields']):
-                    raise ValueError('teacher response lacks required fields')
-                parsed = clean_response(parsed, rules, policy['limits'])
-                if any(field not in parsed for field in config['required_fields']):
-                    raise ValueError('screening removed a required assessment field')
-                clean = encoded(parsed).decode().rstrip('\n')
-                if len(clean.encode()) > config['max_response_bytes']:
-                    raise ValueError('screened teacher assessment exceeds configured limit')
+                try:
+                    response = ask(config, row['text'], key)
+                    parsed = screen._json(response.encode(), 'invalid_assessment_json')
+                    if not isinstance(parsed, dict) or any(field not in parsed for field in config['required_fields']):
+                        raise ValueError('teacher response lacks required fields')
+                    parsed = clean_response(parsed, rules, policy['limits'])
+                    if any(field not in parsed for field in config['required_fields']):
+                        raise ValueError('screening removed a required assessment field')
+                    clean = encoded(parsed).decode().rstrip('\n')
+                    if len(clean.encode()) > config['max_response_bytes']:
+                        raise ValueError('screened teacher assessment exceeds configured limit')
+                except TeacherHTTPError:
+                    raise
+                except ValueError:
+                    if config.get('on_incomplete', 'fail') != 'skip':
+                        raise
+                    fd, temporary = tempfile.mkstemp(prefix='.writing-', dir=failure_dir)
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(encoded(failed)); stream.flush(); os.fsync(stream.fileno())
+                    os.replace(temporary, failure_path)
+                    failures.append(failed)
+                    continue
                 trace = {'id': row['id'], 'request': row['text'], 'response': clean,
                          'teacher': config['teacher_identity'], 'review_status': 'unreviewed', 'outcome': 'unknown',
                          'source_ref': row['id'], 'source_sha256': row['source_text_sha256_claim']}
@@ -244,6 +283,8 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                           'split': 'train', 'origin': config['source_origin'], 'records': len(items)})
         report = {**identity, 'schema_version': 'lfg.local-teacher-collection-result.v1', 'files': files,
                   'requests': len(traces), 'projects': dict(sorted(Counter(row['project'] for row, _ in traces).items())),
+                  'requested_requests': len(rows), 'failed_requests': len(failures),
+                  'failure_records_sha256': sha(b''.join(encoded(item) for item in failures)),
                   'teacher_identity': config['teacher_identity'], 'review_status': 'unreviewed', 'outcome': 'unknown',
                   'teacher_identity_verified': False, 'redaction_complete': False, 'validation_opened': False,
                   'test_opened': False, 'assessment_quality_evaluated': False, 'promotion_eligible': False}
@@ -264,7 +305,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     try:
         result = collect(args.selection, args.config, args.policy, args.output, resume=args.resume)
-        print(json.dumps({k: result[k] for k in ('requests', 'projects', 'review_status', 'outcome', 'test_opened')}))
+        print(json.dumps({k: result[k] for k in ('requested_requests', 'requests', 'failed_requests',
+                                                 'projects', 'review_status', 'outcome', 'test_opened')}))
     except TeacherHTTPError as error:
         raise SystemExit(f'Local teacher returned HTTP {error.status}; see service diagnostics') from None
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:

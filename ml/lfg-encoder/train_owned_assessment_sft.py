@@ -241,7 +241,7 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     if resume is not None:
         progress = checkpoints.restore(resume, resume_state_sha256, model, optimizer, rng, identity, config)
         initial_step, losses, supervised = progress['step'], progress['losses'], progress['supervised_tokens']
-        if initial_step >= config['steps']:
+        if initial_step > config['steps']:
             raise ValueError('checkpoint already reached the requested total steps')
     end_step = min(config['steps'], initial_step + max_steps_this_run) if max_steps_this_run else config['steps']
     output.mkdir(mode=0o700)

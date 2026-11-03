@@ -1,10 +1,12 @@
 import importlib.util
 import json
 import os
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 import urllib.error
+import unicodedata
 from unittest.mock import patch
 
 import assessment_distill
@@ -69,6 +71,45 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         (self.dataset / 'train.jsonl').write_bytes(self.train_raw + b' ')
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             selection.select(self.dataset, self.policy, self.selection_config, self.root / 'bad')
+
+    def test_selection_can_exclude_requests_collected_in_an_earlier_batch(self):
+        config = json.loads(self.selection_config.read_text())
+        config['exclude_ids'] = ['id-0', 'id-1']
+        self.selection_config.write_text(json.dumps(config))
+        result = selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.assertEqual(result['requests'], 1)
+        selected = [json.loads(line) for line in (self.selected / 'requests.jsonl').read_text().splitlines()]
+        self.assertNotIn(selected[0]['id'], config['exclude_ids'])
+
+    def test_split_preserves_and_revalidates_completed_records(self):
+        import split_teacher_collection
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        response = '{"intent":"x","complexity":"unknown"}'
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}):
+            with patch.object(collector, 'ask', side_effect=[response, ValueError('incomplete')]):
+                with self.assertRaises(ValueError):
+                    collector.collect(self.selected, self.collection_config, self.policy, self.output)
+            dest = self.root / 'split'
+            report = split_teacher_collection.split(self.selected, self.collection_config, self.policy, self.output, dest)
+            self.assertEqual(report['completed_prefix'], 1)
+            self.assertEqual(report['remaining'], 0)
+            with patch.object(collector, 'ask', side_effect=AssertionError('must reuse saved record')):
+                result = collector.collect(dest / 'prefix-selection', self.collection_config, self.policy,
+                                           dest / 'prefix-output', resume=True)
+            self.assertEqual(result['requests'], 1)
+            self.assertFalse(result['promotion_eligible'])
+
+    def test_selection_excludes_normalized_text_from_prior_batches(self):
+        config = json.loads(self.selection_config.read_text())
+        row = json.loads(self.train_raw.splitlines()[0])
+        policy, rules, _ = selection.screen.load_policy(self.policy, 65536)
+        screened, _ = selection.screen._screen(row['text'], rules, policy['limits'])
+        normalized = ' '.join(unicodedata.normalize('NFKC', screened).casefold().split())
+        config['exclude_normalized_sha256'] = [hashlib.sha256(normalized.encode()).hexdigest()]
+        self.selection_config.write_text(json.dumps(config))
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        selected = [json.loads(line) for line in (self.selected / 'requests.jsonl').read_text().splitlines()]
+        self.assertNotIn(row['id'], [item['id'] for item in selected])
 
     def test_interruption_resumes_and_outputs_preparable_unreviewed_traces(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
@@ -139,6 +180,49 @@ class LocalTeacherCollectionTests(unittest.TestCase):
                 collector.ask(self.config, 'request', 'key')
             self.assertEqual(caught.exception.status, 500)
             self.assertNotIn('private details', str(caught.exception))
+
+    def test_request_extensions_reach_teacher_and_cannot_override_inputs(self):
+        self.config['request_extensions'] = {'chat_template_kwargs': {'enable_thinking': False}}
+        self.collection_config.write_text(json.dumps(self.config))
+        config, _ = collector.config_file(self.collection_config)
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, limit):
+                return selection.encoded({'model': 'fixture-model', 'choices': [{'finish_reason': 'stop',
+                    'message': {'content': '{"intent":"x","complexity":"unknown"}'}}]})
+        with patch('urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = Response()
+            collector.ask(config, 'request', 'key')
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(json.loads(request.data)['chat_template_kwargs'], {'enable_thinking': False})
+        self.config['request_extensions'] = {'messages': []}
+        self.collection_config.write_text(json.dumps(self.config))
+        with self.assertRaisesRegex(ValueError, 'reserved'):
+            collector.config_file(self.collection_config)
+
+    def test_skip_policy_records_bad_response_and_resumes_valid_ones(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.config['on_incomplete'] = 'skip'
+        self.collection_config.write_text(json.dumps(self.config))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}):
+            with patch.object(collector, 'ask', side_effect=[ValueError('incomplete'), '{"intent":"x","complexity":"unknown"}']):
+                result = collector.collect(self.selected, self.collection_config, self.policy, self.output)
+            self.assertEqual(result['requested_requests'], 2)
+            self.assertEqual(result['failed_requests'], 1)
+            self.assertEqual(result['requests'], 1)
+            self.assertTrue((self.output / 'failures' / '000000.json').is_file())
+            with patch.object(collector, 'ask', side_effect=AssertionError('must reuse outcomes')):
+                self.assertEqual(collector.collect(self.selected, self.collection_config, self.policy, self.output, resume=True), result)
+
+    def test_skip_policy_does_not_hide_server_errors(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.config['on_incomplete'] = 'skip'
+        self.collection_config.write_text(json.dumps(self.config))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=collector.TeacherHTTPError(503)):
+            with self.assertRaises(collector.TeacherHTTPError):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output)
 
 
 if __name__ == '__main__':

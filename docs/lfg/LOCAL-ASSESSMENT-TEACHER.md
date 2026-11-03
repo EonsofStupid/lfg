@@ -37,6 +37,22 @@ not establish that a teacher's recommendation is optimal or a task succeeded.
 Extra response and configuration fields are accepted; required fields must be
 present after screening. Completed traces are not an independent evaluation.
 
+Optional `request_extensions` are passed to the local chat endpoint, for
+example to configure the selected model's chat-template reasoning mode. The
+collector rejects extensions that would override its model, messages, token
+limit, temperature, response format or streaming behavior. Extensions and
+their values are part of the immutable collection configuration and therefore
+part of the recorded run identity.
+
+The optional `on_incomplete` policy defaults to `fail`. When explicitly set to
+`skip`, an incomplete or invalid individual response is recorded as a failure
+and the collector continues; the final manifest reports requested, successful,
+and failed counts. HTTP server errors still fail the job for supervision to
+retry. Failed records contain an identifier and digest, not a fabricated label.
+For subsequent batches the selector can exclude prior request IDs and
+SHA-256 digests of normalized, rescreened request text. Exact normalized
+deduplication does not prove semantic or conversation independence.
+
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `
   --policy PRIVATE_SCREEN_POLICY.json --config PRIVATE_SELECTION_CONFIG.json `
