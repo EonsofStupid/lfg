@@ -1,0 +1,17 @@
+[Unit]
+Description=LFG private teacher dataset receiver
+After=network.target
+
+[Service]
+Type=exec
+ExecStart=/PATH/TO/PYTHON /PATH/TO/teacher_dataset_receiver_server.py --inbox /PATH/TO/PRIVATE_INBOX --token-file /PATH/TO/PRIVATE_TOKEN --max-payload-bytes 33554432 --max-dataset-bytes 16777216 --timeout-seconds 30 --port 18784
+Restart=on-failure
+RestartSec=10
+CPUQuota=100%
+MemoryMax=512M
+TasksMax=32
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

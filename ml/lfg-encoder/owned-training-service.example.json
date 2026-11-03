@@ -13,5 +13,6 @@
   "teacher_revision": "REPLACE_WITH_PINNED_REVISION",
   "state_dir": "/PATH/TO/NEW_PRIVATE_STATE_DIRECTORY",
   "segment_steps": 250,
-  "status_poll_seconds": 30
+  "status_poll_seconds": 30,
+  "max_checkpoint_state_bytes": 67108864
 }

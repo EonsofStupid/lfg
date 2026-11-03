@@ -47,6 +47,27 @@ class DashboardStatusTests(unittest.TestCase):
             self.assertEqual(result, {'state': 'complete', 'required_fields_present': 1, 'total': 10})
             self.assertNotIn('private', json.dumps(result))
 
+    def test_queue_summary_exposes_only_aggregate_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'queue.json'
+            self.assertEqual(dashboard.queue_status(path)['state'], 'pending')
+            path.write_text(json.dumps({'schema_version': 'lfg.owned-dataset-queue-status.v1',
+                'state': 'training', 'records': 42, 'completed_updates': 2, 'private_path': '/not/exposed'}))
+            self.assertEqual(dashboard.queue_status(path), {'state': 'training', 'records': 42, 'completed_updates': 2,
+                                                            'step': 0, 'total_steps': 0})
+
+    def test_latest_update_evaluation_replaces_prior_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, latest = Path(directory) / 'first.json', Path(directory) / 'latest.json'
+            first.write_text(json.dumps({'schema_version': 'lfg.owned-torch-format-evaluation.v1',
+                                         'format_counts': {'invalid_json': 9, 'required_fields_present': 1}}))
+            self.assertEqual(dashboard.current_evaluation(first, latest)['required_fields_present'], 1)
+            latest.write_text(json.dumps({'schema_version': 'lfg.owned-update-evaluator-status.v1',
+                                          'state': 'complete', 'required_fields_present': 3, 'total': 10,
+                                          'private_path': '/not/exposed'}))
+            result = dashboard.current_evaluation(first, latest)
+            self.assertEqual(result, {'state': 'complete', 'required_fields_present': 3, 'total': 10})
+
 
 if __name__ == '__main__':
     unittest.main()

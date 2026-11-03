@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import random
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -135,6 +136,23 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
                                     resume=Path(partial['latest_checkpoint']),
                                     resume_state_sha256=partial['latest_checkpoint_state_sha256'])
         self.assertFalse((self.root / 'bad').exists())
+
+    @unittest.skipUnless(importlib.util.find_spec('fcntl'), 'Linux supervisor lock required')
+    def test_supervisor_runs_segmented_training_and_exits_idempotently(self):
+        script = Path(self.subject.__file__).with_name('owned_training_service.py')
+        state = self.root / 'service-state'
+        service = {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+            'python': sys.executable, 'trainer': str(Path(self.subject.__file__).resolve()), 'state_dir': str(state),
+            'dataset': str(self.dataset), 'checkpoint': str(self.checkpoint), 'sft_config': str(self.config_path),
+            'segment_steps': 1, 'status_poll_seconds': 1}
+        path = self.root / 'service.json'; path.write_text(json.dumps(service))
+        command = [sys.executable, str(script), '--config', str(path), '--exit-on-complete']
+        subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
+        result = json.loads((state / 'complete.json').read_text())
+        self.assertEqual(result['completed_steps'], 3)
+        self.assertEqual(len(list((state / 'segments').iterdir())), 3)
+        subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
+        self.assertEqual(len(list((state / 'segments').iterdir())), 3)
 
     def test_final_checkpoint_can_publish_after_interruption(self):
         output = self.root / 'full'

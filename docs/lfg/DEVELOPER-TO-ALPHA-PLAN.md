@@ -304,6 +304,49 @@ conformance and access-boundary tests.
   controls, provenance and isolation, held-out evaluation, reversible activation
   and removal. Do not assume adapter merging preserves quality or privacy.
 
+## Spark execution status and next decisions (2026-11-02)
+
+The Spark is accessible as `clyffy-03`. An owned 19,264,512-parameter
+byte model completed 100,000 pretraining steps on the screened owner corpus;
+its 349-proposal assessment fine-tune also completed. The lab publisher
+delivered a 369-proposal superset and its subsequent fine-tune also completed. The
+persistent services, dataset boundaries, evaluation and dashboard are
+described in [the training service](CONTINUOUS-TRAINING-SERVICE.md) and
+[the continual handoff](CONTINUAL-DATA-HANDOFF.md). All proposals have unknown
+outcomes and are unreviewed; this is exploratory training, not a qualified
+model. The first 10-request development-format check yielded two JSON
+objects with required fields and eight invalid responses; it did not test
+recommendation accuracy. The subsequent 369-proposal update returned required
+fields in four of the same ten development responses, with five invalid JSON
+and one missing fields. This small reused set does not establish quality or
+generalization. The ~650 MB owned model and self-contained runtime remain
+future work.
+
+The next execution sequence is:
+
+1. Investigate both assessment runs' development-format failures. Investigate service failures
+   and preserve checkpoint and dataset lineage; do not treat JSON formatting
+   as recommendation accuracy.
+2. Expand authorized train sources with provenance and secret screening;
+   capture actual results and reviewer corrections. Select untouched project or
+   conversation families for a blind final test before using them for model
+   selection. Distinguish verified outcomes from teacher suggestions.
+3. Evaluate intent, complexity, model and effort recommendations, and agent
+   counts against reviewed cases and the deterministic baseline. Report
+   missing labels, uncertainty, slices and failures; training may continue
+   regardless of evaluation outcome.
+4. Size and train candidate owned architectures using measured Spark
+   throughput and quality, then package the runtime, model and developer UI
+   as a reproducible local build. Benchmark cold/warm CPU latency, memory,
+   throughput and failure behavior on intended user hardware.
+5. Exercise the versioned RRFlow and SWAG boundaries with real configured
+   services, and add authenticated hosted operation and signed, reversible
+   model updates. Keep standalone operation available.
+
+The publisher only processes configured, completed collections; it does not
+automatically discover new projects or create reviewed outcomes. Expanding
+collection and review is required for sustained new learning.
+
 ## Immediate work queue
 
 1. **Reconcile the assessment prototype:** preserve the live worktree; apply
@@ -334,7 +377,7 @@ fixtures, an empty test set, a merged branch or a successful build.
 
 | Input | Why it matters | Work that can continue meanwhile |
 | --- | --- | --- |
-| Authorized Spark hostname/SSH identity and usable software environment | The last attempted identity was denied; access and hardware availability determine which runs can actually be scheduled. | Reconcile the preview, prepare local data and evaluate the existing local GPU without bypassing access policy. |
+| Spark workload and resource budgets | `clyffy-03` is accessible and running training; resource budgets and coexistence with other workloads still need measurement. | Continue bounded training and log throughput, memory, and recovery behavior. |
 | Project/conversation groups reserved for final testing | Independence must be chosen before tuning, teacher generation or using those cases for selection. | Inventory source families, redact and conduct train-only exploratory work on other authorized data. |
 | Additional general-language data and teacher route | The current request inventory does not establish enough language coverage to initialize an owned generative student; hosted routes also need permitted disclosure and applicable terms. | Build the tokenizer, student/trainer and local source/teacher interfaces; measure a small local pilot. |
 | Target devices, concurrency, quality and resource budgets | Size, speed and quality trade-offs cannot be qualified without declared workloads and acceptance values. | Measure the existing deterministic baseline and collect candidate requirements; avoid presenting guesses as targets already met. |

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically publish completed private LFG teacher collections
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Unit=teacher-dataset-publisher.service
+
+[Install]
+WantedBy=timers.target
