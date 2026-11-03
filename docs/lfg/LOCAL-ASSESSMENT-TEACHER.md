@@ -77,14 +77,51 @@ remain compatible but are explicitly unlinked.
 Context-file and trace extension fields are retained as metadata and do not
 change rendering or routing behavior.
 
-This is an opaque context transport contract. The digest proves byte identity
-only; it does not validate source provenance, freshness, completeness,
-authorization, or truth. Callers must assemble context from permitted sources,
-retain provenance separately, and keep held-out evaluation material out. This
-option does not infer model availability, subscription entitlements, project
-success, or outcome labels, and does not establish a subscription-aware
-validated training path. Context files, selections, traces, and resulting
-weights must remain local and outside Git.
+Legacy `--project-context` remains an opaque transport contract: its digest
+proves byte identity only. The optional source-bound path adds a separately
+verified snapshot and collector preflight for one exact Codex user message and
+the current provider-tool cache. It verifies the selected source line and byte
+prefix, preserves the source's original whole-file digest claim separately
+from the current unknown whole-file digest, and binds the screened request,
+provider context, selection manifest, and staged copy with SHA-256 identities.
+Append-only session-log growth after the selected line is allowed; a changed
+prefix or selected line fails validation.
+
+Source-bound snapshots preserve current listed model metadata as provider
+claims. A provider listing does not establish entitlement; subscription
+entitlement and historical session effort remain `unknown`. Unrecognized cache
+extensions are retained only in the private origin snapshot and are not sent
+to the teacher. The staged projection carries the original cache digest and
+selected provider fields, omits raw source paths and provider extension
+payloads, and records that it is a copy of an origin-verified snapshot.
+Windows files are written only after their ACL is replaced and verified for
+the current user, SYSTEM, and Administrators; an ACL failure leaves no output.
+
+When no separately verified reserved final-test group exists, the caller can
+explicitly use `exploratory_train`. This is an exploratory collection assignment
+with `heldout_separation: unknown`; it does not claim an independent holdout or
+blinded evaluation. Known reserved project candidates are rejected before the
+selected session is opened, and no test or validation source is opened. The
+Makers Impulse candidate external-project group remains excluded from this
+selection. A separate, independently reserved evaluation group is still needed
+before any quality claim or promotion.
+
+The collector's `--source-bound-snapshot` and `--source-bound-bundle` options
+recheck the staged snapshot, request, context, bundle, and screening-policy
+digests after train-row preflight, immediately before collection, and before
+finalizing the run. Traces retain the snapshot and bundle digests with the
+context provenance. The originating Windows session is verified before
+materialization; the staged projection is not a live lock on that source, so
+the trace describes the verified copy, not an immutable source file. Screening
+is still a claim, not proof that all secrets are absent. Teacher outputs remain
+unreviewed proposals with unknown outcomes. No subscription, project success,
+optimality, or evaluation result is inferred.
+
+Context files, selections, snapshots, traces, and resulting weights must remain
+private and outside Git. The current request-plus-context byte estimate is
+close to the checkpoint context limit; do not train or claim a fitting SFT
+example until the actual framed bytes/tokens and response are measured without
+truncation.
 
 The optional `on_incomplete` policy defaults to `fail`. When explicitly set to
 `skip`, an incomplete or invalid individual response is recorded as a failure
