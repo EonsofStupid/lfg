@@ -59,16 +59,30 @@ test('an explicitly selected owned output keeps its provenance, extensions and f
   expect(saved.outcome).toEqual({ status: 'unknown' })
 })
 
+test('copies only the server context digest into explicit owned feedback', async () => {
+  const digest = 'c'.repeat(64)
+  const state = await feedbackFromAssessment(assessment, 'private prompt text')
+  const saved = feedbackFromOwned(state, {
+    status: 'ok', elapsedMs: 2, engine: { id: 'owned-test' }, projectContextSha256: digest,
+    output: { intent: 'research' }, outputText: 'Proposal mentions private project context text.',
+  })
+  expect(saved.provenance.projectContextSha256).toBe(digest)
+  expect(JSON.stringify(saved.provenance)).not.toContain('private prompt text')
+  expect(JSON.stringify(saved.provenance)).not.toContain('project context text')
+  expect(saved.originalRecommendation.rawOutput).toContain('private project context text')
+})
+
 test('saves owned model output only after the user selects it', async () => {
   const api = makeClient()
-  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash' }, elapsedMs: 5, outputText: 'partial model output' }
+  const contextDigest = 'd'.repeat(64)
+  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash' }, elapsedMs: 5, outputText: 'partial model output', projectContextSha256: contextDigest }
   render(<FeedbackPanel prompt="private prompt text" assessment={assessment} ownedResult={owned} client={api} />)
   await connect()
   fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
   expect(screen.getByText(/actual output, including any partial text/)).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
   await screen.findByText('Assessment saved for review.')
-  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ provenance: expect.objectContaining({ engineId: 'owned-test', modelDigest: 'model-hash' }), originalRecommendation: expect.objectContaining({ generationStatus: 'truncated', rawOutput: 'partial model output' }) }), 'token')
+  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ provenance: expect.objectContaining({ engineId: 'owned-test', modelDigest: 'model-hash', projectContextSha256: contextDigest }), originalRecommendation: expect.objectContaining({ generationStatus: 'truncated', rawOutput: 'partial model output' }) }), 'token')
 })
 
 test('can save an owned result when the rules assessment is unavailable', async () => {
@@ -84,12 +98,15 @@ test('can save an owned result when the rules assessment is unavailable', async 
 
 test('reopening owned feedback preserves its framing and training lineage', async () => {
   const api = makeClient()
-  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash', trainingManifestSha256: 'training-hash', framingSha256: 'frame-hash', runtimeConfigSha256: 'runtime-hash', serviceConfigSha256: 'service-hash' }, elapsedMs: 5, outputText: 'partial' }
+  const contextDigest = 'e'.repeat(64)
+  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash', trainingManifestSha256: 'training-hash', framingSha256: 'frame-hash', runtimeConfigSha256: 'runtime-hash', serviceConfigSha256: 'service-hash' }, elapsedMs: 5, outputText: 'partial', projectContextSha256: contextDigest }
   const view = render(<FeedbackPanel prompt="private prompt text" assessment={assessment} ownedResult={owned} client={api} />)
   await connect()
   fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
   await screen.findByText('Assessment saved for review.')
+  fireEvent.click(screen.getByRole('button', { name: 'Save review' }))
+  await screen.findByText('Review saved as a new revision.')
   view.unmount()
   render(<FeedbackPanel prompt="private prompt text" assessment={assessment} client={api} />)
   await connect()
@@ -98,6 +115,7 @@ test('reopening owned feedback preserves its framing and training lineage', asyn
   fireEvent.click(await screen.findByText('View provenance'))
   expect(screen.getByText(/Training manifest: training-hash/)).toHaveTextContent('Framing: frame-hash')
   expect(screen.getByText(/Training manifest: training-hash/)).toHaveTextContent('Runtime config: runtime-hash')
+  expect(screen.getByText(/Project context digest:/)).toHaveTextContent(contextDigest)
 })
 
 test('creates, reviews, reopens and restores feedback as separate revisions', async () => {

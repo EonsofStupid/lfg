@@ -55,6 +55,8 @@ export function feedbackFromOwned(state: FeedbackState, result: OwnedResult): Fe
       ...(result.engine?.framingSha256 ? { framingSha256: result.engine.framingSha256 } : {}),
       ...(result.engine?.runtimeConfigSha256 ? { runtimeConfigSha256: result.engine.runtimeConfigSha256 } : {}),
       ...(result.engine?.serviceConfigSha256 ? { serviceConfigSha256: result.engine.serviceConfigSha256 } : {}),
+      ...(typeof result.projectContextSha256 === 'string' && /^[0-9a-f]{64}$/.test(result.projectContextSha256)
+        ? { projectContextSha256: result.projectContextSha256 } : {}),
     },
     originalRecommendation: {
       intent: output.intent ?? null, complexity: output.complexity ?? null,
@@ -169,7 +171,7 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient, own
 
   return <section className="dev-panel feedback-panel" aria-label="Assessment feedback">
     <div className="dev-heading"><div><p className="eyebrow">LOCAL SUPERVISION</p><h2>Review an assessment</h2></div></div>
-    <p>Save the recommendation, add your correction, and record an outcome only when you have observed it. A digest can help match the original prompt to a separately available source; it is not copied automatically. Anything you enter here is saved locally.</p>
+    <p>Save the recommendation, add your correction, and record an outcome only when you have observed it. A digest can help match the original prompt to a separately available source; it is not copied automatically. Anything you enter here is saved locally. Model output may repeat private prompt or supplied project context; a digest identifies bytes and does not screen saved output.</p>
     {!available || !token ? <>
       <p>Connect using the private feedback token configured for your local server. It stays in this browser session and is not put in the address bar.</p>
       <label>Local feedback token <input type="password" autoComplete="off" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} /></label>
@@ -199,7 +201,7 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient, own
       {nextCursor && <button type="button" disabled={busy} onClick={() => void run(loadMore)}>Load more assessments</button>}
       {record && <div className="feedback-editor">
         <p>Engine: {record.provenance.engineId} · Assessment: {record.assessmentRef} · Revision {record.revision}</p>
-        <details><summary>View provenance</summary><p>Model: {displayValue(record.provenance.modelDigest)} · Model manifest: {displayValue(record.provenance.modelManifestSha256)} · Training manifest: {displayValue(record.provenance.trainingManifestSha256)} · Framing: {displayValue(record.provenance.framingSha256)} · Runtime config: {displayValue(record.provenance.runtimeConfigSha256)} · Service config: {displayValue(record.provenance.serviceConfigSha256)} · Source reference: {displayValue(record.provenance.sourceRef)}</p><p>These identify recorded artifacts; they do not verify the correctness of an assessment.</p></details>
+        <details><summary>View provenance</summary><p>Model: {displayValue(record.provenance.modelDigest)} · Model manifest: {displayValue(record.provenance.modelManifestSha256)} · Training manifest: {displayValue(record.provenance.trainingManifestSha256)} · Framing: {displayValue(record.provenance.framingSha256)} · Runtime config: {displayValue(record.provenance.runtimeConfigSha256)} · Service config: {displayValue(record.provenance.serviceConfigSha256)} · Source reference: {displayValue(record.provenance.sourceRef)} · Project context digest: {displayValue(record.provenance.projectContextSha256)}</p><p>These identify recorded artifacts and submitted bytes; they do not verify project facts or the correctness of an assessment.</p></details>
         <p>Original suggestion: intent {displayValue(record.originalRecommendation.intent)}, complexity {displayValue(record.originalRecommendation.complexity)}, {displayValue(record.originalRecommendation.agentCount)} agents, model {displayValue(record.originalRecommendation.model)}.</p>
         <p>Fill in only the fields you want to correct; leave others blank.</p>
         <label>Corrected intent <input value={intent} onChange={(event) => setIntent(event.target.value)} /></label>

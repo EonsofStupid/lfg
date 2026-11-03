@@ -53,6 +53,11 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
+    if (path.endsWith('/api/lfg/assess/owned/status')) return new Response(JSON.stringify({ enabled: true, status: 'ready', engine: { id: 'owned-test' }, limits: { maxRequestBytes: 1000, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } }))
+    if (path.endsWith('/api/lfg/assess/owned')) {
+      const body = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({ status: 'ok', elapsedMs: 3, engine: { id: 'owned-test' }, projectContextSha256: body.contextSha256, output: { intent: 'research' } }))
+    }
     if (path.endsWith('/status')) return new Response(JSON.stringify({ name: 'MasterClyffy LFG', phase: 'rust-authoritative-alpha', protocolVersion: 'v', workspaceId: 'clyffy.master', encoder: preflight.model, signalMode: 'hash-chain', contentPolicy: 'memory-only', liveProviders: 0, configuredProviders: 1, fixtureProviders: 4, operationsDigest: 'd'.repeat(64), operations: { schemaVersion: 'lfg.operations.v1', revision: 'test', maxPromptBytes: 120, maxHttpBodyBytes: 1000, defaultSignalPageSize: 1, maxSignalPageSize: 2, eventBufferCapacity: 8, streamKeepaliveSeconds: 2, uiDebounceMs: 10, uiTimingHistorySamples: 2, devTools: { statsEnabled: true, traceCapacity: 8, statsPollIntervalMs: 1000, debounceMinMs: 5, debounceMaxMs: 80, historyMinSamples: 1, historyMaxSamples: 8 } } }))
     if (path.endsWith('/assess')) return new Response(JSON.stringify({ ...assessment, revision: JSON.parse(String(init?.body)).revision }))
     if (path.endsWith('/knowledge')) return new Response(JSON.stringify(knowledge))
@@ -160,6 +165,27 @@ test('uses the configured UTF-8 byte limit for multibyte input', async () => {
   fireEvent.change(prompt, { target: { value: 'é'.repeat(60) } })
   expect(screen.getByText('120 / 120 UTF-8 bytes')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).not.toBeDisabled()
+})
+
+test('passes the advertised HTTP body limit into owned context and submits it only on explicit run', async () => {
+  const contextDigest = '09'.repeat(32)
+  vi.stubGlobal('crypto', { randomUUID: () => 'test-session', subtle: { digest: vi.fn(async () => new Uint8Array(32).fill(9).buffer) } })
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'owned-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  await screen.findByText(/Model status: ready/)
+  expect(screen.getByText(/Serialized request body:/)).toHaveTextContent('/ 1,000 UTF-8 bytes. Limit from host status.')
+  expect(screen.getByText(/Serialized request body:/)).toHaveTextContent('owned route may enforce a smaller limit')
+  const context = 'owner-reviewed context'
+  fireEvent.change(screen.getByLabelText('Optional project context (owner-supplied, unverified)'), { target: { value: context } })
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/lfg/assess/owned'))).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  expect(await screen.findByText(/server echoed the matching project context digest/i)).toBeInTheDocument()
+  const ownedCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/lfg/assess/owned'))
+  expect(JSON.parse(String(ownedCall?.[1]?.body))).toEqual({ text: 'Implement my feature and run tests', context, contextSha256: contextDigest })
 })
 
 test('schedules analysis using the server-configured debounce', async () => {

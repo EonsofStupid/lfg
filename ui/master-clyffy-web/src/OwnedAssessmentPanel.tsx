@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Assessment } from './types'
-import { ownedAssessmentClient, type OwnedAssessmentClient, type OwnedResult, type OwnedStatus } from './ownedAssessmentApi'
+import { ownedAssessmentBody, ownedAssessmentClient, sha256Utf8, type OwnedAssessmentClient, type OwnedResult, type OwnedStatus } from './ownedAssessmentApi'
 
 const STATUS_MESSAGE: Record<OwnedResult['status'], string> = {
   ok: 'Model output received. It has not been verified.',
@@ -35,40 +35,139 @@ function display(value: unknown): string {
   return JSON.stringify(value)
 }
 
-export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult }: {
+export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, maxHttpBodyBytes }: {
   prompt: string
   assessment: Assessment | null
   client?: OwnedAssessmentClient
   onResult?: (result: OwnedResult | null) => void
+  maxHttpBodyBytes?: number
 }) {
   const [tokenInput, setTokenInput] = useState('')
   const [token, setToken] = useState<string | null>(null)
   const [status, setStatus] = useState<OwnedStatus | null>(null)
   const [result, setResult] = useState<OwnedResult | null>(null)
+  const [projectContext, setProjectContext] = useState('')
+  const [contextBinding, setContextBinding] = useState<'verified' | 'missing' | 'mismatch' | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const requestGeneration = useRef(0)
-  useEffect(() => { requestGeneration.current += 1; setResult(null) }, [prompt])
+  const busyGeneration = useRef(0)
+  const onResultRef = useRef(onResult)
+  const promptRef = useRef(prompt)
+  const projectContextRef = useRef(projectContext)
+  onResultRef.current = onResult
+  promptRef.current = prompt
+  projectContextRef.current = projectContext
 
-  async function run(action: () => Promise<void>) {
-    setBusy(true); setError('')
-    try { await action() } catch (value) { setError(value instanceof Error ? value.message : 'The owned model request failed.') }
-    finally { setBusy(false) }
+  function invalidate() {
+    requestGeneration.current += 1
+    busyGeneration.current += 1
+    setBusy(false)
+    setResult(null)
+    setContextBinding(null)
+    setError('')
+    onResultRef.current?.(null)
   }
 
-  const bytes = new TextEncoder().encode(prompt).length
-  const bodyBytes = new TextEncoder().encode(JSON.stringify({ text: prompt })).length
-  const tooLarge = status?.limits !== undefined && (bytes > status.limits.maxRequestBytes || (status.limits.maxHttpBodyBytes !== undefined && bodyBytes > status.limits.maxHttpBodyBytes))
+  useEffect(() => {
+    invalidate()
+    return () => {
+      requestGeneration.current += 1
+      busyGeneration.current += 1
+      onResultRef.current?.(null)
+    }
+  }, [prompt])
+
+  async function run(action: () => Promise<void>, request?: number) {
+    const current = ++busyGeneration.current
+    setBusy(true)
+    setError('')
+    try { await action() } catch (value) {
+      if (request === undefined || requestGeneration.current === request) {
+        setError(value instanceof Error ? value.message : 'The owned model request failed.')
+      }
+    } finally {
+      if (busyGeneration.current === current) setBusy(false)
+    }
+  }
+
+  const promptBytes = new TextEncoder().encode(prompt).length
+  const contextBytes = new TextEncoder().encode(projectContext).length
+  const hasProjectContext = projectContext.length > 0
+  // A lowercase SHA-256 digest always occupies 64 ASCII bytes. This gives an
+  // exact size estimate before hashing; the actual serialized body is checked
+  // again immediately before sending.
+  const sizeBody = ownedAssessmentBody(prompt, hasProjectContext
+    ? { context: projectContext, contextSha256: '0'.repeat(64) }
+    : undefined)
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(sizeBody)).length
+  const bodyLimitValues = [status?.limits?.maxHttpBodyBytes, maxHttpBodyBytes].filter((value): value is number => value !== undefined)
+  const bodyLimit = bodyLimitValues.length ? Math.min(...bodyLimitValues) : undefined
+  const ownedBodyLimitAdvertised = status?.limits?.maxHttpBodyBytes !== undefined
+  const requestTooLarge = status?.limits !== undefined && promptBytes > status.limits.maxRequestBytes
+  const contextTooLarge = hasProjectContext && status?.limits?.maxContextBytes !== undefined
+    && contextBytes > status.limits.maxContextBytes
+  const bodyTooLarge = bodyLimit !== undefined && bodyBytes > bodyLimit
+  const tooLarge = requestTooLarge || contextTooLarge || bodyTooLarge
   const proposal = result && ['ok', 'incomplete_output', 'truncated'].includes(result.status) ? result.output : null
+
+  function runOwnedAssessment() {
+    const current = ++requestGeneration.current
+    const submittedPrompt = prompt
+    const submittedContext = projectContext
+    setResult(null)
+    setContextBinding(null)
+    onResultRef.current?.(null)
+    void run(async () => {
+      let boundContext: { context: string; contextSha256: string } | undefined
+      if (submittedContext.length > 0) {
+        const contextSha256 = await sha256Utf8(submittedContext)
+        if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
+            || projectContextRef.current !== submittedContext) return
+        boundContext = { context: submittedContext, contextSha256 }
+      }
+      const body = ownedAssessmentBody(submittedPrompt, boundContext)
+      const actualBodyBytes = new TextEncoder().encode(JSON.stringify(body)).length
+      if (bodyLimit !== undefined && actualBodyBytes > bodyLimit) {
+        throw new Error('The exact UTF-8 JSON request exceeds the configured HTTP body limit; nothing was sent.')
+      }
+      const next = boundContext
+        ? await client.assess(submittedPrompt, token!, boundContext)
+        : await client.assess(submittedPrompt, token!)
+      if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
+          || projectContextRef.current !== submittedContext) return
+      setResult(next)
+      if (boundContext) {
+        if (next.projectContextSha256 === boundContext.contextSha256) {
+          setContextBinding('verified')
+          onResultRef.current?.(next)
+        } else {
+          setContextBinding(next.projectContextSha256 ? 'mismatch' : 'missing')
+          onResultRef.current?.(null)
+        }
+      } else {
+        onResultRef.current?.(next)
+      }
+    }, current)
+  }
 
   return <section className="dev-panel owned-assessment" aria-label="Experimental owned model">
     <div className="dev-heading"><div><p className="eyebrow">EXPERIMENTAL OWNED MODEL</p><h2>Compare LFG's model</h2></div></div>
-    <p>Run the current request through the experimental owned model. Its output is a proposal, not a verified assessment; the existing rules remain available above. This model path does not yet include the project's subscription profile.</p>
+    <p>Run the current request through the experimental owned model. Its output is a proposal, not a verified assessment; the existing rules remain available above. Availability, project outcomes, and entitlement remain unknown unless separately verified. This run does not automatically include subscription settings or project profile answers.</p>
+    <label>Optional project context (owner-supplied, unverified)
+      <textarea rows={4} value={projectContext} onChange={(event) => {
+        setProjectContext(event.target.value)
+        invalidate()
+      }} />
+    </label>
+    <p>Context is sent exactly as typed only when you run the model and stays in this component's memory. The digest identifies those bytes; it does not verify their truth or remove secrets. Model output may repeat the context. Saving feedback is a separate explicit action and can save model output, including text that repeats context.</p>
     {!token ? <>
       <label>Owned model token <input type="password" autoComplete="off" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} /></label>
       <button type="button" disabled={busy || !tokenInput} onClick={() => void run(async () => {
         const next = await client.status(tokenInput)
-        setStatus(next); setToken(tokenInput); setTokenInput('')
+        setStatus(next)
+        setToken(tokenInput)
+        setTokenInput('')
       })}>Connect owned model</button>
       <p>The token is held only in this browser session. Configure it and the model on the local server first.</p>
     </> : <>
@@ -76,17 +175,20 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {status?.status === 'ready' && <p>Ready means the configuration and artifact identity were checked. Each run loads the model; its quality and speed are not yet qualified.</p>}
       {status?.engine && <p>Engine: {status.engine.id} · Model: {status.engine.modelSha256 ? status.engine.modelSha256.slice(0, 12) : 'identity unavailable'}</p>}
       {status?.limits && <p>Limit: {status.limits.maxRequestBytes.toLocaleString()} request bytes{status.limits.maxContextBytes ? ` · ${status.limits.maxContextBytes.toLocaleString()} context bytes including framing` : ''} · {status.limits.maxGeneratedBytes.toLocaleString()} output bytes · {status.limits.timeoutMs.toLocaleString()} ms · {status.limits.maxConcurrent} concurrent{status.limits.workerThreads ? ` · ${status.limits.workerThreads} threads requested` : ''}</p>}
+      {bodyLimit !== undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} / {bodyLimit.toLocaleString()} UTF-8 bytes. Limit from {ownedBodyLimitAdvertised ? 'owned-model status' : 'host status'}.{!ownedBodyLimitAdvertised ? ' The owned route may enforce a smaller limit that is not advertised.' : ''}</p>}
       <div className="feedback-actions">
-        <button type="button" disabled={busy || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={() => void run(async () => {
-          const current = ++requestGeneration.current
-          setResult(null)
-          const next = await client.assess(prompt, token)
-          if (requestGeneration.current === current) { setResult(next); onResult?.(next) }
-        })}>{busy ? 'Running model…' : 'Run owned model'}</button>
-        <button type="button" disabled={busy} onClick={() => { requestGeneration.current += 1; setToken(null); setStatus(null); setResult(null); onResult?.(null) }}>Disconnect</button>
+        <button type="button" disabled={busy || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{busy ? 'Running model…' : 'Run owned model'}</button>
+        <button type="button" disabled={busy} onClick={() => { invalidate(); setToken(null); setStatus(null); setProjectContext('') }}>Disconnect</button>
       </div>
-      {tooLarge && <p role="alert">This request exceeds the model's configured input or HTTP body limit.</p>}
+      {requestTooLarge && <p role="alert">The request exceeds the model's configured UTF-8 input limit.</p>}
+      {contextTooLarge && <p role="alert">The supplied context exceeds the model's configured context byte limit.</p>}
+      {bodyTooLarge && <p role="alert">The exact UTF-8 JSON request, including the context digest, exceeds the configured HTTP body limit.</p>}
+      {bodyLimit === undefined && <p>HTTP body limit is not advertised; the server may reject a request that exceeds its limit.</p>}
+      {hasProjectContext && <p>{contextBytes.toLocaleString()} UTF-8 context bytes. The complete system framing and context window are not available here; the server may return “context limit” and will not silently truncate this text.</p>}
       {assessment && <p>Rules assessment: intent {assessment.intent.primary}, complexity {assessment.complexity.bracket}, {assessment.agents.total} agents.</p>}
+      {contextBinding === 'verified' && <p role="status">The server echoed the matching project context digest. It identifies the supplied bytes only; it does not verify project facts.</p>}
+      {contextBinding === 'missing' && <p role="alert">The response did not include the expected context digest. The result is shown but cannot be saved as linked to this context.</p>}
+      {contextBinding === 'mismatch' && <p role="alert">The response context digest did not match the submitted bytes. The result is shown but cannot be saved as linked to this context.</p>}
       {result && <div className="owned-result">
         <p role="status">{STATUS_MESSAGE[result.status] ?? 'The model returned an unrecognized status.'} · {result.elapsedMs.toFixed(0)} ms{result.stopReason ? ` · ${result.stopReason}` : ''}</p>
         {proposal && <dl className="owned-fields">
