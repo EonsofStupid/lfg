@@ -541,6 +541,34 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
     }
 
 
+def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_code: dict) -> None:
+    """Fail closed on an SFT result without complete weight and source provenance."""
+    required_digests = {'weights_sha256', 'source_checkpoint_manifest_sha256',
+        'source_checkpoint_weights_sha256', 'dataset_manifest_sha256', 'training_file_sha256',
+        'system_sha256', 'framing_sha256', 'config_sha256'}
+    if (not isinstance(manifest, dict) or manifest.get('completed') is not True
+            or any(not isinstance(manifest.get(name), str)
+                   or not re.fullmatch(r'[0-9a-f]{64}', manifest[name]) for name in required_digests)
+            or manifest['weights_sha256'] != sha(weights)
+            or not isinstance(manifest.get('architecture'), dict)
+            or not isinstance(manifest.get('coverage'), dict)
+            or manifest['coverage'].get('system_sha256') != manifest['system_sha256']
+            or manifest['coverage'].get('framing_sha256') != manifest['framing_sha256']
+            or not isinstance(manifest.get('code_sha256'), dict)):
+        raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
+    expected_code_names = {'train_owned_assessment_sft.py', 'train_owned_student.py',
+                           'owned_student.py', 'owned_sft_checkpoint.py'}
+    code = manifest['code_sha256']
+    if (not expected_code_names <= set(code)
+            or any(not isinstance(code.get(name), str) or not re.fullmatch(r'[0-9a-f]{64}', code[name])
+                   for name in code)
+            or code.get('owned_student.py') != current_code.get('owned_student.py')):
+        raise ValueError('completed SFT checkpoint code provenance is invalid')
+    for name in ('steps', 'parameters', 'supervised_tokens'):
+        if type(manifest.get(name)) is not int or manifest[name] < 1:
+            raise ValueError('completed SFT checkpoint training provenance is invalid')
+
+
 def sample_batch(records: list[dict], rng: random.Random, batch_size: int, context: int):
     inputs, labels, corrections = [], [], []
     for item in rng.choices(records, weights=[entry['weight'] for entry in records], k=batch_size):
@@ -595,11 +623,16 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     code_paths = (Path(__file__), Path(base.__file__), Path(owned_student.__file__), Path(checkpoints.__file__))
     code = {path.name: base.sha(path.read_bytes()) for path in code_paths}
     allowed_checkpoint_schemas = ('lfg.owned-student-experiment-result.v1', 'lfg.owned-distillation-result.v1',
-        'lfg.owned-user-request-sft-result.v1' if user_request_mode else 'lfg.owned-assessment-sft-result.v1')
+        *(('lfg.owned-user-request-sft-result.v1', 'lfg.owned-assessment-sft-result.v1')
+          if user_request_mode else ('lfg.owned-assessment-sft-result.v1',)))
     if (not isinstance(initial, dict) or initial.get('schema_version') not in allowed_checkpoint_schemas
             or initial.get('weights_sha256') != base.sha(initial_weights)
-            or initial.get('code_sha256', {}).get('owned_student.py') != code['owned_student.py']):
+            or not isinstance(initial.get('code_sha256'), dict)
+            or initial['code_sha256'].get('owned_student.py') != code['owned_student.py']):
         raise ValueError('owned checkpoint identity does not match')
+    if initial['schema_version'] in ('lfg.owned-user-request-sft-result.v1',
+                                     'lfg.owned-assessment-sft-result.v1'):
+        validate_completed_sft_checkpoint(initial, initial_weights, code)
     architecture = dict(initial['architecture'])
     owned_student.validate_architecture(architecture)
     old_context = architecture['context']
@@ -649,7 +682,8 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     rng, losses, supervised = random.Random(config['seed']), [], 0
     identity = {'dataset_manifest_sha256': base.sha(dataset_manifest), 'training_file_sha256': base.sha(train_raw),
                 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
-                'source_checkpoint_weights_sha256': base.sha(initial_weights), 'code_sha256': code,
+                'source_checkpoint_weights_sha256': base.sha(initial_weights),
+                'source_checkpoint_schema': initial['schema_version'], 'code_sha256': code,
                 'continuation_config_sha256': checkpoints.continuation_config(config), 'architecture': architecture,
                 'python': platform.python_version(), 'torch': str(torch.__version__), 'safetensors': safetensors.__version__,
                 'cuda_version': torch.version.cuda if config['device'] == 'cuda' else None,
@@ -705,6 +739,7 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                           else 'lfg.owned-assessment-sft-partial.v1')
         partial = {'schema_version': partial_schema, 'completed': False,
                 'steps': end_step, 'parameters': parameters, 'supervised_tokens': supervised,
+                'source_checkpoint_schema': initial['schema_version'],
                 'coverage': coverage, 'latest_checkpoint': str(latest),
                 'latest_checkpoint_state_sha256': base.sha(base.read_bounded(latest / 'state.json', config['max_manifest_bytes'])),
                 'promotion_eligible': False}
@@ -718,6 +753,7 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                      else 'lfg.owned-assessment-sft-result.v1')
     manifest = {'schema_version': result_schema, 'architecture': architecture,
                 'completed': True, 'resumed_from_step': initial_step,
+                'source_checkpoint_schema': initial['schema_version'],
                 'resume_checkpoint_state_sha256': resume_state_sha256,
                 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
                 'source_checkpoint_weights_sha256': base.sha(initial_weights),

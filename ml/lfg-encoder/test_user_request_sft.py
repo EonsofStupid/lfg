@@ -458,6 +458,7 @@ class UserRequestSFTTests(unittest.TestCase):
                          'torch and safetensors required for one-step fixture training')
     def test_user_request_task_runs_one_private_fixture_step(self):
         self._build()
+        import assessment_distill
         import owned_student
         import train_owned_assessment_sft as trainer
         from safetensors.torch import save_file
@@ -472,6 +473,35 @@ class UserRequestSFTTests(unittest.TestCase):
             'schema_version': 'lfg.owned-student-experiment-result.v1', 'architecture': architecture,
             'weights_sha256': sha(weights.read_bytes()),
             'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}))
+        trace = {'id': 'assessment-fixture', 'request': 'Fixture assessment request',
+                 'response': '{"intent":"fixture"}', 'teacher': 'fixture-teacher',
+                 'review_status': 'unreviewed', 'outcome': 'unknown',
+                 'source_ref': 'fixture-source', 'source_sha256': 'a' * 64}
+        trace_path = self.root / 'assessment-trace.jsonl'
+        trace_path.write_text(json.dumps(trace) + '\n', encoding='utf-8')
+        plan = {'schema_version': assessment_distill.PLAN_SCHEMA, 'revision': 'assessment-fixture-v1',
+                'task': 'assessment-recommendation', 'system_prompt': 'Assess this fixture.',
+                'authorization_attestation': 'fixture-only', 'redaction_attestation': 'fixture-only',
+                'forbidden_literals': [], 'include_outcomes': ['unknown'], 'max_source_bytes': 8192,
+                'max_total_bytes': 8192, 'max_examples': 1,
+                'sources': [{'path': trace_path.name, 'sha256': sha(trace_path.read_bytes()),
+                    'project': 'fixture', 'project_group': 'fixture', 'split': 'train', 'origin': 'owner_chat'}]}
+        plan_path = self.root / 'assessment-plan.json'
+        plan_path.write_text(json.dumps(plan), encoding='utf-8')
+        assessment_dataset = self.root / 'assessment-dataset'
+        assessment_distill.build(plan_path, assessment_dataset)
+        assessment_config = json.loads(Path(trainer.__file__).with_name('owned-assessment-sft.example.json').read_bytes())
+        assessment_config.update(context=128, batch_size=1, steps=1, checkpoint_every=1,
+            max_parameters=100_000, max_attention_elements=100_000, max_dataset_bytes=1_000_000,
+            max_record_bytes=200_000, max_manifest_bytes=1_000_000, max_checkpoint_bytes=10_000_000,
+            max_optimizer_bytes=10_000_000, max_examples=10)
+        assessment_config_path = self.root / 'owned-assessment-sft.json'
+        assessment_config_path.write_text(json.dumps(assessment_config), encoding='utf-8')
+        completed_assessment = self.root / 'completed-assessment-sft'
+        assessment_result = trainer.experiment(
+            assessment_dataset, checkpoint, assessment_config_path, completed_assessment)
+        self.assertEqual(assessment_result['schema_version'], 'lfg.owned-assessment-sft-result.v1')
+        self.assertTrue(assessment_result['completed'])
         train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
         train_config.update(context=2048, batch_size=1, steps=1, checkpoint_every=1,
                             max_parameters=100_000, max_attention_elements=10_000_000,
@@ -481,8 +511,9 @@ class UserRequestSFTTests(unittest.TestCase):
         config_path = self.root / 'owned-user-request-sft.json'
         config_path.write_text(json.dumps(train_config), encoding='utf-8')
         output = self.root / 'trained-user-request-task'
-        result = trainer.experiment(self.root / 'dataset.json', checkpoint, config_path, output)
+        result = trainer.experiment(self.root / 'dataset.json', completed_assessment, config_path, output)
         self.assertEqual(result['schema_version'], 'lfg.owned-user-request-sft-result.v1')
+        self.assertEqual(result['source_checkpoint_schema'], 'lfg.owned-assessment-sft-result.v1')
         self.assertEqual(result['training_task'], user_request_sft.TASK)
         self.assertFalse(result['assistant_teacher_claimed'])
         self.assertEqual(result['outcome_claim'], 'unknown')
@@ -491,6 +522,45 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertFalse(result['runtime_compatible'])
         self.assertFalse(result['deployment_ready'])
         self.assertFalse(result['promotion_eligible'])
+
+    def test_completed_sft_checkpoint_provenance_validator_rejects_tampering(self):
+        import owned_student
+        import train_owned_assessment_sft as trainer
+        code_paths = [Path(trainer.__file__), Path(trainer.checkpoints.__file__), Path(owned_student.__file__)]
+        import train_owned_student as base
+        code_paths.append(Path(base.__file__))
+        code = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in code_paths}
+        weights = b'fixture-weights'
+        system_sha = hashlib.sha256(b'fixture system').hexdigest()
+        framing_sha = hashlib.sha256(b'fixture framing').hexdigest()
+        manifest = {'schema_version': 'lfg.owned-assessment-sft-result.v1', 'completed': True,
+            'weights_sha256': hashlib.sha256(weights).hexdigest(),
+            'source_checkpoint_manifest_sha256': '1' * 64, 'source_checkpoint_weights_sha256': '2' * 64,
+            'dataset_manifest_sha256': '3' * 64, 'training_file_sha256': '4' * 64,
+            'system_sha256': system_sha, 'framing_sha256': framing_sha, 'config_sha256': '5' * 64,
+            'architecture': {'fixture': True}, 'coverage': {'system_sha256': system_sha,
+                'framing_sha256': framing_sha}, 'code_sha256': code,
+            'steps': 1, 'parameters': 1, 'supervised_tokens': 1}
+        trainer.validate_completed_sft_checkpoint(manifest, weights, code)
+        incomplete = dict(manifest)
+        incomplete.pop('framing_sha256')
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(incomplete, weights, code)
+        not_completed = dict(manifest)
+        not_completed['completed'] = False
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(not_completed, weights, code)
+        bad_weights = dict(manifest)
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_weights, weights + b'changed', code)
+        bad_code = json.loads(json.dumps(manifest))
+        bad_code['code_sha256']['owned_student.py'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'code provenance'):
+            trainer.validate_completed_sft_checkpoint(bad_code, weights, code)
+        bad_framing = json.loads(json.dumps(manifest))
+        bad_framing['coverage']['framing_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_framing, weights, code)
 
     def test_ambiguous_provider_match_is_not_emitted_as_a_model_target(self):
         self._write_cache(duplicate_display_name=True)
