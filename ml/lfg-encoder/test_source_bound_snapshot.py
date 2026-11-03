@@ -42,10 +42,16 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.cache.write_text(json.dumps(value), encoding='utf-8')
 
     def test_snapshot_verifies_exact_line_and_keeps_unknown_claims_unknown(self):
+        self.write_cache({'models': [{'slug': 'gpt-6.1-terra', 'display_name': 'Terra',
+                                      'description': 'listed', 'visibility': 'list',
+                                      'supported_reasoning_levels': [{'effort': 'xhigh'}],
+                                      'vendor_extension': {'generation': 7,
+                                                           'note': 'password=extensionSecret987654'}}]})
         value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         observed_at='2026-11-03T09:00:00Z')
         self.assertEqual(value['schema_version'], snapshot.SCHEMA)
         self.assertTrue(value['source']['verified'])
+        self.assertEqual(value['source']['project_association'], 'inventory_label_unverified')
         self.assertEqual(value['source']['user_text_sha256'], self.record['text_sha256'])
         self.assertEqual(value['source']['current_whole_file_sha256'], 'unknown')
         self.assertEqual(value['split']['assignment'], 'train')
@@ -53,7 +59,10 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertEqual(value['access_claims']['subscription_entitlement'], 'unknown')
         self.assertEqual(value['access_claims']['historical_session_effort'], 'unknown')
         self.assertEqual(value['provider_list']['models'][0]['provider_supported_efforts'], ['xhigh'])
-        self.assertEqual(value['provider_list']['models'][0]['extensions']['vendor_extension'], {'generation': 7})
+        extension = value['provider_list']['models'][0]['extensions']['vendor_extension']
+        self.assertEqual(extension['generation'], 7)
+        self.assertIn('REDACTED', extension['note'])
+        self.assertNotIn('extensionSecret987654', json.dumps(value))
         self.assertEqual(value['provider_list']['extensions']['cache_extension'], {'revision': 'r1'})
         self.assertEqual(value['training_claims']['task_outcome'], 'unknown')
 
@@ -73,6 +82,27 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.cache.write_text(self.cache.read_text(encoding='utf-8').replace('listed', 'changed'), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'provider cache changed'):
             snapshot.revalidate_snapshot(value)
+
+    def test_revalidation_rejects_mutated_provider_projection_and_access_claims(self):
+        import copy
+        value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train')
+        # Safe provider extensions are retained, but all security-relevant rows
+        # and claims must remain exactly bound to the freshly parsed cache.
+        snapshot.revalidate_snapshot(value)
+        mutations = (
+            ('model_id', lambda row: row.__setitem__('model_id', 'invented-model')),
+            ('description', lambda row: row.__setitem__('description', 'invented description')),
+            ('priority', lambda row: row.__setitem__('priority', 0)),
+            ('efforts', lambda row: row.__setitem__('provider_supported_efforts', ['unlisted-effort'])),
+            ('access', lambda row: row.__setitem__('subscription_entitlement', 'available')),
+        )
+        for name, mutate in mutations:
+            changed = copy.deepcopy(value)
+            target = (changed['provider_list']['models'][0] if name != 'access'
+                      else changed['access_claims'])
+            mutate(target)
+            with self.subTest(field=name), self.assertRaisesRegex(ValueError, 'provider cache changed'):
+                snapshot.revalidate_snapshot(changed)
 
     def test_single_request_selection_and_context_are_snapshot_bound(self):
         value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
@@ -126,6 +156,27 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         known_reserved_group_sha256=[group])
 
+    def test_session_group_identity_ignores_mutable_project_labels_and_rejects_before_open(self):
+        import copy
+        changed = copy.deepcopy(self.record)
+        changed['project'] = 'renamed-alias'
+        self.assertEqual(snapshot.source_group_id(self.record), snapshot.source_group_id(changed))
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')):
+            with self.assertRaisesRegex(ValueError, 'reserved group'):
+                snapshot.build_snapshot(changed, self.cache, split_policy='exploratory_train',
+                                        known_reserved_group_sha256=[snapshot.source_group_id(self.record)])
+
+    def test_session_group_identity_normalizes_path_aliases(self):
+        alias = str(self.root / 'project' / '..' / 'session.jsonl')
+        changed = {**self.record, 'source_file': alias}
+        self.assertEqual(snapshot.source_group_id(self.record), snapshot.source_group_id(changed))
+
+    def test_reserved_project_aliases_are_case_and_punctuation_insensitive(self):
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')):
+            with self.assertRaisesRegex(ValueError, 'reserved group'):
+                snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
+                                        known_reserved_project_labels=['L.F.G'])
+
     def test_reserved_train_requires_split_evidence(self):
         with self.assertRaisesRegex(ValueError, 'split evidence'):
             snapshot.build_snapshot(self.record, self.cache, split_policy='reserved_train')
@@ -178,10 +229,23 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertFalse((self.root / 'snapshot.json').exists())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
-    def test_windows_private_write_sets_and_verifies_restricted_acl(self):
+    def test_windows_private_write_fails_closed_without_verified_parent_chain(self):
         destination = self.root / 'snapshot.json'
-        snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
-        self.assertEqual(json.loads(destination.read_text(encoding='utf-8'))['schema_version'], snapshot.SCHEMA)
+        with mock.patch.object(snapshot, '_secure_windows_file', side_effect=ValueError('parent chain unverified')):
+            with self.assertRaisesRegex(ValueError, 'parent chain unverified'):
+                snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
+        self.assertFalse(destination.exists())
+
+    def test_windows_writer_rejects_replaced_path_identity(self):
+        destination = self.root / 'replacement.json'
+        destination.write_bytes(b'')
+        descriptor = os.open(destination, os.O_WRONLY)
+        self.addCleanup(lambda: os.close(descriptor) if descriptor >= 0 else None)
+        original_stat = destination.stat()
+        replaced = mock.Mock(st_dev=original_stat.st_dev, st_ino=original_stat.st_ino + 1)
+        with mock.patch.object(Path, 'stat', return_value=replaced):
+            with self.assertRaisesRegex(ValueError, 'file identity changed'):
+                snapshot._write_verified_windows_handle(descriptor, destination, b'private')
 
 
 if __name__ == '__main__':

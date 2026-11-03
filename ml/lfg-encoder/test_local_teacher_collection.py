@@ -358,7 +358,8 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         provider.write_text(json.dumps({'fetched_at': '2026-11-03T10:00:00Z', 'models': [
             {'slug': 'fixture-model', 'display_name': 'Fixture Model', 'description': 'Fixture teacher model',
              'visibility': 'list', 'supported_reasoning_levels': [{'effort': 'low'}]}]}), encoding='utf-8')
-        value = source_bound_snapshot.build_snapshot(record, provider, split_policy='exploratory_train')
+        value = source_bound_snapshot.build_snapshot(record, provider, split_policy='exploratory_train',
+                                                     screen_policy_path=self.policy)
         manifest, row, context, request_raw, manifest_raw, context_raw, projection_raw, bundle_raw = (
             source_bound_snapshot.prepare_single_request(value, policy_path=self.policy,
                                                         max_request_bytes=2000, max_context_bytes=2000))

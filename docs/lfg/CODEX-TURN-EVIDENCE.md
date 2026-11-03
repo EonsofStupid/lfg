@@ -66,7 +66,11 @@ output bytes. That local check does not establish cross-platform reproducibility
 `source_bound_snapshot.py` separately verifies one selected Codex user-message
 line and its exact prefix digest, then records the current `models_cache.json`
 digest, fetched time, listed IDs, descriptions, and provider-supported effort
-fields. A full session-file digest may drift when later log events append; the
+fields. Model rows are compared against the reconstructed cache on
+revalidation, and provider extension strings are screened with the configured
+policy before private persistence. Session exclusion identity is based on a
+canonical project-label-independent path; the inventory's project association
+is explicitly unverified. A full session-file digest may drift when later log events append; the
 snapshot keeps that inventory-time claim separate from the current whole-file
 digest, which is unknown. The selected prefix and line must still verify.
 

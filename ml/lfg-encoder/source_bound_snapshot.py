@@ -59,30 +59,47 @@ def _strict_json(raw: bytes) -> object:
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=bad_constant)
 
 
-def _safe_extensions(value: object) -> None:
-    stack, count = [(value, 0)], 0
-    while stack:
-        current, depth = stack.pop()
+def _default_screen_policy_path() -> Path:
+    return Path(__file__).with_name('private-corpus-screen.example.json')
+
+
+def _safe_extensions(value: object, rules, limits: dict) -> object:
+    """Validate extensions and screen every persisted string value and key."""
+    count = 0
+
+    def visit(current, depth):
+        nonlocal count
         count += 1
         if depth > MAX_EXTENSION_DEPTH or count > MAX_EXTENSION_NODES:
             raise ValueError('provider extension limits exceeded')
         if isinstance(current, dict):
+            result = {}
             for key, item in current.items():
                 if not isinstance(key, str) or not key or len(key.encode('utf-8')) > 256:
                     raise ValueError('invalid provider extension key')
                 if SENSITIVE_KEY.search(key):
                     raise ValueError('sensitive provider extension key')
-                stack.append((item, depth + 1))
-        elif isinstance(current, list):
-            stack.extend((item, depth + 1) for item in current)
-        elif isinstance(current, str):
+                screened_key, _ = screen_private_corpus._screen(key, rules, limits)
+                if screened_key != key or screened_key in result:
+                    raise ValueError('provider extension key requires redaction or collides')
+                result[key] = visit(item, depth + 1)
+            return result
+        if isinstance(current, list):
+            return [visit(item, depth + 1) for item in current]
+        if isinstance(current, str):
             if len(current.encode('utf-8')) > MAX_METADATA_BYTES:
                 raise ValueError('provider metadata exceeds limit')
-        elif current is None or type(current) in (bool, int, float):
+            if not current:
+                return current
+            screened, _ = screen_private_corpus._screen(current, rules, limits)
+            return screened
+        if current is None or type(current) in (bool, int, float):
             if isinstance(current, float) and not __import__('math').isfinite(current):
                 raise ValueError('invalid provider extension number')
-        else:
-            raise ValueError('invalid provider extension value')
+            return current
+        raise ValueError('invalid provider extension value')
+
+    return visit(value, 0)
 
 
 def _metadata(value: object, name: str, *, required: bool = False) -> str | None:
@@ -95,10 +112,13 @@ def _metadata(value: object, name: str, *, required: bool = False) -> str | None
     return value
 
 
-def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES) -> tuple[dict, bytes, dict]:
+def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
+                        screen_policy_path: Path | None = None) -> tuple[dict, bytes, dict]:
     """Read stable cache bytes and retain the provider's listed metadata as inert claims."""
     if type(max_bytes) is not int or max_bytes < 1 or max_bytes > MAX_CACHE_BYTES:
         raise ValueError('invalid provider cache byte limit')
+    screen_policy_path = screen_policy_path or _default_screen_policy_path()
+    policy, rules, policy_sha = screen_private_corpus.load_policy(screen_policy_path, 1024 * 1024)
     before = path.stat()
     if not path.is_file() or before.st_size > max_bytes:
         raise ValueError('provider cache unavailable or too large')
@@ -143,12 +163,12 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES) -> tupl
             if effort is not None:
                 efforts.append(effort)
             extra = {key: value for key, value in level.items() if key != 'effort'}
-            _safe_extensions(extra)
+            extra = _safe_extensions(extra, rules, policy['limits'])
             effort_extensions.append(extra)
         extensions = {key: value for key, value in model.items()
                       if key not in {'slug', 'display_name', 'description', 'priority',
                                      'supported_reasoning_levels', 'visibility'}}
-        _safe_extensions(extensions)
+        extensions = _safe_extensions(extensions, rules, policy['limits'])
         listed.append({'model_id': slug, 'display_name': label or slug,
                        'description': description or '', 'priority': priority,
                        'provider_supported_efforts': efforts, 'effort_extensions': effort_extensions,
@@ -156,17 +176,19 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES) -> tupl
     if not listed:
         raise ValueError('provider cache contains no listed models')
     root_extensions = {key: value for key, value in cache.items() if key not in {'models', 'fetched_at'}}
-    _safe_extensions(root_extensions)
+    root_extensions = _safe_extensions(root_extensions, rules, policy['limits'])
     metadata = {'fetched_at': fetched_at, 'models': listed, 'extensions': root_extensions,
                 'cache_sha256': sha(raw), 'cache_bytes': len(raw),
-                'cache_mtime_utc': datetime.fromtimestamp(after.st_mtime, timezone.utc).isoformat()}
+                'cache_mtime_utc': datetime.fromtimestamp(after.st_mtime, timezone.utc).isoformat(),
+                'screen_policy_sha256': policy_sha,
+                'screen_policy_locator': str(screen_policy_path.resolve())}
     return metadata, raw, after
 
 
 def source_group_id(record: dict) -> str:
-    """Stable session-group key without exposing the source path."""
-    material = (record['project'] + '\0' + os.path.normcase(os.path.abspath(record['source_file']))).encode('utf-8')
-    return sha(material)
+    """Project-label-independent session key without exposing the source path."""
+    path = os.path.normcase(os.path.realpath(os.path.abspath(record['source_file'])))
+    return sha(('codex-session-path-v1\0' + path).encode('utf-8'))
 
 
 def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_bytes: int) -> str:
@@ -215,6 +237,7 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
 def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                    known_reserved_group_sha256: tuple[str, ...] | list[str] = (),
                    known_reserved_project_labels: tuple[str, ...] | list[str] = (),
+                   screen_policy_path: Path | None = None,
                    max_session_bytes: int = 512 * 1024 * 1024,
                    max_line_bytes: int = 16 * 1024 * 1024,
                    max_cache_bytes: int = MAX_CACHE_BYTES,
@@ -251,7 +274,8 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
         raise ValueError('selected Codex source identity no longer verifies') from None
     if not selected_text or sha(selected_text.encode('utf-8')) != record['text_sha256']:
         raise ValueError('selected Codex user text does not verify')
-    cache, _raw, _stat = read_provider_cache(cache_path, max_bytes=max_cache_bytes)
+    cache, _raw, _stat = read_provider_cache(cache_path, max_bytes=max_cache_bytes,
+                                              screen_policy_path=screen_policy_path)
     if observed_at is None:
         observed_at = datetime.now(timezone.utc).isoformat()
     try:
@@ -266,7 +290,9 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
         'source': {
             'kind': 'codex-session-user-text',
             'project': record['project'],
-            'source_locator_sha256': sha(os.path.normcase(os.path.abspath(record['source_file'])).encode('utf-8')),
+            'project_association': 'inventory_label_unverified',
+            'source_locator_sha256': sha(os.path.normcase(os.path.realpath(
+                os.path.abspath(record['source_file']))).encode('utf-8')),
             'source_group_sha256': group_id,
             'selected_line': record['source_line'],
             'source_prefix_bytes': record['source_prefix_bytes'],
@@ -315,16 +341,18 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     if (not isinstance(record, dict) or not isinstance(source_path, str) or record.get('source_file') != source_path
             or not isinstance(cache_path, str) or split.get('policy') != 'exploratory_train'):
         raise ValueError('snapshot source identity is incomplete')
+    policy_path = Path(provider.get('screen_policy_locator') or _default_screen_policy_path())
     current = build_snapshot(record, Path(cache_path), split_policy='exploratory_train',
                              known_reserved_group_sha256=split.get('known_reserved_group_sha256', []),
                              known_reserved_project_labels=split.get('known_reserved_project_labels', []),
+                             screen_policy_path=policy_path,
                              max_session_bytes=max_session_bytes, max_line_bytes=max_line_bytes,
                              max_cache_bytes=max_cache_bytes, observed_at=value.get('observed_at'))
-    if (current['source']['source_prefix_sha256'] != source.get('source_prefix_sha256')
-            or current['source']['source_line_sha256'] != source.get('source_line_sha256')
-            or current['source']['user_text_sha256'] != source.get('user_text_sha256')
-            or current['source']['source_group_sha256'] != source.get('source_group_sha256')
-            or current['provider_list']['cache_sha256'] != provider.get('cache_sha256')):
+    # The byte digests alone do not bind the separately serialized projection:
+    # compare all reconstructed source, provider, split, and access fields so a
+    # caller cannot edit model rows or claims while retaining the original hash.
+    if (current['source'] != source or current['provider_list'] != provider
+            or current['split'] != split or current['access_claims'] != value.get('access_claims')):
         raise ValueError('snapshot source or provider cache changed')
 
 
@@ -391,6 +419,8 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
     if sha(request.encode('utf-8')) != source['user_text_sha256']:
         raise ValueError('source prompt changed before selection')
     policy, rules, policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
+    if value.get('provider_list', {}).get('screen_policy_sha256') != policy_sha:
+        raise ValueError('snapshot provider extensions use a different screening policy')
     context_text, context_sha = render_bound_context(value, request, max_context_bytes=max_context_bytes,
                                                      policy_path=policy_path)
     screened_request, redactions = screen_private_corpus._screen(request, rules, policy['limits'])
@@ -508,16 +538,20 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
     if (not isinstance(source, dict) or not isinstance(split, dict) or not isinstance(provider, dict)
             or split.get('assignment') != 'train' or split.get('policy') != 'exploratory_train'
             or split.get('heldout_separation') != 'unknown' or source.get('verified') is not True
+            or source.get('project_association') != 'inventory_label_unverified'
             or not isinstance(source.get('source_prefix_sha256'), str)
             or not isinstance(source.get('source_line_sha256'), str)
             or not isinstance(source.get('user_text_sha256'), str)
-            or not isinstance(provider.get('cache_sha256'), str)):
+            or not isinstance(provider.get('cache_sha256'), str)
+            or not isinstance(provider.get('screen_policy_sha256'), str)):
         raise ValueError('staged source provenance is incomplete')
     if isinstance(materialization, dict) and materialization.get('kind') == 'origin-verified-private-projection':
         if (materialization.get('source_and_cache_verified_on_origin_host') is not True
                 or materialization.get('full_source_paths_transferred') is not False
                 or materialization.get('provider_extension_payloads_transferred') is not False):
             raise ValueError('staged projection provenance is invalid')
+    if policy_raw is not None and provider.get('screen_policy_sha256') != sha(policy_raw):
+        raise ValueError('staged provider screening policy digest mismatch')
     if (manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
             or manifest.get('requests') != 1 or manifest.get('test_opened') is not False
             or manifest.get('validation_opened') is not False or manifest.get('heldout_separation') != 'unknown'
@@ -579,7 +613,7 @@ def stage_snapshot_projection(value: dict, context_text: str) -> tuple[dict, dic
                             'full_source_paths_transferred': False,
                             'provider_extension_payloads_transferred': False},
         'source': {key: source[key] for key in (
-            'kind', 'project', 'source_locator_sha256', 'source_group_sha256', 'selected_line',
+            'kind', 'project', 'project_association', 'source_locator_sha256', 'source_group_sha256', 'selected_line',
             'source_prefix_bytes', 'source_prefix_sha256', 'source_line_sha256', 'user_text_sha256',
             'user_text_utf8_bytes', 'source_file_sha256_at_inventory', 'current_whole_file_sha256', 'verified')},
         'split': value['split'],
@@ -588,6 +622,7 @@ def stage_snapshot_projection(value: dict, context_text: str) -> tuple[dict, dic
             'cache_sha256': provider['cache_sha256'],
             'cache_bytes': provider['cache_bytes'],
             'cache_mtime_utc': provider['cache_mtime_utc'],
+            'screen_policy_sha256': provider['screen_policy_sha256'],
             'source_locator_sha256': sha(provider['source_locator'].encode('utf-8')),
             'models': selected_rows,
         },
@@ -657,6 +692,20 @@ foreach ($r in $rules) {
       $r.IdentityReference.Value -notin $expected) { exit 8 }
 }
 if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
+$expectedSet = @($expected | Sort-Object -Unique)
+$directory = (Get-Item -LiteralPath $p).Directory
+while ($null -ne $directory) {
+  $da = Get-Acl -LiteralPath $directory.FullName
+  $dr = @($da.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+  if (-not $da.AreAccessRulesProtected -or $dr.Count -ne 3) { exit 10 }
+  foreach ($r in $dr) {
+    if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+        $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+        $r.IdentityReference.Value -notin $expectedSet) { exit 11 }
+  }
+  if (@($dr | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 12 }
+  $directory = $directory.Parent
+}
 exit 0
 '''
     verified = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', verify_script],
@@ -673,13 +722,10 @@ def write_private_snapshot(path: Path, snapshot: dict) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
-            os.close(descriptor)
-            descriptor = -1
             _secure_windows_file(path)
-            with path.open('r+b') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
+            handle = descriptor
+            descriptor = -1
+            _write_verified_windows_handle(handle, path, raw)
         else:
             with os.fdopen(descriptor, 'wb') as stream:
                 descriptor = -1
@@ -707,13 +753,10 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
-            os.close(descriptor)
-            descriptor = -1
             _secure_windows_file(path)
-            with path.open('r+b') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
+            handle = descriptor
+            descriptor = -1
+            _write_verified_windows_handle(handle, path, raw)
         else:
             with os.fdopen(descriptor, 'wb') as stream:
                 descriptor = -1
@@ -732,11 +775,24 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
         raise
 
 
+def _write_verified_windows_handle(descriptor: int, path: Path, raw: bytes) -> None:
+    """Write through the originally created handle after ACL and identity checks."""
+    opened = os.fstat(descriptor)
+    named = path.stat()
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        raise ValueError('Windows private file identity changed during ACL verification')
+    with os.fdopen(descriptor, 'wb', closefd=True) as stream:
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inventory', type=Path, required=True)
     parser.add_argument('--record', type=int, required=True)
     parser.add_argument('--provider-cache', type=Path, required=True)
+    parser.add_argument('--screen-policy', type=Path, default=_default_screen_policy_path())
     parser.add_argument('--split-policy', choices=('exploratory_train', 'reserved_train'), required=True)
     parser.add_argument('--reserved-project', action='append', default=[])
     parser.add_argument('--output', type=Path, required=True)
@@ -759,6 +815,7 @@ def main() -> None:
             raise ValueError('invalid inventory record')
         result = build_snapshot(record, args.provider_cache, split_policy=args.split_policy,
                                 known_reserved_project_labels=args.reserved_project,
+                                screen_policy_path=args.screen_policy,
                                 max_session_bytes=args.max_session_bytes, max_line_bytes=args.max_line_bytes,
                                 max_cache_bytes=args.max_cache_bytes)
         write_private_snapshot(args.output, result)
