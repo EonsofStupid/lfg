@@ -13,8 +13,14 @@ import train
 from owned_sft_checkpoint import private_directory
 
 
-def split(selection: Path, config_path: Path, policy_path: Path, original: Path, destination: Path) -> dict:
+def split(selection: Path, config_path: Path, policy_path: Path, original: Path, destination: Path,
+          project_context_path: Path | None = None) -> dict:
     config, config_raw = collector.config_file(config_path)
+    context_sha = None
+    if project_context_path is not None:
+        _, context_sha, _ = collector.project_context.load(
+            project_context_path, max_file_bytes=config['max_manifest_bytes'],
+            max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']))
     _, _, policy_sha = screen.load_policy(policy_path, config['max_manifest_bytes'])
     selection_raw = (selection / 'manifest.json').read_bytes()
     source_raw = (selection / 'requests.jsonl').read_bytes()
@@ -25,6 +31,9 @@ def split(selection: Path, config_path: Path, policy_path: Path, original: Path,
                 'selection_manifest_sha256': collector.sha(selection_raw), 'requests_sha256': collector.sha(source_raw),
                 'policy_sha256': policy_sha, 'collector_sha256': collector.sha(Path(collector.__file__).read_bytes()),
                 'screen_code_sha256': collector.sha(Path(screen.__file__).read_bytes())}
+    if context_sha is not None:
+        expected['project_context_file_sha256'] = context_sha
+        expected['project_context_code_sha256'] = collector.sha(Path(collector.project_context.__file__).read_bytes())
     if (identity_raw != collector.encoded(expected) or manifest.get('requests_sha256') != collector.sha(source_raw)
             or manifest.get('requests') != len(rows) or manifest.get('validation_opened') is not False
             or manifest.get('test_opened') is not False):
@@ -78,8 +87,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('selection', 'config', 'policy', 'original', 'destination'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--project-context', type=Path)
     args = parser.parse_args()
-    result = split(args.selection, args.config, args.policy, args.original, args.destination)
+    result = split(args.selection, args.config, args.policy, args.original, args.destination,
+                   project_context_path=args.project_context)
     print(json.dumps({k: result[k] for k in ('completed_prefix', 'excluded_reason', 'remaining')}))
 
 

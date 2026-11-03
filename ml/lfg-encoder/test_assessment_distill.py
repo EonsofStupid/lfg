@@ -43,10 +43,26 @@ class DistillationPreparationTests(unittest.TestCase):
         self.plan_path.write_text(json.dumps(self.plan), encoding='utf-8')
 
     def test_unreviewed_teacher_trace_is_preserved_as_claim_and_not_promoted(self):
+        project_context = 'project status: active'
+        context_request = project_context + '\n\nfixture request'
+        self.row['request'] = context_request
+        self.row['teacher_system_sha256'] = hashlib.sha256(self.plan['system_prompt'].encode()).hexdigest()
+        self.row['project_context_sha256'] = hashlib.sha256(project_context.encode()).hexdigest()
+        self.row['project_context_byte_length'] = len(project_context.encode())
+        self.row['custom_extension'] = {'kept': True}
+        self.write_source([self.row])
+        self.plan['sources'][0] = self.source_entry(self.source, 'train', 'project-one')
+        self.write_plan()
         result = subject.build(self.plan_path, self.output)
         record = json.loads((self.output / 'train.jsonl').read_bytes())
         manifest = json.loads((self.output / 'manifest.json').read_bytes())
         self.assertEqual(record['messages'][0]['content'], self.plan['system_prompt'])
+        self.assertEqual(record['messages'][1]['content'], context_request)
+        self.assertEqual(record['metadata']['trace_extensions'], {
+            'project_context_sha256': self.row['project_context_sha256'],
+            'project_context_byte_length': self.row['project_context_byte_length'],
+            'teacher_system_sha256': self.row['teacher_system_sha256'],
+            'custom_extension': {'kept': True}})
         self.assertEqual(record['messages'][2]['content'], self.row['response'])
         self.assertEqual(record['metadata']['review_status_claim'], 'unreviewed')
         self.assertEqual(record['metadata']['outcome_claim'], 'unknown')
@@ -57,6 +73,52 @@ class DistillationPreparationTests(unittest.TestCase):
         self.assertFalse(manifest['validation_is_independent'])
         self.assertFalse((self.output / 'validation.jsonl').exists())
         self.assertNotIn('fixture-secret-marker', json.dumps(manifest))
+
+    def test_context_extension_digest_is_verified_before_output(self):
+        project_context = 'project facts'
+        self.row.update(request=project_context + '\n\nfixture request',
+                        project_context_sha256='0' * 64,
+                        project_context_byte_length=len(project_context.encode()))
+        self.write_source([self.row])
+        self.plan['sources'][0] = self.source_entry(self.source, 'train', 'project-one')
+        self.write_plan()
+        with self.assertRaisesRegex(ValueError, 'context digest'):
+            subject.build(self.plan_path, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_collected_teacher_system_prompt_must_match_distillation_plan(self):
+        self.row['teacher_system_sha256'] = hashlib.sha256(b'different system').hexdigest()
+        self.write_source([self.row])
+        self.plan['sources'][0] = self.source_entry(self.source, 'train', 'project-one')
+        self.write_plan()
+        with self.assertRaisesRegex(ValueError, 'system prompt digest'):
+            subject.build(self.plan_path, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_underlying_requests_deduplicate_across_context_and_splits(self):
+        source_request = 'ＦＩＸＴＵＲＥ\trequest'
+        for second_is_contextual in (True, False):
+            with self.subTest(second_is_contextual=second_is_contextual):
+                first = {**self.row, 'request': 'first facts\n\n' + source_request,
+                         'project_context_sha256': hashlib.sha256(b'first facts').hexdigest(),
+                         'project_context_byte_length': len('first facts'.encode())}
+                second_request = ('second facts\n\nfixture   REQUEST' if second_is_contextual
+                                  else ' fixture   REQUEST ')
+                second = {**self.row, 'id': 'fixture-2', 'request': second_request,
+                          'source_ref': 'fixture-session-2', 'source_sha256': 'b' * 64}
+                if second_is_contextual:
+                    second.update(project_context_sha256=hashlib.sha256(b'second facts').hexdigest(),
+                                  project_context_byte_length=len('second facts'.encode()))
+                second_path = self.root / f'second-{second_is_contextual}.jsonl'
+                self.write_source([first])
+                self.write_source([second], second_path)
+                self.plan['sources'] = [self.source_entry(self.source, 'train', 'project-one'),
+                                        self.source_entry(second_path, 'validation', 'project-two')]
+                self.write_plan()
+                output = self.root / f'output-{second_is_contextual}'
+                with self.assertRaisesRegex(ValueError, 'duplicate normalized request'):
+                    subject.build(self.plan_path, output)
+                self.assertFalse(output.exists())
 
     def test_cli_uses_real_plan_and_refuses_existing_output(self):
         cli = Path(subject.__file__).with_name('distill.py')

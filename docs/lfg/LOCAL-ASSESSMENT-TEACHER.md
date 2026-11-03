@@ -44,6 +44,40 @@ limit, temperature, response format or streaming behavior. Extensions and
 their values are part of the immutable collection configuration and therefore
 part of the recorded run identity.
 
+Optional project context can be supplied with `--project-context`. The
+`lfg.project-training-context.v1` file has a `projects` object keyed by the
+selected request's project label. Each entry has UTF-8 `text` and lowercase
+`sha256` equal to the digest of those exact bytes. The collector validates the
+file and each entry, applies the configured screen policy, requires an entry
+for every selected project, and records the context file digest in the
+immutable run identity. `max_context_bytes` bounds each context and the fully
+rendered teacher user request.
+
+Teacher collection and `/api/lfg/assess/owned` share the same user rendering:
+context text, two newline characters, then request text. The API accepts
+optional `context` and `contextSha256` alongside the existing `text`; it
+rejects a missing or incorrect digest, empty context, or context over its
+configured bound. Without context fields, the owned API and collector retain
+the legacy prompt bytes. Teacher traces store the rendered request verbatim,
+and the existing distillation and SFT paths train on those exact bytes.
+The collector also records a digest of its exact teacher system prompt;
+distillation requires a supplied digest to match the plan system prompt and
+preserves trace extensions in SFT metadata. The current SFT trainer records the
+single system prompt digest in its training manifest, and the owned service
+checks it against serving framing when that digest is present. Legacy traces
+without a teacher system digest remain supported but do not provide this link.
+Context-file and trace extension fields are retained as metadata and do not
+change rendering or routing behavior.
+
+This is an opaque context transport contract. The digest proves byte identity
+only; it does not validate source provenance, freshness, completeness,
+authorization, or truth. Callers must assemble context from permitted sources,
+retain provenance separately, and keep held-out evaluation material out. This
+option does not infer model availability, subscription entitlements, project
+success, or outcome labels, and does not establish a subscription-aware
+validated training path. Context files, selections, traces, and resulting
+weights must remain local and outside Git.
+
 The optional `on_incomplete` policy defaults to `fail`. When explicitly set to
 `skip`, an incomplete or invalid individual response is recorded as a failure
 and the collector continues; the final manifest reports requested, successful,

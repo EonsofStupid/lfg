@@ -16,11 +16,13 @@ The JSON config uses schema `lfg.owned-assessment-service.v1`. The example sets 
 
 The service checks the ONNX model hash against its manifest, checks the configured model hash, pins and hashes the complete framing file, verifies the system string against its recorded system hash, and links the source weights and training manifest hashes recorded in the ONNX manifest. It also checks the framing's training/config hash fields against the training manifest. Those recorded fields are provenance claims: their equality does not independently prove that framing text was generated from the referenced training config. The operator's pinned framing-file hash and the supplied private checkpoint/framing verification are the trust anchors.
 
+Training manifests from the current owned SFT trainer also carry `system_sha256`; the service checks it against the serving system bytes. Older manifests without this field remain compatible but do not provide that system-to-training link.
+
 ## API
 
 `GET /api/lfg/assess/owned/status` requires the same token as inference. It returns `status: "disabled" | "unavailable" | "ready"`, `enabled`, `engine` (or `null`), configured bounds in `limits`, and a machine-readable `reason` when not ready. It does not return file paths or secrets.
 
-`POST /api/lfg/assess/owned` accepts `{ "text": "...", ...extensionFields }`. Inference responses use HTTP 200 and always include numeric `elapsedMs`, `status`, and `engine` (possibly `null`). Result statuses are:
+`POST /api/lfg/assess/owned` accepts `{ "text": "...", ...extensionFields }`. Optional `context` and `contextSha256` fields add digest-checked project context with the same byte rendering as teacher collection: context text, two newline bytes, then request text. Context is opaque transport; the API does not validate its source, freshness, model availability, or subscription status. With neither field, legacy request framing is unchanged. Inference responses use HTTP 200 and always include numeric `elapsedMs`, `status`, and `engine` (possibly `null`). Result statuses are:
 
 - `ok`: the worker stopped at the configured assistant suffix and returned a JSON object that satisfies the configured output policy; this does not verify its correctness.
 - `truncated`: byte/context generation limit ended output; bounded partial `outputText` is returned even when it is not complete JSON.

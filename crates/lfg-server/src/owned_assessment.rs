@@ -125,8 +125,13 @@ struct RuntimeConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct InferRequest {
     text: String,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    context_sha256: Option<String>,
     #[serde(flatten)]
     _extensions: serde_json::Map<String, Value>,
 }
@@ -309,6 +314,24 @@ async fn infer(
             None,
         );
     }
+    let user_text = match render_user_text(
+        request.context.as_deref(),
+        request.context_sha256.as_deref(),
+        &request.text,
+        service.config.max_context_bytes,
+    ) {
+        Ok(value) => value,
+        Err(()) => {
+            return response(
+                "invalid_input",
+                Some(service.engine.clone()),
+                started,
+                None,
+                None,
+                None,
+            );
+        }
+    };
     let permit: OwnedSemaphorePermit = match service.permits.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -322,9 +345,43 @@ async fn infer(
             );
         }
     };
-    let result = run_inference(service.clone(), request.text, started).await;
+    let result = run_inference(service.clone(), user_text, started).await;
     drop(permit);
     result
+}
+
+fn render_user_text(
+    context: Option<&str>,
+    expected_sha256: Option<&str>,
+    request: &str,
+    max_context_bytes: usize,
+) -> Result<String, ()> {
+    if request.is_empty() {
+        return Err(());
+    }
+    match (context, expected_sha256) {
+        (None, None) => Ok(request.to_owned()),
+        (Some(context), Some(expected)) if !context.is_empty() => {
+            if context.len() > max_context_bytes || digest(context.as_bytes()) != expected {
+                return Err(());
+            }
+            Ok(format!("{context}\n\n{request}"))
+        }
+        _ => Err(()),
+    }
+}
+
+fn model_prompt(system: &str, framing: &Framing, user: &str) -> String {
+    format!(
+        "{}{}{}{}{}{}{}",
+        framing.system_prefix,
+        system,
+        framing.system_suffix,
+        framing.user_prefix,
+        user,
+        framing.user_suffix,
+        framing.assistant_prefix,
+    )
 }
 
 async fn run_inference(
@@ -333,17 +390,7 @@ async fn run_inference(
     started: Instant,
 ) -> (StatusCode, Json<Value>) {
     let config = &service.config;
-    let prompt = format!(
-        "{}{}{}{}{}{}{}{}",
-        service.framing.system_prefix,
-        service.system,
-        service.framing.system_suffix,
-        service.framing.user_prefix,
-        text,
-        service.framing.user_suffix,
-        service.framing.assistant_prefix,
-        ""
-    );
+    let prompt = model_prompt(&service.system, &service.framing, &text);
     if prompt.len() > config.max_context_bytes {
         return response(
             "context_limit",
@@ -777,6 +824,10 @@ fn provenance_links_valid(
     system: &str,
     training_digest: &str,
 ) -> bool {
+    let system_sha256 = digest(system.as_bytes());
+    let training_system_matches = training.get("system_sha256").map_or(true, |value| {
+        is_sha256_value(value) && value.as_str() == Some(system_sha256.as_str())
+    });
     let linked_hashes = [
         &manifest["source_weights_sha256"],
         &manifest["source_manifest_sha256"],
@@ -790,7 +841,8 @@ fn provenance_links_valid(
     if linked_hashes.iter().any(|value| !is_sha256_value(value)) {
         return false;
     }
-    framing["system_sha256"].as_str() == Some(digest(system.as_bytes()).as_str())
+    training_system_matches
+        && framing["system_sha256"].as_str() == Some(system_sha256.as_str())
         && training["weights_sha256"].as_str() == manifest["source_weights_sha256"].as_str()
         && training_digest
             == manifest["source_manifest_sha256"]
@@ -955,6 +1007,58 @@ mod tests {
     }
 
     #[test]
+    fn optional_project_context_is_digest_checked_and_rendered_identically() {
+        let context = "project: \u{03b1}\nstatus: active";
+        let context_digest = digest(context.as_bytes());
+        let user =
+            render_user_text(Some(context), Some(&context_digest), "fix the route", 128).unwrap();
+        assert_eq!(user, "project: \u{03b1}\nstatus: active\n\nfix the route");
+        assert_eq!(
+            render_user_text(None, None, "fix the route", 128).unwrap(),
+            "fix the route"
+        );
+        assert!(render_user_text(Some(context), None, "fix the route", 128).is_err());
+        assert!(
+            render_user_text(Some(context), Some(&"0".repeat(64)), "fix the route", 128).is_err()
+        );
+        assert!(
+            render_user_text(Some(context), Some(&context_digest), "fix the parser", 4).is_err()
+        );
+        assert!(
+            serde_json::from_slice::<InferRequest>(
+                format!(
+                    r#"{{"text":"fix the parser","context":{},"contextSha256":"{}"}}"#,
+                    serde_json::to_string(context).unwrap(),
+                    context_digest
+                )
+                .as_bytes()
+            )
+            .is_ok()
+        );
+        let user = render_user_text(
+            Some("P \u{03b1}"),
+            Some(&digest("P \u{03b1}".as_bytes())),
+            "Q",
+            256,
+        )
+        .unwrap();
+        let framing = Framing {
+            system_prefix: "[system]\n".into(),
+            system_suffix: "\n".into(),
+            user_prefix: "[user]\n".into(),
+            user_suffix: "\n".into(),
+            assistant_prefix: "[assistant]\n".into(),
+            assistant_suffix: "\n".into(),
+        };
+        let framed = model_prompt("Assess the supplied request.", &framing, &user);
+        assert_eq!(
+            framed.as_bytes(),
+            "[system]\nAssess the supplied request.\n[user]\nP \u{03b1}\n\nQ\n[assistant]\n"
+                .as_bytes()
+        );
+    }
+
+    #[test]
     fn output_contract_detects_missing_and_wrong_types_but_keeps_extensions() {
         let required: Vec<RequiredField> = serde_json::from_str(
             r#"[
@@ -1032,8 +1136,9 @@ mod tests {
         let config = "b".repeat(64);
         let data = "c".repeat(64);
         let system = "system text";
-        let training =
-            json!({"weights_sha256":weights,"config_sha256":config,"training_file_sha256":data});
+        let system_sha = digest(system.as_bytes());
+        let training = json!({"weights_sha256":weights,"config_sha256":config,
+            "training_file_sha256":data,"system_sha256":system_sha});
         let raw = serde_json::to_vec(&training).unwrap();
         let manifest =
             json!({"source_weights_sha256":weights,"source_manifest_sha256":digest(&raw)});
@@ -1044,6 +1149,18 @@ mod tests {
             &training,
             system,
             &digest(&raw)
+        ));
+        let mut changed_system = training.clone();
+        changed_system["system_sha256"] = json!("d".repeat(64));
+        let changed_raw = serde_json::to_vec(&changed_system).unwrap();
+        let changed_manifest = json!({"source_weights_sha256":weights,
+            "source_manifest_sha256":digest(&changed_raw)});
+        assert!(!provenance_links_valid(
+            &changed_manifest,
+            &framing,
+            &changed_system,
+            system,
+            &digest(&changed_raw)
         ));
         for invalid in [Value::Null, json!(7)] {
             let mut bad = training.clone();
