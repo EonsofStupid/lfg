@@ -16,10 +16,12 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def stage(config_path: Path, policy_path: Path, output: Path) -> dict:
-    config_raw = config_path.read_bytes()
-    if len(config_raw) > 1048576:
-        raise ValueError('source configuration is too large')
+def stage(config_path: Path, policy_path: Path, output: Path, *, max_config_bytes: int = 1048576,
+          max_policy_bytes: int = 1048576) -> dict:
+    if (type(max_config_bytes) is not int or max_config_bytes < 1
+            or type(max_policy_bytes) is not int or max_policy_bytes < 1):
+        raise ValueError('configuration byte limits must be positive')
+    config_raw = screen._read(config_path, max_config_bytes, 'source_config_unavailable_or_oversize')
     config = json.loads(config_raw)
     if (not isinstance(config, dict) or config.get('schema_version') != 'lfg.owned-source-selection.v1'
             or config.get('sampling') not in ('byte_uniform', 'document_uniform', 'group_uniform')
@@ -28,7 +30,7 @@ def stage(config_path: Path, policy_path: Path, output: Path) -> dict:
             or type(config.get('max_files')) is not int or config['max_files'] < 1
             or not isinstance(config.get('projects'), list) or not config['projects']):
         raise ValueError('invalid source selection configuration')
-    policy, rules, policy_sha = screen.load_policy(policy_path, 1048576)
+    policy, rules, policy_sha = screen.load_policy(policy_path, max_policy_bytes)
     if output.exists():
         raise ValueError('output already exists')
     private_directory(output)
@@ -101,14 +103,17 @@ def stage(config_path: Path, policy_path: Path, output: Path) -> dict:
             redactions.update(counts)
     if not sources:
         raise ValueError('no source documents passed screening')
-    if (config_path.read_bytes() != config_raw or screen.load_policy(policy_path, 1048576)[2] != policy_sha
+    if (screen._read(config_path, max_config_bytes, 'source_config_changed') != config_raw
+            or screen.load_policy(policy_path, max_policy_bytes)[2] != policy_sha
             or any(not path.is_file() or path.is_symlink() or sha(path.read_bytes()) != digest
                    for path, digest in snapshots)):
         raise ValueError('source selection changed during staging')
     plan = {'schema_version': 'lfg.document-development-plan.v1', 'sampling': config['sampling'], 'sources': sources}
     (output / 'plan.json').write_text(json.dumps(plan, sort_keys=True, indent=2) + '\n', encoding='utf-8')
     result = {'schema_version': 'lfg.owned-source-corpus.v1', 'config_sha256': sha(config_raw),
-              'policy_sha256': policy_sha, 'documents': len(sources), 'source_bytes': total,
+              'policy_sha256': policy_sha, 'staging_code_sha256': sha(Path(__file__).read_bytes()),
+              'screen_code_sha256': sha(Path(screen.__file__).read_bytes()),
+              'documents': len(sources), 'source_bytes': total,
               'screened_bytes': sum(item['screened_bytes'] for item in provenance),
               'projects': dict(sorted(Counter(item['project'] for item in provenance).items())),
               'skipped': dict(sorted(skipped.items())), 'redaction_counts': dict(sorted(redactions.items())),
@@ -122,8 +127,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('config', 'policy', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--max-config-bytes', type=int, default=1048576)
+    parser.add_argument('--max-policy-bytes', type=int, default=1048576)
     args = parser.parse_args()
-    result = stage(args.config, args.policy, args.output)
+    result = stage(args.config, args.policy, args.output, max_config_bytes=args.max_config_bytes,
+                   max_policy_bytes=args.max_policy_bytes)
     print(json.dumps({key: result[key] for key in ('documents', 'source_bytes', 'screened_bytes', 'projects',
                                                     'skipped', 'redaction_counts', 'test_opened')}))
 

@@ -34,8 +34,20 @@ To supervise assessment fine-tuning, use the separate
 It accepts an owned starting checkpoint and a prepared private assessment
 dataset; it does not turn teacher claims into verified outcomes.
 
-`owned_training_dashboard.py` serves only sanitized progress from a single
-status file and binds to loopback. If shared through a proxy, configure an
+`owned_training_chain.py` can wait for an explicitly configured owned
+pretraining job, verify its completed manifest and weight digest, and launch
+the configured assessment fine-tune under the same service supervisor. Its
+[configuration](../../ml/lfg-encoder/owned-training-chain.example.json)
+specifies the existing dataset and all paths and limits. It does not fetch new
+teacher batches or select models automatically.
+`owned_evaluation_chain.py` can similarly wait for that fine-tune, verify its
+result and run one configured private development-format evaluation. A
+matching completed report is reused; a changed checkpoint, dataset, policy or
+evaluation configuration is rejected. Format results do not measure whether
+the assessment is correct.
+
+`owned_training_dashboard.py` serves sanitized training progress and optional
+aggregate teacher and format-evaluation status, and binds to loopback. If shared through a proxy, configure an
 appropriate authenticated private network and TLS; the dashboard itself has
 no authentication or access control. Its status is not assessment quality,
 and it does not control training, operate a queue, or expose examples.
@@ -156,8 +168,18 @@ The expanded run resumed from a completed step-1,500 checkpoint after an
 intentional service restart and then continued training. This does not prove
 recovery from power loss or all storage failures.
 
-Each collection is a finite, resumable job; preparing its outputs for training
-and triggering the next fine-tune are not yet automated. The completed earlier
+Two additional user services now wait for that run: the first verifies the
+completed byte-model weights and launches an assessment fine-tune using the
+prepared 349-example dataset, and the second verifies that fine-tune and runs
+the existing 10-request private development-format check. Their control flow
+was exercised with completed-checkpoint software fixtures on the Spark; the
+actual downstream jobs have not started because pretraining is still running.
+The dashboard switches to the assessment job when its status appears and
+displays the resulting aggregate format count when the report is available.
+
+Each teacher collection is a finite, resumable job; transferring newly
+completed teacher batches into the prepared assessment dataset is not yet
+automated. The completed earlier
 assessment services used the prior trainer implementation; the
 final-checkpoint recovery improvement applies to new jobs, not migrations of
 their pinned checkpoints.

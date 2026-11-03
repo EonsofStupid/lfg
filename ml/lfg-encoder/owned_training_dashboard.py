@@ -21,6 +21,8 @@ progress{width:100%;height:1.4rem;accent-color:#38bdf8}small{color:#d1d5db}
 <p id="steps">Waiting for the trainer</p><small id="updated"></small></section>
 <section id="teacher" hidden><h2>Local teacher collection</h2><p id="teacher-state">Connecting</p>
 <progress id="teacher-progress" max="1" value="0"></progress><p id="teacher-count"></p></section>
+<section id="evaluation" hidden><h2>Development format check</h2><p id="evaluation-result">Waiting</p>
+<small>This checks JSON structure, not assessment accuracy.</small></section>
 <section><p>This is an experimental owned-model run. A completed training run does not establish assessment quality or release readiness.</p></section>
 </main><script>
 const teacherUrl=__TEACHER_URL__;
@@ -35,7 +37,12 @@ const r=await fetch(teacherUrl,{cache:'no-store'});if(!r.ok)throw Error();const 
 document.getElementById('teacher-state').textContent='Status: '+d.state;
 const p=document.getElementById('teacher-progress');p.max=d.requested||1;p.value=(d.completed||0)+(d.failed||0);
 document.getElementById('teacher-count').textContent=(d.completed||0)+' completed, '+(d.failed||0)+' incomplete / '+(d.requested||0)+' requests';
-}catch(e){document.getElementById('teacher-state').textContent='Status unavailable'}}}refresh();setInterval(refresh,5000);
+}catch(e){document.getElementById('teacher-state').textContent='Status unavailable'}}
+try{const r=await fetch('api/evaluation',{cache:'no-store'});if(r.ok){const d=await r.json();
+document.getElementById('evaluation').hidden=false;document.getElementById('evaluation-result').textContent=
+d.state==='complete'?(d.required_fields_present+' / '+d.total+' outputs contain the required fields'):
+(d.state==='pending'?'Waiting for the follow-on evaluation':'Evaluation status unavailable');}}
+catch(e){} }refresh();setInterval(refresh,5000);
 </script></html>'''
 
 
@@ -66,14 +73,42 @@ def render_page(teacher_status_url: str | None) -> bytes:
     return PAGE.replace(b'__TEACHER_URL__', url)
 
 
-def handler(path: Path, teacher_status_url: str | None = None):
+def current_status(path: Path, next_status: Path | None) -> dict:
+    return status(next_status if next_status is not None and next_status.exists() else path)
+
+
+def evaluation_status(path: Path) -> dict:
+    try:
+        with path.open('rb') as stream:
+            raw = stream.read(1048577)
+        if len(raw) > 1048576:
+            raise ValueError('evaluation report too large')
+        value = json.loads(raw)
+        counts = value.get('format_counts')
+        if (value.get('schema_version') != 'lfg.owned-torch-format-evaluation.v1' or not isinstance(counts, dict)
+                or any(key not in ('invalid_json', 'missing_required_fields', 'required_fields_present')
+                       or type(count) is not int or count < 0 for key, count in counts.items())):
+            raise ValueError('invalid evaluation report')
+        return {'state': 'complete', 'required_fields_present': counts.get('required_fields_present', 0),
+                'total': sum(counts.values())}
+    except FileNotFoundError:
+        return {'state': 'pending', 'required_fields_present': 0, 'total': 0}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {'state': 'unavailable', 'required_fields_present': 0, 'total': 0}
+
+
+def handler(path: Path, teacher_status_url: str | None = None, next_status: Path | None = None,
+            evaluation_report: Path | None = None):
     page = render_page(teacher_status_url)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/':
                 content, content_type = page, 'text/html; charset=utf-8'
             elif self.path == '/api/status':
-                content = json.dumps(status(path), allow_nan=False).encode('utf-8')
+                content = json.dumps(current_status(path, next_status), allow_nan=False).encode('utf-8')
+                content_type = 'application/json; charset=utf-8'
+            elif self.path == '/api/evaluation' and evaluation_report is not None:
+                content = json.dumps(evaluation_status(evaluation_report), allow_nan=False).encode('utf-8')
                 content_type = 'application/json; charset=utf-8'
             else:
                 self.send_error(404)
@@ -97,6 +132,8 @@ def main():
     parser.add_argument('--status', type=Path, required=True)
     parser.add_argument('--listen', default='127.0.0.1')
     parser.add_argument('--port', type=int, required=True)
+    parser.add_argument('--next-status', type=Path, help='optional follow-on job status, used once present')
+    parser.add_argument('--evaluation-report', type=Path, help='optional follow-on development format report')
     parser.add_argument('--teacher-status-url', help='optional relative URL for an aggregate teacher status endpoint')
     args = parser.parse_args()
     if not ipaddress.ip_address(args.listen).is_loopback:
@@ -104,7 +141,8 @@ def main():
     if args.teacher_status_url and (urlsplit(args.teacher_status_url).scheme or urlsplit(args.teacher_status_url).netloc
                                     or '\\' in args.teacher_status_url):
         parser.error('teacher status URL must be relative')
-    ThreadingHTTPServer((args.listen, args.port), handler(args.status, args.teacher_status_url)).serve_forever()
+    ThreadingHTTPServer((args.listen, args.port), handler(args.status, args.teacher_status_url, args.next_status,
+                                                        args.evaluation_report)).serve_forever()
 
 
 if __name__ == '__main__':
