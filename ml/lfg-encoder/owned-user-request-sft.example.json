@@ -24,6 +24,7 @@
   "deterministic_algorithms": true,
   "allow_tf32": false,
   "allow_truncated_prompt": false,
+  "allow_unlinked_legacy_sft_checkpoint": false,
   "review_status_weights": {
     "reviewed": 0.0,
     "unreviewed": 1.0

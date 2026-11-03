@@ -130,6 +130,9 @@ def configuration(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
             or any(type(config.get(k)) not in (int, float) or not math.isfinite(config[k])
                    for k in ('learning_rate', 'weight_decay'))
             or config['learning_rate'] <= 0 or config['weight_decay'] < 0
+            or ('allow_unlinked_legacy_sft_checkpoint' in config
+                and type(config['allow_unlinked_legacy_sft_checkpoint']) is not bool)
+            or (config.get('allow_unlinked_legacy_sft_checkpoint', False) and not user_request_mode)
             or not isinstance(config.get('framing'), dict)
             or any(not isinstance(config['framing'].get(k), str) for k in framing_keys)):
         raise ValueError('invalid supervised training configuration')
@@ -541,21 +544,36 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
     }
 
 
-def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_code: dict) -> None:
-    """Fail closed on an SFT result without complete weight and source provenance."""
+def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_code: dict, *,
+                                       allow_unlinked_legacy: bool = False) -> dict:
+    """Validate an SFT checkpoint; optionally preserve missing legacy linkage as unknown."""
     required_digests = {'weights_sha256', 'source_checkpoint_manifest_sha256',
         'source_checkpoint_weights_sha256', 'dataset_manifest_sha256', 'training_file_sha256',
-        'system_sha256', 'framing_sha256', 'config_sha256'}
+        'config_sha256'}
     if (not isinstance(manifest, dict) or manifest.get('completed') is not True
+            or manifest.get('schema_version') not in ('lfg.owned-assessment-sft-result.v1',
+                                                       'lfg.owned-user-request-sft-result.v1')
             or any(not isinstance(manifest.get(name), str)
                    or not re.fullmatch(r'[0-9a-f]{64}', manifest[name]) for name in required_digests)
             or manifest['weights_sha256'] != sha(weights)
             or not isinstance(manifest.get('architecture'), dict)
             or not isinstance(manifest.get('coverage'), dict)
-            or manifest['coverage'].get('system_sha256') != manifest['system_sha256']
-            or manifest['coverage'].get('framing_sha256') != manifest['framing_sha256']
             or not isinstance(manifest.get('code_sha256'), dict)):
         raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
+    links = {}
+    for name in ('system_sha256', 'framing_sha256'):
+        top_present = name in manifest
+        coverage_present = name in manifest['coverage']
+        if not top_present:
+            if not allow_unlinked_legacy or coverage_present:
+                raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
+            links[name] = 'unknown_unlinked'
+            continue
+        value = manifest[name]
+        if (not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
+                or not coverage_present or manifest['coverage'][name] != value):
+            raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
+        links[name] = 'verified_linked'
     expected_code_names = {'train_owned_assessment_sft.py', 'train_owned_student.py',
                            'owned_student.py', 'owned_sft_checkpoint.py'}
     code = manifest['code_sha256']
@@ -567,6 +585,7 @@ def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_
     for name in ('steps', 'parameters', 'supervised_tokens'):
         if type(manifest.get(name)) is not int or manifest[name] < 1:
             raise ValueError('completed SFT checkpoint training provenance is invalid')
+    return links
 
 
 def _cli_is_user_request_mode(args: argparse.Namespace) -> bool:
@@ -644,9 +663,13 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
             or not isinstance(initial.get('code_sha256'), dict)
             or initial['code_sha256'].get('owned_student.py') != code['owned_student.py']):
         raise ValueError('owned checkpoint identity does not match')
+    source_checkpoint_links = {'system_sha256': 'not_applicable', 'framing_sha256': 'not_applicable'}
     if initial['schema_version'] in ('lfg.owned-user-request-sft-result.v1',
                                      'lfg.owned-assessment-sft-result.v1'):
-        validate_completed_sft_checkpoint(initial, initial_weights, code)
+        allow_unlinked = (user_request_mode and config.get('allow_unlinked_legacy_sft_checkpoint', False)
+                          and initial['schema_version'] == 'lfg.owned-assessment-sft-result.v1')
+        source_checkpoint_links = validate_completed_sft_checkpoint(
+            initial, initial_weights, code, allow_unlinked_legacy=allow_unlinked)
     architecture = dict(initial['architecture'])
     owned_student.validate_architecture(architecture)
     old_context = architecture['context']
@@ -697,7 +720,10 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     identity = {'dataset_manifest_sha256': base.sha(dataset_manifest), 'training_file_sha256': base.sha(train_raw),
                 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
                 'source_checkpoint_weights_sha256': base.sha(initial_weights),
-                'source_checkpoint_schema': initial['schema_version'], 'code_sha256': code,
+                'source_checkpoint_schema': initial['schema_version'],
+                'source_checkpoint_system_linkage': source_checkpoint_links['system_sha256'],
+                'source_checkpoint_framing_linkage': source_checkpoint_links['framing_sha256'],
+                'code_sha256': code,
                 'continuation_config_sha256': checkpoints.continuation_config(config), 'architecture': architecture,
                 'python': platform.python_version(), 'torch': str(torch.__version__), 'safetensors': safetensors.__version__,
                 'cuda_version': torch.version.cuda if config['device'] == 'cuda' else None,
@@ -754,6 +780,8 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
         partial = {'schema_version': partial_schema, 'completed': False,
                 'steps': end_step, 'parameters': parameters, 'supervised_tokens': supervised,
                 'source_checkpoint_schema': initial['schema_version'],
+                'source_checkpoint_system_linkage': source_checkpoint_links['system_sha256'],
+                'source_checkpoint_framing_linkage': source_checkpoint_links['framing_sha256'],
                 'coverage': coverage, 'latest_checkpoint': str(latest),
                 'latest_checkpoint_state_sha256': base.sha(base.read_bounded(latest / 'state.json', config['max_manifest_bytes'])),
                 'promotion_eligible': False}
@@ -768,6 +796,8 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     manifest = {'schema_version': result_schema, 'architecture': architecture,
                 'completed': True, 'resumed_from_step': initial_step,
                 'source_checkpoint_schema': initial['schema_version'],
+                'source_checkpoint_system_linkage': source_checkpoint_links['system_sha256'],
+                'source_checkpoint_framing_linkage': source_checkpoint_links['framing_sha256'],
                 'resume_checkpoint_state_sha256': resume_state_sha256,
                 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
                 'source_checkpoint_weights_sha256': base.sha(initial_weights),

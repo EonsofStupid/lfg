@@ -89,6 +89,19 @@ python ml/lfg-encoder/train_owned_assessment_sft.py \
   --output PRIVATE_DIRECTORY/user-request-checkpoint
 ```
 
+By default the trainer requires a completed SFT starting checkpoint to carry
+matching top-level and coverage system/framing digests. For an explicitly
+authorized exploratory continuation from a completed legacy assessment-SFT
+result that predates those two linkage fields, set
+`allow_unlinked_legacy_sft_checkpoint: true` in the user-request training
+config. This relaxes only those absent historical linkage fields. Each is
+recorded as `unknown_unlinked` in the resulting identity and output manifest;
+the trainer never derives or fills the missing values. A present null, malformed,
+or inconsistent digest still fails. Completion, weight digest, architecture and
+strict tensor loading, current student-code identity, and remaining provenance
+checks stay required. The default remains false, and the resulting user-request
+checkpoint remains non-promotable and incompatible with the current service.
+
 The existing inference service still expects the assessment output schema and
 does not serve this task. A task-specific service route, live provider-candidate
 input, and separate task evaluation are future work. The example config and

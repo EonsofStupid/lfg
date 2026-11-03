@@ -504,6 +504,13 @@ class UserRequestSFTTests(unittest.TestCase):
             assessment_dataset, checkpoint, assessment_config_path, completed_assessment)
         self.assertEqual(assessment_result['schema_version'], 'lfg.owned-assessment-sft-result.v1')
         self.assertTrue(assessment_result['completed'])
+        legacy_manifest_path = completed_assessment / 'manifest.json'
+        legacy_manifest = json.loads(legacy_manifest_path.read_bytes())
+        legacy_manifest.pop('system_sha256')
+        legacy_manifest.pop('framing_sha256')
+        legacy_manifest['coverage'].pop('system_sha256')
+        legacy_manifest['coverage'].pop('framing_sha256')
+        legacy_manifest_path.write_text(json.dumps(legacy_manifest), encoding='utf-8')
         train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
         train_config.update(context=2048, batch_size=1, steps=1, checkpoint_every=1,
                             max_parameters=100_000, max_attention_elements=10_000_000,
@@ -513,9 +520,17 @@ class UserRequestSFTTests(unittest.TestCase):
         config_path = self.root / 'owned-user-request-sft.json'
         config_path.write_text(json.dumps(train_config), encoding='utf-8')
         output = self.root / 'trained-user-request-task'
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.experiment(self.root / 'dataset.json', completed_assessment, config_path,
+                               self.root / 'strict-default-output')
+        self.assertFalse((self.root / 'strict-default-output').exists())
+        train_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        config_path.write_text(json.dumps(train_config), encoding='utf-8')
         result = trainer.experiment(self.root / 'dataset.json', completed_assessment, config_path, output)
         self.assertEqual(result['schema_version'], 'lfg.owned-user-request-sft-result.v1')
         self.assertEqual(result['source_checkpoint_schema'], 'lfg.owned-assessment-sft-result.v1')
+        self.assertEqual(result['source_checkpoint_system_linkage'], 'unknown_unlinked')
+        self.assertEqual(result['source_checkpoint_framing_linkage'], 'unknown_unlinked')
         self.assertEqual(result['training_task'], user_request_sft.TASK)
         self.assertFalse(result['assistant_teacher_claimed'])
         self.assertEqual(result['outcome_claim'], 'unknown')
@@ -560,11 +575,36 @@ class UserRequestSFTTests(unittest.TestCase):
             'architecture': {'fixture': True}, 'coverage': {'system_sha256': system_sha,
                 'framing_sha256': framing_sha}, 'code_sha256': code,
             'steps': 1, 'parameters': 1, 'supervised_tokens': 1}
-        trainer.validate_completed_sft_checkpoint(manifest, weights, code)
+        links = trainer.validate_completed_sft_checkpoint(manifest, weights, code)
+        self.assertEqual(links, {'system_sha256': 'verified_linked', 'framing_sha256': 'verified_linked'})
         incomplete = dict(manifest)
         incomplete.pop('framing_sha256')
         with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
             trainer.validate_completed_sft_checkpoint(incomplete, weights, code)
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(incomplete, weights, code, allow_unlinked_legacy=True)
+        unlinked = json.loads(json.dumps(manifest))
+        unlinked.pop('system_sha256')
+        unlinked.pop('framing_sha256')
+        unlinked['coverage'].pop('system_sha256')
+        unlinked['coverage'].pop('framing_sha256')
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(unlinked, weights, code)
+        self.assertEqual(trainer.validate_completed_sft_checkpoint(
+            unlinked, weights, code, allow_unlinked_legacy=True),
+            {'system_sha256': 'unknown_unlinked', 'framing_sha256': 'unknown_unlinked'})
+        null_link = json.loads(json.dumps(unlinked))
+        null_link['system_sha256'] = None
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(null_link, weights, code, allow_unlinked_legacy=True)
+        null_coverage = json.loads(json.dumps(unlinked))
+        null_coverage['coverage']['system_sha256'] = None
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(null_coverage, weights, code, allow_unlinked_legacy=True)
+        bad_link = json.loads(json.dumps(manifest))
+        bad_link['system_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_link, weights, code, allow_unlinked_legacy=True)
         not_completed = dict(manifest)
         not_completed['completed'] = False
         with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
@@ -580,6 +620,22 @@ class UserRequestSFTTests(unittest.TestCase):
         bad_framing['coverage']['framing_sha256'] = 'f' * 64
         with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
             trainer.validate_completed_sft_checkpoint(bad_framing, weights, code)
+
+    def test_unlinked_legacy_checkpoint_policy_is_user_request_only(self):
+        import train_owned_assessment_sft as trainer
+        user_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        user_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        user_path = self.root / 'user-request-policy.json'
+        user_path.write_text(json.dumps(user_config), encoding='utf-8')
+        parsed, _ = trainer.configuration(user_path)
+        self.assertTrue(parsed['allow_unlinked_legacy_sft_checkpoint'])
+
+        assessment_config = json.loads(Path(trainer.__file__).with_name('owned-assessment-sft.example.json').read_bytes())
+        assessment_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        assessment_path = self.root / 'assessment-policy.json'
+        assessment_path.write_text(json.dumps(assessment_config), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'invalid supervised training configuration'):
+            trainer.configuration(assessment_path)
 
     def test_ambiguous_provider_match_is_not_emitted_as_a_model_target(self):
         self._write_cache(duplicate_display_name=True)
