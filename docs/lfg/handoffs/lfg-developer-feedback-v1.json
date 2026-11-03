@@ -84,6 +84,11 @@
       "path": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
       "sha256": "9c0affb46ca69d1d8041f36fe59d5e5bccb7d0b3811350f026dbffd1abeac2fb",
       "normalization": "text-lf"
+    },
+    {
+      "path": "docs/lfg/GROUNDED-EXECUTION-PLAN-2026-11-03.md",
+      "sha256": "1a4994412a0ffcd3e4f039f7f471eee201a9fc458eb8d6cb5fe5db67534f1ce3",
+      "normalization": "text-lf"
     }
   ],
   "tasks": [
@@ -273,7 +278,7 @@
       ],
       "steps": [
         "Profile real CPU and Spark workloads with artifact IDs, input distributions, p50/p95 latency, memory, throughput and reproducible configuration.",
-        "Develop original model architecture and distillation experiments; compare quality, size, CPU and accelerator tradeoffs.",
+        "Compare an owned single-pass classification head and owned generative path on the same real targets, including rationale quality; test original hybrid designs, offline top-k teacher caches and chunked distillation against online training. Measure actual Spark quality, latency, throughput, memory and model size rather than assuming published results transfer.",
         "Make persistent training resumable, observable and resource-bounded with explicit failure and stop states."
       ],
       "checks": [

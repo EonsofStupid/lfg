@@ -83,6 +83,17 @@ changes. A task is complete only when code, integration and test results support
 acceptance criteria. Escalate stale anchors, conflicting requirements, repeated failed
 checks, privacy/security decisions beyond the authorized scope and unverified claims.
 
+For the hardware experiment, compare an owned single-forward-pass classifier with
+the owned generative path on the *same* reviewed tasks, including the cost and quality
+of producing understandable reasons. A single-pass head may reduce decode cost but
+does not establish useful explanations or performance on our inputs. Separately test
+offline teacher top-k logits and a memory-efficient chunked distillation loss against
+online distillation, with compatible tokenization, logged retained probability mass,
+private cache provenance and equal held-out targets. Verify throughput, memory and
+quality on the actual Spark; published H200 results do not predict Spark speedups.
+Measure caller-visible time to first output and end-to-end time separately from
+model-only prefill, under documented input lengths, load, warmup and concurrency.
+
 ## Routing and improvement
 
 The `clyffy-grounded-delivery` skill uses editable routes: Terra xhigh for grounding,
@@ -102,6 +113,17 @@ the routing policy; do not infer quality from speed or process exit.
 - [Liquid Foundation Models 2 paper](https://arxiv.org/abs/2511.23404): evidence for
   investigating hybrid short-convolution designs and distillation; a research input,
   not proof of LFG's quality or an instruction to use their weights.
+- [Liquid RIPL announcement](https://www.liquid.ai/blog/low-latency): vendor-reported
+  sub-50 ms end-to-end results on its stated workloads and infrastructure; treat as
+  a latency research target, not a promised LFG or CPU result.
+- [Liquid d1 research](https://www.liquid.ai/blog/d1-open): published single-pass
+  decision-model approach and device-specific benchmarks motivate a head-to-head
+  experiment using an independently built LFG model, without adopting its weights.
+- [Offline top-k and chunked distillation study](https://arxiv.org/abs/2608.03796):
+  motivates testing cached teacher logits and loss memory tradeoffs; its reported
+  hardware and workloads differ from our Spark and require independent validation.
+- [Pipette performance methodology](https://pipette.liquid.ai/docs/methodology/performance-methodology):
+  distinguishes prefill, time to first output and caller-visible end-to-end latency.
 - [NVIDIA DGX Spark known issues](https://docs.nvidia.com/dgx/dgx-spark/known-issues.html):
   verify target-platform constraints and measure the actual configuration.
 - [On leakage in code-generation benchmarks](https://arxiv.org/abs/2401.07930):
