@@ -206,14 +206,25 @@ def _source_identity_claim(record: dict) -> dict:
             'source_prefix_bytes', 'source_line', 'source_line_sha256', 'text_sha256')}
 
 
-def _validate_reserved_source_identities(value: object) -> list[dict]:
+def _validate_reserved_source_identities(value: object, *, screen_policy_path: Path | None = None,
+                                        screen_policy_raw: bytes | None = None) -> list[dict]:
     fields = {'source_file_sha256', 'source_prefix_sha256', 'source_prefix_bytes',
               'source_line', 'source_line_sha256', 'text_sha256'}
     if not isinstance(value, list) or len(value) > MAX_RESERVED_MANIFEST_BYTES // 200:
         raise ValueError('invalid reserved source identities')
     result = []
+    seen_known = set()
+    if screen_policy_path is not None and screen_policy_raw is not None:
+        raise ValueError('reserved identity screening policy source is ambiguous')
+    default_policy, default_rules, default_sha = screen_private_corpus.load_policy(
+        _default_screen_policy_path(), 1024 * 1024)
+    if screen_policy_raw is not None:
+        policy, rules, policy_sha = screen_private_corpus.load_policy_bytes(screen_policy_raw, 1024 * 1024)
+    else:
+        policy, rules, policy_sha = screen_private_corpus.load_policy(
+            screen_policy_path or _default_screen_policy_path(), 1024 * 1024)
     for item in value:
-        if (not isinstance(item, dict) or set(item) != fields
+        if (not isinstance(item, dict) or not fields.issubset(item)
                 or any(not isinstance(item[key], str) or len(item[key]) != 64
                        or any(char not in '0123456789abcdef' for char in item[key])
                        for key in ('source_file_sha256', 'source_prefix_sha256',
@@ -221,9 +232,16 @@ def _validate_reserved_source_identities(value: object) -> list[dict]:
                 or type(item['source_prefix_bytes']) is not int or item['source_prefix_bytes'] < 1
                 or type(item['source_line']) is not int or item['source_line'] < 1):
             raise ValueError('invalid reserved source identity')
-        result.append(dict(item))
-    if len({json.dumps(item, sort_keys=True) for item in result}) != len(result):
-        raise ValueError('duplicate reserved source identity')
+        known = {key: item[key] for key in fields}
+        identity_key = json.dumps(known, sort_keys=True, separators=(',', ':'))
+        if identity_key in seen_known:
+            raise ValueError('duplicate reserved source identity')
+        seen_known.add(identity_key)
+        extension = {key: child for key, child in item.items() if key not in fields}
+        screened_extension = _safe_extensions(extension, default_rules, default_policy['limits'])
+        if policy_sha != default_sha:
+            screened_extension = _safe_extensions(screened_extension, rules, policy['limits'])
+        result.append({**known, **screened_extension})
     if len(json_bytes(result)) > MAX_RESERVED_MANIFEST_BYTES:
         raise ValueError('reserved source identities exceed byte limit')
     return result
@@ -241,7 +259,8 @@ def _matches_reserved_identity(record: dict, identities: list[dict]) -> bool:
                for item in identities)
 
 
-def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str, list[dict]]:
+def read_reserved_session_manifest(path: Path, *,
+                                   screen_policy_path: Path | None = None) -> tuple[list[str], str, str, list[dict]]:
     """Read an owner-only POSIX manifest; completeness remains unknown.
 
     Windows direct reads are disabled because this module does not verify
@@ -302,12 +321,13 @@ def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str, lis
             or any(char not in '0123456789abcdef' for char in item) for item in groups)
             or len(set(groups)) != len(groups)):
         raise ValueError('invalid reserved-session identity')
-    identities = _validate_reserved_source_identities(value['identities'])
+    identities = _validate_reserved_source_identities(value['identities'], screen_policy_path=screen_policy_path)
     return groups, sha(raw), value['coverage'], identities
 
 
 def _recheck_reserved_manifest(locator: str | None, manifest_sha: str | None,
-                               groups: list[str], coverage: str, identities: list[dict]) -> None:
+                               groups: list[str], coverage: str, identities: list[dict],
+                               screen_policy_path: Path | None = None) -> None:
     if manifest_sha is None:
         if locator is not None:
             raise ValueError('unexpected reserved-session manifest locator')
@@ -316,7 +336,8 @@ def _recheck_reserved_manifest(locator: str | None, manifest_sha: str | None,
         return
     if not isinstance(locator, str) or not locator:
         raise ValueError('reserved-session manifest identity is incomplete')
-    current_groups, current_sha, current_coverage, current_identities = read_reserved_session_manifest(Path(locator))
+    current_groups, current_sha, current_coverage, current_identities = read_reserved_session_manifest(
+        Path(locator), screen_policy_path=screen_policy_path)
     if (current_sha != manifest_sha or current_groups != groups or current_coverage != coverage
             or current_identities != identities):
         raise ValueError('reserved-session manifest changed')
@@ -459,9 +480,11 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
         raise ValueError('reserved-session manifest identity is incomplete')
     if known_reserved_groups_coverage not in ('unknown', 'partial'):
         raise ValueError('reserved-session coverage cannot be asserted complete')
-    identities = _validate_reserved_source_identities(list(known_reserved_source_identities))
+    identities = _validate_reserved_source_identities(list(known_reserved_source_identities),
+                                                      screen_policy_path=screen_policy_path)
     _recheck_reserved_manifest(known_reserved_manifest_locator, known_reserved_manifest_sha256,
-                               list(known_reserved_group_sha256), known_reserved_groups_coverage, identities)
+                               list(known_reserved_group_sha256), known_reserved_groups_coverage, identities,
+                               screen_policy_path)
     if (not isinstance(known_reserved_project_labels, (tuple, list))
             or any(not isinstance(item, str) or not item.strip() for item in known_reserved_project_labels)):
         raise ValueError('invalid reserved-project list')
@@ -638,7 +661,7 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
                                value['split'].get('known_reserved_manifest_sha256'),
                                value['split'].get('known_reserved_group_sha256', []),
                                value['split'].get('known_reserved_groups_coverage', 'unknown'),
-                               value['split'].get('known_reserved_source_identities', []))
+                               value['split'].get('known_reserved_source_identities', []), policy_path)
     policy, rules, policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
     if value.get('provider_list', {}).get('screen_policy_sha256') != policy_sha:
         raise ValueError('snapshot provider extensions use a different screening policy')
@@ -722,7 +745,7 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
                                value['split'].get('known_reserved_manifest_sha256'),
                                value['split'].get('known_reserved_group_sha256', []),
                                value['split'].get('known_reserved_groups_coverage', 'unknown'),
-                               value['split'].get('known_reserved_source_identities', []))
+                               value['split'].get('known_reserved_source_identities', []), policy_path)
     return (manifest, row, context_file_value, request_raw, manifest_raw, context_raw,
             json_bytes(projection), json_bytes(bundle))
 
@@ -790,9 +813,12 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
     valid_sha = lambda item: (isinstance(item, str) and len(item) == 64
                               and all(char in '0123456789abcdef' for char in item))
     try:
-        reserved_identities = _validate_reserved_source_identities(reserved_identities)
+        reserved_identities = _validate_reserved_source_identities(reserved_identities,
+                                                                    screen_policy_raw=policy_raw)
     except (TypeError, ValueError, KeyError):
         raise ValueError('staged reserved source identities are invalid') from None
+    if reserved_identities != split.get('known_reserved_source_identities'):
+        raise ValueError('staged reserved identity extensions require screening')
     staged_identity = {
         'source_file_sha256': source.get('source_file_sha256_at_inventory'),
         'source_prefix_sha256': source.get('source_prefix_sha256'),
@@ -851,6 +877,11 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
         raise ValueError('staged access claims must remain unknown')
     if policy_raw is not None and provider.get('screen_policy_sha256') != sha(policy_raw):
         raise ValueError('staged provider screening policy digest mismatch')
+    if policy_raw is None:
+        _default_policy, _default_rules, default_policy_sha = screen_private_corpus.load_policy(
+            _default_screen_policy_path(), 1024 * 1024)
+        if provider.get('screen_policy_sha256') != default_policy_sha:
+            raise ValueError('staged identity screening requires the declared policy bytes')
     if (manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
             or manifest.get('requests') != 1 or manifest.get('test_opened') is not False
             or manifest.get('validation_opened') is not False or manifest.get('heldout_separation') != 'unknown'
@@ -1110,7 +1141,7 @@ def main() -> None:
             reserved_groups, reserved_manifest_sha, reserved_manifest_locator, reserved_coverage, reserved_identities = [], None, None, 'unknown', []
         else:
             reserved_groups, reserved_manifest_sha, reserved_coverage, reserved_identities = read_reserved_session_manifest(
-                args.reserved_session_ids)
+                args.reserved_session_ids, screen_policy_path=args.screen_policy)
             reserved_manifest_locator = str(args.reserved_session_ids.resolve())
         result = build_snapshot(record, args.provider_cache, split_policy=args.split_policy,
                                 known_reserved_group_sha256=reserved_groups,

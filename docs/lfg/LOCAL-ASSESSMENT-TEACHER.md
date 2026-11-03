@@ -134,7 +134,13 @@ matching prefix independently excludes a candidate before source open. This
 catches copied/renamed aliases and append drift. The snapshot binds the full
 manifest digest and identities, retains its private locator, and rereads the
 bounded manifest during revalidation and immediately before returning staged
-bytes. On POSIX the reader opens through no-follow directory/file handles and
+bytes. Additional identity fields are accepted as bounded inert extensions;
+their string values are screened with the baseline private-corpus policy and
+the selected operator policy, and only the six known identity fields
+participate in matching/deduplication. If a non-default policy is used,
+staged validation requires its exact policy bytes. When a direct reader caller
+omits a policy path, the documented example policy is used. On POSIX the
+reader opens through no-follow directory/file handles and
 requires an owner-only regular file owned by the current account with no hard
 links. This comparison trusts the protected inventory metadata; candidate
 identities cannot be verified against file contents without opening those

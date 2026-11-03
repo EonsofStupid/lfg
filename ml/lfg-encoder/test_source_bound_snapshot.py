@@ -368,6 +368,90 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                                         known_reserved_groups_coverage=coverage)
         opened.assert_not_called()
 
+    @unittest.skipUnless(os.name == 'posix', 'reserved identity metadata reads require POSIX')
+    def test_reserved_identity_extensions_are_screened_preserved_and_inert(self):
+        known = snapshot._source_identity_claim(self.record)
+        known.update({key: 'a' * 64 for key in (
+            'source_file_sha256', 'source_prefix_sha256', 'source_line_sha256', 'text_sha256')})
+        known['source_line'] += 10
+        known['note'] = 'password=SecretValue12345'
+        known['operator_tag'] = 'review-queue-4'
+        path = self.root / 'reserved-identity-extension.json'
+        path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                              'coverage': 'partial', 'groups': [],
+                                              'identities': [known]}))
+        path.chmod(0o600)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(path)
+        self.assertIn('REDACTED', identities[0]['note'])
+        self.assertEqual(identities[0]['operator_tag'], 'review-queue-4')
+        self.assertNotIn('SecretValue12345', json.dumps(identities))
+        value = snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_group_sha256=groups, known_reserved_source_identities=identities,
+            known_reserved_manifest_sha256=digest, known_reserved_manifest_locator=str(path.resolve()),
+            known_reserved_groups_coverage=coverage)
+        self.assertEqual(value['split']['known_reserved_source_identities'][0]['note'], identities[0]['note'])
+        self.assertNotIn('SecretValue12345', json.dumps(value['split']))
+
+    @unittest.skipUnless(os.name == 'posix', 'reserved identity metadata reads require POSIX')
+    def test_duplicate_known_identity_with_different_extensions_is_rejected(self):
+        identity = snapshot._source_identity_claim(self.record)
+        path = self.root / 'reserved-duplicate-identities.json'
+        path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                              'coverage': 'partial', 'groups': [],
+                                              'identities': [{**identity, 'note': 'one'},
+                                                             {**identity, 'note': 'two'}]}))
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, 'duplicate reserved source identity'):
+            snapshot.read_reserved_session_manifest(path)
+
+    @unittest.skipUnless(os.name == 'posix', 'reserved identity screening requires POSIX manifest access')
+    def test_reserved_identity_extensions_use_declared_policy_through_staging(self):
+        policy_path = self.root / 'reserved-screen-policy.json'
+        policy = json.loads(Path(__file__).with_name('private-corpus-screen.example.json').read_text())
+        policy['revision'] = 'reserved-identity-custom-test'
+        policy['rules'].append({'id': 'custom-private-marker',
+                                'pattern': r'custom-secret-[A-Za-z0-9]+',
+                                'replacement': '[CUSTOM REDACTED]'})
+        policy_raw = snapshot.json_bytes(policy)
+        policy_path.write_bytes(policy_raw)
+        identity = snapshot._source_identity_claim(self.record)
+        for key in ('source_file_sha256', 'source_prefix_sha256', 'source_line_sha256', 'text_sha256'):
+            identity[key] = 'a' * 64
+        identity['source_line'] += 10
+        identity['note'] = 'custom-secret-Abc123456'
+        manifest = self.root / 'reserved-policy-identities.json'
+        manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                   'coverage': 'partial', 'groups': [],
+                                                   'identities': [identity]}))
+        manifest.chmod(0o600)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(
+            manifest, screen_policy_path=policy_path)
+        self.assertEqual(identities[0]['note'], '[CUSTOM REDACTED]')
+        self.assertNotIn('custom-secret-Abc123456', json.dumps(identities))
+        value = snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_group_sha256=groups, known_reserved_source_identities=identities,
+            known_reserved_manifest_sha256=digest, known_reserved_manifest_locator=str(manifest.resolve()),
+            known_reserved_groups_coverage=coverage, screen_policy_path=policy_path)
+        prepared = snapshot.prepare_single_request(value, policy_path=policy_path,
+                                                  max_request_bytes=4096, max_context_bytes=100_000)
+        projection_raw, bundle_raw = prepared[6], prepared[7]
+        copied = snapshot.validate_staged_artifacts(projection_raw, prepared[3], prepared[4], prepared[5],
+                                                    bundle_raw, policy_raw)
+        self.assertEqual(copied['requests'], 1)
+        changed = json.loads(projection_raw)
+        changed['split']['known_reserved_source_identities'][0]['note'] = 'custom-secret-Abc123456'
+        changed_raw = snapshot.json_bytes(changed)
+        changed_bundle = json.loads(bundle_raw)
+        changed_bundle['staged_snapshot_sha256'] = snapshot.sha(changed_raw)
+        with self.assertRaisesRegex(ValueError, 'require screening'):
+            snapshot.validate_staged_artifacts(changed_raw, prepared[3], prepared[4], prepared[5],
+                                               snapshot.json_bytes(changed_bundle), policy_raw)
+        with self.assertRaisesRegex(ValueError, 'declared policy bytes'):
+            snapshot.validate_staged_artifacts(projection_raw, prepared[3], prepared[4], prepared[5],
+                                               bundle_raw)
+
     @unittest.skipUnless(os.name == 'posix', 'reserved manifest reads require POSIX no-follow handles')
     def test_cli_reserved_session_manifest_rejects_renamed_label_before_source_open(self):
         inventory_path = self.root / 'inventory.jsonl'
