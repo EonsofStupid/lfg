@@ -79,6 +79,28 @@ class AssessmentFormatTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'bounds'):
             predictor.validate_response(value, 'test', 'x')
 
+    def test_torch_format_report_uses_validation_and_omits_text(self):
+        import evaluate_owned_torch_format as torch_eval
+        import owned_student
+        from safetensors.torch import save
+        architecture = {'width': 8, 'layers': 2, 'heads': 2, 'conv_kernel': 3,
+                        'context': 256, 'ff_multiplier': 2, 'attention_every': 2}
+        weights = save(owned_student.OwnedByteStudent(architecture).state_dict())
+        checkpoint = self.root / 'checkpoint'
+        checkpoint.mkdir()
+        (checkpoint / 'weights.safetensors').write_bytes(weights)
+        (checkpoint / 'manifest.json').write_text(json.dumps({'architecture': architecture,
+            'weights_sha256': evaluation.sha(weights),
+            'code_sha256': {'owned_student.py': evaluation.sha(Path(owned_student.__file__).read_bytes())}}))
+        self.config['max_new_bytes'] = 4
+        self.config_path.write_text(json.dumps(self.config))
+        output = self.root / 'report'
+        result = torch_eval.evaluate(checkpoint, self.dataset, self.policy, self.config_path, output, 'cpu', 1)
+        self.assertEqual(sum(result['format_counts'].values()), 2)
+        self.assertFalse(result['assessment_accuracy_evaluated'])
+        self.assertFalse(result['test_opened'])
+        self.assertNotIn('Fixture validation request', (output / 'report.json').read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

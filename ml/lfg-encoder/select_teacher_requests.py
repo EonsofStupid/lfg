@@ -32,6 +32,11 @@ def select(dataset: Path, policy_path: Path, config_path: Path, output: Path) ->
             or config['min_text_bytes'] > config['max_text_bytes']
             or not isinstance(config.get('seed'), str) or not config['seed']):
         raise ValueError('invalid selection configuration')
+    excluded = config.get('exclude_ids', [])
+    if (not isinstance(excluded, list) or any(not isinstance(item, str) or not item for item in excluded)
+            or len(set(excluded)) != len(excluded)):
+        raise ValueError('invalid excluded request identifiers')
+    excluded = set(excluded)
     policy, rules, policy_sha = screen.load_policy(policy_path, config['max_manifest_bytes'])
     manifest_raw = screen._read(dataset / 'manifest.json', config['max_manifest_bytes'], 'dataset_manifest_unavailable')
     manifest = screen._json(manifest_raw, 'invalid_dataset_manifest')
@@ -62,6 +67,8 @@ def select(dataset: Path, policy_path: Path, config_path: Path, output: Path) ->
                 or row['id'] in seen_ids):
             raise ValueError('invalid train candidate identity')
         seen_ids.add(row['id'])
+        if row['id'] in excluded:
+            continue
         text, counts = screen._screen(row['text'], rules, policy['limits'])
         size = len(text.encode())
         if not config['min_text_bytes'] <= size <= config['max_text_bytes']:

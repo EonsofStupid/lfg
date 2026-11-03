@@ -37,6 +37,13 @@ not establish that a teacher's recommendation is optimal or a task succeeded.
 Extra response and configuration fields are accepted; required fields must be
 present after screening. Completed traces are not an independent evaluation.
 
+Optional `request_extensions` are passed to the local chat endpoint, for
+example to configure the selected model's chat-template reasoning mode. The
+collector rejects extensions that would override its model, messages, token
+limit, temperature, response format or streaming behavior. Extensions and
+their values are part of the immutable collection configuration and therefore
+part of the recorded run identity.
+
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `
   --policy PRIVATE_SCREEN_POLICY.json --config PRIVATE_SELECTION_CONFIG.json `

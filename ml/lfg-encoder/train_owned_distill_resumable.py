@@ -112,7 +112,7 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
                                        checkpoint_config, schema=CHECKPOINT_SCHEMA)
         initial_step, losses, tokens = progress['step'], progress['losses'], progress['supervised_tokens']
         ce_losses, distill_losses = progress.get('ce_losses'), progress.get('distillation_losses')
-        if (initial_step >= student_config['steps'] or not isinstance(ce_losses, list) or not isinstance(distill_losses, list)
+        if (initial_step > student_config['steps'] or not isinstance(ce_losses, list) or not isinstance(distill_losses, list)
                 or len(ce_losses) != initial_step or len(distill_losses) != initial_step
                 or any(type(v) not in (int, float) or not math.isfinite(v) for v in ce_losses + distill_losses)):
             raise ValueError('invalid distillation checkpoint progress')

@@ -136,6 +136,16 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
                                     resume_state_sha256=partial['latest_checkpoint_state_sha256'])
         self.assertFalse((self.root / 'bad').exists())
 
+    def test_final_checkpoint_can_publish_after_interruption(self):
+        output = self.root / 'full'
+        full = self.subject.experiment(self.dataset, self.checkpoint, self.config_path, output)
+        pointer = json.loads((output / 'latest.json').read_text())
+        recovered = self.subject.experiment(self.dataset, self.checkpoint, self.config_path, self.root / 'finalized',
+            resume=output / 'checkpoints' / pointer['checkpoint'], resume_state_sha256=pointer['state_sha256'])
+        self.assertEqual(recovered['weights_sha256'], full['weights_sha256'])
+        self.assertEqual(recovered['losses'], full['losses'])
+        self.assertEqual(recovered['resumed_from_step'], self.config['steps'])
+
     def test_failed_checkpoint_leaves_previous_snapshot_resumable(self):
         self.config['checkpoint_every'] = 1
         self.write_config()

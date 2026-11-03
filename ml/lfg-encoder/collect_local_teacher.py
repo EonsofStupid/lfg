@@ -61,6 +61,14 @@ def config_file(path: Path) -> tuple[dict, bytes]:
     if (url.scheme != 'http' or not local or port is None or url.username is not None or url.password is not None
             or url.path != '/v1/chat/completions' or url.query or url.fragment):
         raise ValueError('teacher endpoint must be a loopback chat-completions URL')
+    extensions = value.get('request_extensions', {})
+    if (not isinstance(extensions, dict) or any(not isinstance(k, str) or not k for k in extensions)
+            or set(extensions) & {'model', 'messages', 'max_tokens', 'temperature', 'response_format', 'stream'}):
+        raise ValueError('invalid or reserved teacher request extension')
+    try:
+        json.dumps(extensions, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError('teacher request extensions must be JSON values') from None
     return value, raw
 
 
@@ -81,6 +89,7 @@ def ask(config: dict, text: str, key: str) -> str:
                'temperature': config['temperature']}
     if config['json_mode']:
         payload['response_format'] = {'type': 'json_object'}
+    payload.update(config.get('request_extensions', {}))
     request = urllib.request.Request(config['endpoint'], data=encoded(payload), method='POST',
                                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())

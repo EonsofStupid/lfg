@@ -88,6 +88,16 @@ class ResumableDistillationTests(unittest.TestCase):
                 self.run_experiment(self.root / 'bad')
         self.assertFalse((self.root / 'bad').exists())
 
+    def test_final_checkpoint_can_publish_after_interruption(self):
+        output = self.root / 'full'
+        full = self.run_experiment(output)
+        pointer = json.loads((output / 'latest.json').read_text())
+        recovered = self.run_experiment(self.root / 'finalized',
+            resume=output / 'checkpoints' / pointer['checkpoint'], resume_state_sha256=pointer['state_sha256'])
+        self.assertEqual(recovered['weights_sha256'], full['weights_sha256'])
+        self.assertEqual(recovered['losses'], full['losses'])
+        self.assertEqual(recovered['resumed_from_step'], self.student['steps'])
+
     def test_resume_rejects_changed_teacher_and_objective(self):
         partial = self.run_experiment(self.root / 'partial', max_steps_this_run=1)
         self.distill['temperature'] = 3.0

@@ -70,6 +70,15 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             selection.select(self.dataset, self.policy, self.selection_config, self.root / 'bad')
 
+    def test_selection_can_exclude_requests_collected_in_an_earlier_batch(self):
+        config = json.loads(self.selection_config.read_text())
+        config['exclude_ids'] = ['id-0', 'id-1']
+        self.selection_config.write_text(json.dumps(config))
+        result = selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.assertEqual(result['requests'], 1)
+        selected = [json.loads(line) for line in (self.selected / 'requests.jsonl').read_text().splitlines()]
+        self.assertNotIn(selected[0]['id'], config['exclude_ids'])
+
     def test_interruption_resumes_and_outputs_preparable_unreviewed_traces(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
         response = json.dumps({'intent': 'fixture-secret-7', 'complexity': 'unknown', 'extra': 'allowed'})
@@ -139,6 +148,26 @@ class LocalTeacherCollectionTests(unittest.TestCase):
                 collector.ask(self.config, 'request', 'key')
             self.assertEqual(caught.exception.status, 500)
             self.assertNotIn('private details', str(caught.exception))
+
+    def test_request_extensions_reach_teacher_and_cannot_override_inputs(self):
+        self.config['request_extensions'] = {'chat_template_kwargs': {'enable_thinking': False}}
+        self.collection_config.write_text(json.dumps(self.config))
+        config, _ = collector.config_file(self.collection_config)
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, limit):
+                return selection.encoded({'model': 'fixture-model', 'choices': [{'finish_reason': 'stop',
+                    'message': {'content': '{"intent":"x","complexity":"unknown"}'}}]})
+        with patch('urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value = Response()
+            collector.ask(config, 'request', 'key')
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(json.loads(request.data)['chat_template_kwargs'], {'enable_thinking': False})
+        self.config['request_extensions'] = {'messages': []}
+        self.collection_config.write_text(json.dumps(self.config))
+        with self.assertRaisesRegex(ValueError, 'reserved'):
+            collector.config_file(self.collection_config)
 
 
 if __name__ == '__main__':
