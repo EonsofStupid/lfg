@@ -177,9 +177,9 @@ actual downstream jobs have not started because pretraining is still running.
 The dashboard switches to the assessment job when its status appears and
 displays the resulting aggregate format count when the report is available.
 
-Each teacher collection is a finite, resumable job; transferring newly
-completed teacher batches into the prepared assessment dataset is not yet
-automated. The completed earlier
-assessment services used the prior trainer implementation; the
-final-checkpoint recovery improvement applies to new jobs, not migrations of
-their pinned checkpoints.
+Each teacher collection is a finite, resumable job. The configured
+[continual data handoff](CONTINUAL-DATA-HANDOFF.md) publishes completed
+collections and queues new datasets; the live first update is still waiting for
+the initial assessment model. The completed earlier assessment services used
+the prior trainer implementation; the final-checkpoint recovery improvement
+applies to new jobs, not migrations of their pinned checkpoints.

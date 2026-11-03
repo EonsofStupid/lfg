@@ -90,7 +90,7 @@ def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-chec
     return newest[-1][:3]
 
 
-def run(path: Path) -> None:
+def run(path: Path, *, exit_on_complete: bool = False) -> None:
     import fcntl  # Linux service lock; keep read-only helpers usable on other platforms.
     value = config(path)
     root = Path(value['state_dir'])
@@ -167,6 +167,8 @@ def run(path: Path) -> None:
     result = json.loads(complete.read_text(encoding='utf-8'))
     report('complete', step=result['completed_steps'], total_steps=result['completed_steps'], weights_sha256=result['weights_sha256'],
            assessment_quality_evaluated=False)
+    if exit_on_complete:
+        return
     # Keep the user service alive for status inspection, without repeatedly training the same data.
     while True:
         time.sleep(value['status_poll_seconds'])
@@ -175,9 +177,10 @@ def run(path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--exit-on-complete', action='store_true')
     args = parser.parse_args()
     try:
-        run(args.config)
+        run(args.config, exit_on_complete=args.exit_on_complete)
     except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as error:
         print(f'LFG training service: {error}', file=sys.stderr, flush=True)
         return 1

@@ -1,0 +1,17 @@
+[Unit]
+Description=LFG continual update development evaluator
+
+[Service]
+Type=exec
+Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
+ExecStart=/PATH/TO/PYTHON /PATH/TO/owned_update_evaluator.py --config /PATH/TO/PRIVATE_EVALUATOR_CONFIG.json
+Restart=on-failure
+RestartSec=30
+CPUQuota=300%
+MemoryMax=16G
+TasksMax=128
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
