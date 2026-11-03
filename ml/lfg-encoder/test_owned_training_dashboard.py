@@ -20,6 +20,11 @@ class DashboardStatusTests(unittest.TestCase):
             path.write_text('{')
             self.assertEqual(dashboard.status(path)['state'], 'unavailable')
 
+    def test_teacher_url_is_escaped_when_embedded_in_page(self):
+        page = dashboard.render_page('</script><script>bad</script>')
+        self.assertNotIn(b'</script><script>bad</script>', page)
+        self.assertIn(b'\\u003c/script>', page)
+
 
 if __name__ == '__main__':
     unittest.main()

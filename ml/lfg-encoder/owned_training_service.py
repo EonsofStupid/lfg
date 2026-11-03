@@ -68,21 +68,26 @@ def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-chec
                 raise ValueError('checkpoint state too large')
             state = json.loads(state_path.read_bytes())
             step = state['progress']['step']
-            if (state.get('schema_version') != schema
-                    or type(step) is not int or step < 1
-                    or state_path.parent.name != f'step-{step:016d}'
-                    or digest(state_path.parent / 'weights.safetensors') != state['model_sha256']
-                    or digest(state_path.parent / 'optimizer.safetensors') != state['optimizer_sha256']):
+            if (state.get('schema_version') != schema or type(step) is not int or step < 1
+                    or state_path.parent.name != f'step-{step:016d}'):
                 raise ValueError('checkpoint failed validation')
-            found.append((step, state_path.parent, digest(state_path)))
+            found.append((step, state_path.parent, digest(state_path), state))
         except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
             raise ValueError(f'cannot validate published checkpoint: {state_path}') from exc
     if not found:
         return None
     found.sort(key=lambda item: item[0])
-    if len(found) > 1 and found[-1][0] == found[-2][0] and found[-1][2] != found[-2][2]:
+    newest = [item for item in found if item[0] == found[-1][0]]
+    for _, path, _, state in newest:
+        try:
+            if (digest(path / 'weights.safetensors') != state['model_sha256']
+                    or digest(path / 'optimizer.safetensors') != state['optimizer_sha256']):
+                raise ValueError('checkpoint failed validation')
+        except (KeyError, OSError) as exc:
+            raise ValueError('cannot validate latest checkpoint tensors') from exc
+    if any(item[2] != newest[0][2] for item in newest[1:]):
         raise ValueError('conflicting checkpoints at the latest step')
-    return found[-1]
+    return newest[-1][:3]
 
 
 def run(path: Path) -> None:

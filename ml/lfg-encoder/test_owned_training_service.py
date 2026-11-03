@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import owned_training_service as service
 
@@ -41,6 +42,15 @@ class CheckpointRecoveryTests(unittest.TestCase):
         self.checkpoint('segment-b', 10, weights=b'different')
         with self.assertRaisesRegex(ValueError, 'conflicting'):
             service.latest_checkpoint(self.root)
+
+    def test_only_hashes_latest_checkpoint_tensors(self):
+        old = self.checkpoint('segment-a', 10)
+        latest = self.checkpoint('segment-b', 20)
+        with patch.object(service, 'digest', wraps=service.digest) as hashing:
+            self.assertEqual(service.latest_checkpoint(self.root)[1], latest)
+        files = {call.args[0] for call in hashing.call_args_list}
+        self.assertNotIn(old / 'weights.safetensors', files)
+        self.assertIn(latest / 'weights.safetensors', files)
 
     def test_extra_configuration_fields_are_allowed(self):
         value = {'schema_version': 'lfg.owned-training-service.v1', 'teacher_format': 'owned-byte',

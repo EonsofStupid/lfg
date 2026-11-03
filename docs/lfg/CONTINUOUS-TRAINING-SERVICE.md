@@ -4,8 +4,8 @@ The owned-model supervisor runs one explicitly configured, finite distillation
 or assessment fine-tuning job in checkpointed segments. The model, teacher,
 corpus, device and training settings come from private configuration. Extra service-configuration fields
 are accepted but do not acquire behavior unless the service implements them.
-The service verifies all published checkpoint tensor digests, selects the
-highest valid completed step and passes its state digest to the trainer, which
+The service inspects published checkpoint metadata, verifies the latest step's
+tensor digests and passes its state digest to the trainer, which
 checks its full continuation identity. An OS lock prevents two supervisors
 from owning the same state directory. A completed run remains available for
 status inspection; it does not automatically replay its corpus. Use a new
@@ -56,6 +56,15 @@ messages, response format, streaming and token limit cannot be overridden.
 The selector can accept an `exclude_ids` list to avoid collecting the same
 requests in a later batch; the exclusion list is part of the hashed selection
 configuration.
+
+`stage_owned_source_corpus.py` selects tracked files from explicitly configured
+project roots and path/extension rules, screens their contents, and writes a
+private train-only document plan plus source-path and content-digest
+provenance. It checks source bytes again before finalizing. The recorded Git
+HEAD is a claim about the checkout, not proof that working-tree bytes matched
+that commit. Oversized, duplicate, unavailable, short and failed-screening
+files are counted; screening can miss secrets. Configure limits and source
+selection for each run and keep the resulting corpus outside Git.
 
 ## 2026-11-02 local cluster evidence
 
@@ -122,8 +131,33 @@ auditing exact normalized text overlap, then queued on the local teacher.
 Those 131 come mainly from two declared projects, so they do not establish
 broad source independence or sufficient training diversity.
 
+That last batch produced 130 valid proposals and one incomplete response;
+the three incomplete requests across both batches remain recorded. Combining
+the valid proposals yielded 349 train examples. A 5,000-step owned assessment
+fine-tune completed after the context was configured to 4,096 bytes to fit the
+full selected examples. Its PyTorch format check on the same 10 development
+requests, with a 2,048-byte generation bound, returned one JSON object
+containing the required fields and nine invalid JSON outputs. All stopped at
+a newline. Field correctness, types, assessment quality and native-binary
+behavior were not established.
+
+An expanded local training selection added 604 tracked Rust files from the
+owner's RRFlow, DevPULSE and LFG checkouts. It contained 11,512,022 screened
+bytes; two oversized and two short files were skipped. Combined with the
+previous authored material, the resulting train-only plan has 619 documents
+and 12,001,044 screened bytes. Pattern screening reported redactions and is
+not proof that all secrets were removed. A separately configured 100,000-step
+run of a 19,264,512-parameter owned byte model was started from random weights
+on `clyffy-03`, using the existing small byte-aligned teacher. This is a new
+language-model pretraining experiment, not the previously fine-tuned 349-case
+assessment checkpoint. The full run and its quality have not yet been
+established, and neither model is the intended 650 MB release.
+The expanded run resumed from a completed step-1,500 checkpoint after an
+intentional service restart and then continued training. This does not prove
+recovery from power loss or all storage failures.
+
 Each collection is a finite, resumable job; preparing its outputs for training
-and triggering the next fine-tune are not yet automated. The installed Spark
-services used the prior
-trainer implementation; the final-checkpoint recovery improvement in this
-change applies to new jobs, not migrations of their pinned checkpoints.
+and triggering the next fine-tune are not yet automated. The completed earlier
+assessment services used the prior trainer implementation; the
+final-checkpoint recovery improvement applies to new jobs, not migrations of
+their pinned checkpoints.
