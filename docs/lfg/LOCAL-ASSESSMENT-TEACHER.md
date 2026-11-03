@@ -44,6 +44,12 @@ limit, temperature, response format or streaming behavior. Extensions and
 their values are part of the immutable collection configuration and therefore
 part of the recorded run identity.
 
+The optional `on_incomplete` policy defaults to `fail`. When explicitly set to
+`skip`, an incomplete or invalid individual response is recorded as a failure
+and the collector continues; the final manifest reports requested, successful,
+and failed counts. HTTP server errors still fail the job for supervision to
+retry. Failed records contain an identifier and digest, not a fabricated label.
+
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `
   --policy PRIVATE_SCREEN_POLICY.json --config PRIVATE_SELECTION_CONFIG.json `

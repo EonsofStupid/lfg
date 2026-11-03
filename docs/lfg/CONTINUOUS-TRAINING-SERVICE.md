@@ -91,11 +91,19 @@ response limit without a complete JSON assessment. `split_teacher_collection.py`
 preserved the 112 preceding records in a separately identified selection; the
 collector revalidated them before finalizing that prefix. The incomplete
 request remains recorded for separate follow-up, and the remaining 87 requests
-were assigned to another collection run. The 112 validated records plus the
-first 21 were prepared as 133 unreviewed, unknown-outcome training examples;
-an expanded fine-tune was started from the owned byte checkpoint. The split
-requires a contiguous prefix and intentionally does not infer or invent a
-response for the excluded request.
+were assigned to another collection run. That run encountered a second
+incomplete response after 34 more records; those records were revalidated and
+the request was recorded separately. The 52 remaining requests use a new
+explicit policy that records invalid responses and continues; HTTP server
+errors still trigger a supervised retry.
+
+The 112 validated records plus the first 21 were prepared as 133 unreviewed,
+unknown-outcome training examples. A 2,000-step fine-tune from the owned byte
+checkpoint produced 928,565 supervised byte positions. On the same 10-request
+development format check, nine outputs were invalid JSON and one was JSON
+missing required fields. This is not a task-accuracy result or evidence of a
+usable release. The split requires a contiguous prefix and intentionally does
+not infer or invent a response for an excluded request.
 
 Each collection is a finite, resumable job; preparing its outputs for training
 and triggering the next fine-tune are not yet automated. The installed Spark

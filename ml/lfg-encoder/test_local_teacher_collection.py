@@ -187,6 +187,29 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'reserved'):
             collector.config_file(self.collection_config)
 
+    def test_skip_policy_records_bad_response_and_resumes_valid_ones(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.config['on_incomplete'] = 'skip'
+        self.collection_config.write_text(json.dumps(self.config))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}):
+            with patch.object(collector, 'ask', side_effect=[ValueError('incomplete'), '{"intent":"x","complexity":"unknown"}']):
+                result = collector.collect(self.selected, self.collection_config, self.policy, self.output)
+            self.assertEqual(result['requested_requests'], 2)
+            self.assertEqual(result['failed_requests'], 1)
+            self.assertEqual(result['requests'], 1)
+            self.assertTrue((self.output / 'failures' / '000000.json').is_file())
+            with patch.object(collector, 'ask', side_effect=AssertionError('must reuse outcomes')):
+                self.assertEqual(collector.collect(self.selected, self.collection_config, self.policy, self.output, resume=True), result)
+
+    def test_skip_policy_does_not_hide_server_errors(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        self.config['on_incomplete'] = 'skip'
+        self.collection_config.write_text(json.dumps(self.config))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=collector.TeacherHTTPError(503)):
+            with self.assertRaises(collector.TeacherHTTPError):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output)
+
 
 if __name__ == '__main__':
     unittest.main()
