@@ -55,6 +55,7 @@ export function feedbackFromOwned(state: FeedbackState, result: OwnedResult): Fe
       ...(result.engine?.framingSha256 ? { framingSha256: result.engine.framingSha256 } : {}),
       ...(result.engine?.runtimeConfigSha256 ? { runtimeConfigSha256: result.engine.runtimeConfigSha256 } : {}),
       ...(result.engine?.serviceConfigSha256 ? { serviceConfigSha256: result.engine.serviceConfigSha256 } : {}),
+      ...(typeof result.modelListSha256 === 'string' ? { modelListSha256: result.modelListSha256 } : {}),
       ...(typeof result.projectContextSha256 === 'string' && /^[0-9a-f]{64}$/.test(result.projectContextSha256)
         ? { projectContextSha256: result.projectContextSha256 } : {}),
     },
@@ -183,7 +184,7 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient, own
       {unavailableReason && <p role="status">Local feedback is unavailable. {unavailableReason}</p>}
     </> : <>
       <div className="feedback-actions">
-        {canSaveOwned && <label>Assessment source <select value={source} onChange={(event) => setSource(event.target.value === 'owned' ? 'owned' : 'rules')}><option value="rules">Rules assessment</option><option value="owned">Experimental owned model</option></select></label>}
+        {canSaveOwned && <label>Assessment source <select value={source} onChange={(event) => setSource(event.target.value === 'owned' ? 'owned' : 'rules')}><option value="rules">Rules assessment</option><option value="owned">{typeof ownedResult?.engine?.label === 'string' ? ownedResult.engine.label : 'Experimental owned model'}</option></select></label>}
         <button type="button" disabled={busy || (source === 'rules' ? !assessment : !canSaveOwned || !(assessmentRef || assessment))} onClick={() => void run(async () => {
           if (source === 'rules' && !assessment) return
           let state = assessment ? await feedbackFromAssessment(assessment, prompt) : await feedbackBase(assessmentRef!, prompt)

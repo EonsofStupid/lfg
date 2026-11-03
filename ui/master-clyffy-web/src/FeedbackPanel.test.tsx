@@ -85,6 +85,19 @@ test('saves owned model output only after the user selects it', async () => {
   expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ provenance: expect.objectContaining({ engineId: 'owned-test', modelDigest: 'model-hash', projectContextSha256: contextDigest }), originalRecommendation: expect.objectContaining({ generationStatus: 'truncated', rawOutput: 'partial model output' }) }), 'token')
 })
 
+test('names the open model that produced a dev result and saves its identity', async () => {
+  const api = makeClient()
+  const owned = { status: 'ok' as const, engine: { id: 'lfg-dev-open-model', label: 'Small model (open model, dev only)', modelSha256: 'model-hash' }, elapsedMs: 5, output: { intent: 'build' }, modelListSha256: 'e'.repeat(64) }
+  render(<FeedbackPanel prompt="private prompt text" assessment={assessment} ownedResult={owned} client={api} />)
+  await connect()
+  expect(screen.getByRole('option', { name: 'Small model (open model, dev only)' })).toBeInTheDocument()
+  expect(screen.queryByRole('option', { name: 'Experimental owned model' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
+  await screen.findByText('Assessment saved for review.')
+  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ provenance: expect.objectContaining({ engineId: 'lfg-dev-open-model', modelDigest: 'model-hash', modelListSha256: 'e'.repeat(64) }) }), 'token')
+})
+
 test('can save an owned result when the rules assessment is unavailable', async () => {
   const api = makeClient()
   const owned = { status: 'truncated' as const, engine: { id: 'owned-test' }, elapsedMs: 5, outputText: 'partial model output' }

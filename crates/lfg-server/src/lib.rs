@@ -39,6 +39,7 @@ mod feedback_windows;
 mod embedded_node {
     include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
 }
+mod dev_model;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]
@@ -402,9 +403,19 @@ pub fn router(state: AppState) -> Router {
 
 /// Adds the private feedback API only after the actual listener identity is known.
 pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
+    let store = state.knowledge.clone();
+    let config = state.assessment_config.clone();
+    let known = Arc::new(move || {
+        let knowledge = store
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        lfg_core::assessment::known_models(&config, &knowledge)
+    });
     router(state)
         .merge(feedback::FeedbackApi::for_listener(listener).routes())
         .merge(owned_assessment::routes(listener))
+        .merge(dev_model::routes(listener, known))
 }
 
 pub fn router_with_ui_and_listener(
