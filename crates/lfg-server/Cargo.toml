@@ -40,6 +40,13 @@ tokio-stream.workspace = true
 tower-http.workspace = true
 tract = { version = "=0.23.9", default-features = false, features = ["onnx"], optional = true }
 tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"], optional = true }
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting"] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tower.workspace = true

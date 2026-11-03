@@ -257,3 +257,9 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 .legacy-note { margin: 0; padding: .75rem 1rem 0; color: var(--muted); font-size: .85rem; }
 .dev-panel .dev-rules { white-space: normal; min-width: 18rem; font-size: .8rem; color: var(--muted); }
 .dev-panel h3 { margin: 1.25rem 0 .25rem; }
+.feedback-editor { display: grid; gap: .6rem; margin-top: 1rem; }
+.feedback-editor label, .feedback-panel > label { display: grid; gap: .35rem; }
+.feedback-editor label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.feedback-editor textarea, .feedback-editor input:not([type="checkbox"]), .feedback-panel > label input, .feedback-panel select { width: 100%; padding: .5rem; color: inherit; background: var(--panel); border: 1px solid var(--line); }
+.feedback-actions { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; margin: .75rem 0; }
+.feedback-actions label { min-width: 10rem; }

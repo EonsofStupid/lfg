@@ -5,6 +5,7 @@ import { assess, classify, commitPlan, getGraph, getStatus } from './api'
 import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
+import { FeedbackPanel } from './FeedbackPanel'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
@@ -22,6 +23,7 @@ export default function App() {
   const [prompt, setPrompt] = useState('')
   const [revision, setRevision] = useState(1)
   const [assessment, setAssessment] = useState<Assessment | null>(null)
+  const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -52,7 +54,7 @@ export default function App() {
     if (!status || !debounceMs || !text.trim() || promptTooLarge) { setAssessment(null); return }
     const timer = window.setTimeout(() => {
       void assess(SESSION_ID, revision, text, activeSubscriptions).then((value) => {
-        if (requestRevision.current === current) setAssessment(value)
+        if (requestRevision.current === current) { setAssessment(value); setAssessmentSubscriptions(JSON.stringify(activeSubscriptions)) }
       }).catch((value: Error) => setError(value.message))
     }, debounceMs)
     return () => window.clearTimeout(timer)
@@ -136,6 +138,8 @@ export default function App() {
         </section>
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
+
+        {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">
           <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />

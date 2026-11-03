@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, env, io::Read, net::SocketAddr, path::PathBuf};
 
 use axum::Router;
 use clap::{Parser, Subcommand};
-use lfg_server::{AppState, router_with_ui};
+use lfg_server::AppState;
 use tokio::net::TcpListener;
 
 mod baseline_predict;
@@ -708,21 +708,27 @@ async fn serve(bind: Option<SocketAddr>) -> Result<(), Box<dyn std::error::Error
     let state = AppState::persistent(state_root.join("signals.jsonl"))?;
     let bind = bind.unwrap_or_else(|| state.operations().default_listen_address());
     state.start_learning(bind.ip().is_loopback());
+    let listener = TcpListener::bind(bind).await?;
+    let actual_bind = listener.local_addr()?;
     let external_ui = env::var_os("MASTER_CLYFFY_UI_DIR").map(PathBuf::from);
     #[cfg(feature = "embedded-ui")]
     let app: Router = match external_ui {
-        Some(directory) => router_with_ui(state, directory),
-        None => lfg_server::router_with_embedded_ui(state),
+        Some(directory) => lfg_server::router_with_ui_and_listener(state, directory, actual_bind),
+        None => lfg_server::router_with_embedded_ui_and_listener(state, actual_bind),
     };
     #[cfg(not(feature = "embedded-ui"))]
-    let app: Router = router_with_ui(
+    let app: Router = lfg_server::router_with_ui_and_listener(
         state,
         external_ui.unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/master-clyffy-web/dist")
         }),
+        actual_bind,
     );
-    let listener = TcpListener::bind(bind).await?;
-    println!("lfg-server listening on http://{bind}");
-    axum::serve(listener, app).await?;
+    println!("lfg-server listening on http://{actual_bind}");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
