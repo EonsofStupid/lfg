@@ -342,6 +342,8 @@ class LocalTeacherCollectionTests(unittest.TestCase):
                                 training_rows, sorted(rendered), strict=True)))
 
     def _source_bound_inputs(self):
+        if os.name != 'posix':
+            self.skipTest('source-bound source reads require POSIX no-follow traversal')
         source_root = self.root / 'bound-project'
         source_root.mkdir()
         session = self.root / 'bound-session.jsonl'

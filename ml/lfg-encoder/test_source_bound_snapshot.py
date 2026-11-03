@@ -628,6 +628,20 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'sensitive provider extension'):
                     snapshot.read_provider_cache(self.cache)
 
+    def test_provider_extension_values_use_baseline_and_configured_screening(self):
+        policy = json.loads(Path(snapshot.__file__).with_name('private-corpus-screen.example.json').read_bytes())
+        policy['revision'] = 'fixture-custom'
+        policy['rules'] = [{'id': 'fixture', 'pattern': 'CUSTOM_SECRET_[A-Z]+', 'replacement': '[REDACTED]'}]
+        policy_path = self.root / 'custom-policy.json'
+        policy_path.write_bytes(snapshot.json_bytes(policy))
+        self.write_cache({'models': [{'slug': 'visible', 'visibility': 'list',
+                                     'note': 'Basic YWxhZGRpbjpvcGVuc2VzYW1l CUSTOM_SECRET_VALUE'}]})
+        metadata, _, _ = snapshot.read_provider_cache(self.cache, screen_policy_path=policy_path)
+        note = metadata['models'][0]['extensions']['note']
+        self.assertNotIn('YWxhZGRpbjpvcGVuc2VzYW1l', note)
+        self.assertNotIn('CUSTOM_SECRET_VALUE', note)
+        self.assertIn('[REDACTED]', note)
+
     def test_provider_metadata_is_screened_before_persistence_and_identity_changes_rejected(self):
         policy = self.root / 'screen-policy.json'
         policy.write_text(json.dumps({
@@ -787,6 +801,147 @@ class WindowsSourceBoundFailClosedTests(unittest.TestCase):
             self.assertEqual((first / 'session.jsonl').read_bytes(), b'fixture source A')
             self.assertEqual((second / 'session.jsonl').read_bytes(), b'fixture source B')
             junction.rmdir()
+
+
+class StagedBindingTests(unittest.TestCase):
+    """In-memory staged artifacts exercise the consumer on every platform."""
+
+    def setUp(self):
+        policy_path = Path(__file__).with_name('private-corpus-screen.example.json')
+        policy = json.loads(policy_path.read_bytes())
+        policy['revision'] = 'fixture-custom'
+        policy['rules'] = [{'id': 'custom-secret', 'pattern': 'CUSTOM_SECRET_[A-Z]+', 'replacement': '[REDACTED]'}]
+        self.policy_raw = snapshot.json_bytes(policy)
+        self.snapshot_sha = 'f' * 64
+        self.group = 'a' * 64
+        self.source_text = 'b' * 64
+        self.projection = {
+            'schema_version': snapshot.SCHEMA,
+            'materialization': {'kind': 'origin-verified-private-projection',
+                'origin_snapshot_sha256': self.snapshot_sha, 'source_and_cache_verified_on_origin_host': True,
+                'full_source_paths_transferred': False, 'provider_extension_payloads_transferred': False},
+            'source': {'project': 'fixture', 'project_association': 'inventory_label_unverified', 'verified': True,
+                'source_group_sha256': self.group, 'source_file_sha256_at_inventory': 'c' * 64,
+                'source_prefix_sha256': 'd' * 64, 'source_line_sha256': 'e' * 64,
+                'user_text_sha256': self.source_text, 'source_prefix_bytes': 50, 'selected_line': 1},
+            'split': {'assignment': 'train', 'policy': 'exploratory_train', 'heldout_separation': 'unknown',
+                'known_reserved_group_exclusion': 'checked', 'known_reserved_groups_checked': 0,
+                'known_reserved_group_sha256': [], 'known_reserved_source_identities': [],
+                'known_reserved_manifest_sha256': None, 'known_reserved_groups_coverage': 'unknown',
+                'known_reserved_project_labels': ['reserved-project']},
+            'provider_list': {'cache_sha256': '1' * 64, 'screen_policy_sha256': snapshot.sha(self.policy_raw),
+                              'models': [{'model_id': 'fixture-model', 'provider_supported_efforts': []}]},
+            'access_claims': {'provider_listing_is_entitlement': False, 'subscription_entitlement': 'unknown',
+                              'historical_session_effort': 'unknown', 'historical_model_access': 'unknown'},
+            'training_claims': {'task_outcome': 'unknown', 'teacher_proposal': 'none',
+                                'review_status': 'unreviewed', 'promotion_eligible': False},
+            'extensions': {},
+        }
+        self.request = {'schema_version': 'lfg.source-bound-teacher-request.v1',
+            'id': snapshot.sha((self.group + '\0' + self.source_text + '\0' + self.snapshot_sha).encode()),
+            'project': 'fixture', 'project_group': self.group, 'family': self.group, 'text': 'fixture request',
+            'screened_text_sha256': snapshot.sha(b'fixture request'), 'source_text_sha256_claim': self.source_text,
+            'candidate_file_sha256_claim': self.snapshot_sha, 'source_bound_snapshot_sha256': self.snapshot_sha,
+            'source_prefix_sha256_claim': 'd' * 64, 'source_line_sha256_claim': 'e' * 64,
+            'split': 'train', 'split_policy': 'exploratory_train', 'heldout_separation': 'unknown',
+            'review_status': 'unreviewed', 'outcome': 'unknown'}
+        self.manifest = {'schema_version': 'lfg.teacher-request-selection-result.v1', 'requests': 1,
+            'test_opened': False, 'validation_opened': False, 'heldout_separation': 'unknown',
+            'human_reviewed': False, 'promotion_eligible': False, 'projects': {'fixture': 1},
+            'source_bound_snapshot_sha256': self.snapshot_sha}
+        self.context = {'schema_version': 'lfg.project-training-context.v1',
+            'source_bound_snapshot_sha256': self.snapshot_sha, 'materialized_from_verified_snapshot': True,
+            'projects': {'fixture': {'text': 'fixture context', 'sha256': snapshot.sha(b'fixture context'),
+                'source_bound_snapshot_sha256': self.snapshot_sha, 'source_text_sha256_claim': self.source_text,
+                'provider_cache_sha256': '1' * 64, 'heldout_separation': 'unknown'}}}
+        self.bundle = {'schema_version': 'lfg.source-bound-staging-bundle.v1',
+            'origin_snapshot_sha256': self.snapshot_sha, 'projection_kind': 'origin-verified-private-projection',
+            'full_source_paths_transferred': False, 'provider_extension_payloads_transferred': False,
+            'screen_policy_sha256': snapshot.sha(self.policy_raw)}
+
+    def check(self):
+        projection = snapshot.json_bytes(self.projection)
+        request = snapshot.json_bytes(self.request)
+        self.manifest['requests_sha256'] = snapshot.sha(request)
+        manifest = snapshot.json_bytes(self.manifest)
+        context = snapshot.json_bytes(self.context)
+        self.bundle.update({'staged_snapshot_sha256': snapshot.sha(projection), 'requests_sha256': snapshot.sha(request),
+                            'selection_manifest_sha256': snapshot.sha(manifest), 'project_context_sha256': snapshot.sha(context)})
+        return snapshot.validate_staged_artifacts(projection, request, manifest, context,
+                                                   snapshot.json_bytes(self.bundle), self.policy_raw)
+
+    def test_rehashed_project_group_family_and_request_id_must_match_source(self):
+        self.assertEqual(self.check()['project'], 'fixture')
+        for key, changed in [('project', 'reserved-project'), ('project_group', '2' * 64),
+                             ('family', '2' * 64), ('id', '3' * 64)]:
+            with self.subTest(field=key):
+                old = self.request[key]
+                self.request[key] = changed
+                if key == 'project':
+                    self.context['projects']['reserved-project'] = self.context['projects'].pop('fixture')
+                    self.manifest['projects'] = {'reserved-project': 1}
+                with self.assertRaises(ValueError):
+                    self.check()
+                self.request[key] = old
+                if key == 'project':
+                    self.context['projects']['fixture'] = self.context['projects'].pop('reserved-project')
+                    self.manifest['projects'] = {'fixture': 1}
+
+    def test_manifest_and_context_project_sets_must_match_source_exactly(self):
+        for projects in ({'other': 1}, {'fixture': 1, 'other': 1}, {'fixture': True}):
+            with self.subTest(projects=projects):
+                self.manifest['projects'] = projects
+                with self.assertRaises(ValueError):
+                    self.check()
+        self.manifest['projects'] = {'fixture': 1}
+        self.context['projects']['other'] = dict(self.context['projects']['fixture'])
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_safe_unknown_fields_remain_inert_but_both_policies_screen_extensions(self):
+        containers = [self.projection, self.projection['source'], self.projection['split'],
+                      self.projection['provider_list'], self.projection['provider_list']['models'][0],
+                      self.projection['materialization'], self.projection['access_claims'],
+                      self.projection['training_claims'], self.request, self.manifest,
+                      self.context, self.context['projects']['fixture'], self.bundle]
+        for container in containers:
+            container['safe_extra'] = {'nested': ['retained']}
+        self.assertEqual(self.check()['project'], 'fixture')
+        for container in containers:
+            for key, value in [('safe_extra', {'nested': ['CUSTOM_SECRET_VALUE']}),
+                               ('safe_extra', {'nested': ['Basic YWxhZGRpbjpvcGVuc2VzYW1l']}),
+                               ('safe_extra', {'nested': ['Cookie: session=fixture-cookie-value']}),
+                               ('authorization', 'fixture'), ('cookie', 'fixture')]:
+                with self.subTest(container=id(container), key=key, kind=value if isinstance(value, str) else 'nested'):
+                    previous = container.get(key)
+                    container[key] = value
+                    with self.assertRaises(ValueError):
+                        self.check()
+                    if previous is None:
+                        del container[key]
+                    else:
+                        container[key] = previous
+        self.assertEqual(self.check()['project'], 'fixture')
+
+    def test_sensitive_provider_keys_and_basic_values_are_screened(self):
+        policy, rules, _ = snapshot.screen_private_corpus.load_policy(snapshot._default_screen_policy_path(), 1024 * 1024)
+        for key in ('authorization', 'proxyAuthorization', 'cookie', 'setCookie'):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'sensitive provider extension key'):
+                snapshot._safe_extensions({key: 'fixture'}, rules, policy['limits'])
+        result = snapshot._safe_extensions({'note': 'Basic YWxhZGRpbjpvcGVuc2VzYW1l'}, rules, policy['limits'])
+        self.assertNotIn('YWxhZGRpbjpvcGVuc2VzYW1l', result['note'])
+        result = snapshot._safe_extensions({'note': 'Cookie: session=fixture-cookie-value'}, rules, policy['limits'])
+        self.assertNotIn('fixture-cookie-value', result['note'])
+
+    def test_structured_unknown_data_cannot_hide_inside_provider_scalar_fields(self):
+        model = self.projection['provider_list']['models'][0]
+        model['provider_supported_efforts'] = [{'nested': 'CUSTOM_SECRET_VALUE'}]
+        with self.assertRaisesRegex(ValueError, 'provider model metadata'):
+            self.check()
+        model['provider_supported_efforts'] = []
+        model['description'] = {'nested': 'CUSTOM_SECRET_VALUE'}
+        with self.assertRaisesRegex(ValueError, 'provider model metadata'):
+            self.check()
 
 
 if __name__ == '__main__':

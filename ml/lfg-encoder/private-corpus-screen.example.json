@@ -23,6 +23,16 @@
       "replacement": "Bearer [REDACTED]"
     },
     {
+      "id": "basic-credential",
+      "pattern": "(?i)\\bBasic[ \\t]+[A-Za-z0-9+/]{8,}={0,2}",
+      "replacement": "Basic [REDACTED]"
+    },
+    {
+      "id": "cookie-header",
+      "pattern": "(?i)\\b(?:set-)?cookie[ \\t]*:[ \\t]*[^\\r\\n]+",
+      "replacement": "[REDACTED COOKIE HEADER]"
+    },
+    {
       "id": "named-credential",
       "pattern": "(?i)\\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\\b[ \\t]*[=:][ \\t]*[\\\"']?[^\\s\\\"',;]{8,}",
       "replacement": "[REDACTED CREDENTIAL ASSIGNMENT]"

@@ -152,7 +152,15 @@ claim without separate verifiable evidence.
 
 Staged validation reconstructs the required access claims as unknown and checks
 that the selected source is not listed in its own reserved session/project
-claims. Unknown extension fields remain preserved and inert. Bundle hashes
+claims. It also binds the selected request's project, group, family and ID,
+selection project counts, and context project key to the source identity.
+Unknown extension fields remain preserved and inert; their keys and values
+must already pass both the baseline and the configured screening policy.
+Provider extensions are screened under both policies before origin persistence.
+The baseline includes common Basic authorization credentials and cookie headers, but no policy
+is proof that all credentials are detected. The changed baseline has a new
+digest: older staged copies may need their original configured policy bytes
+for validation and are not retroactively revalidated. Bundle hashes
 detect content changes only when compared with a trusted expected digest;
 hashes recomputed by the same party that edits staged files are not an
 independent signature or attestation of the origin host's checks.

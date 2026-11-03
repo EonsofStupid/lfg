@@ -30,6 +30,7 @@ MAX_RESERVED_MANIFEST_BYTES = 1024 * 1024
 SENSITIVE_KEY = re.compile(
     r'(?:^|[_-])(?:secret|password|credential|access[_-]?token|refresh[_-]?token|'
     r'auth[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|jwt|'
+    r'authorization|proxy[_-]?authorization|cookie|cookies|set[_-]?cookie|'
     r'api[_-]?key|access[_-]?key)(?:$|[_-])', re.I)
 
 
@@ -79,7 +80,8 @@ def _safe_extensions(value: object, rules, limits: dict) -> object:
             for key, item in current.items():
                 if not isinstance(key, str) or not key or len(key.encode('utf-8')) > 256:
                     raise ValueError('invalid provider extension key')
-                if SENSITIVE_KEY.search(key):
+                normalized_key = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', key)
+                if SENSITIVE_KEY.search(normalized_key):
                     raise ValueError('sensitive provider extension key')
                 screened_key, _ = screen_private_corpus._screen(key, rules, limits)
                 if screened_key != key or screened_key in result:
@@ -102,6 +104,71 @@ def _safe_extensions(value: object, rules, limits: dict) -> object:
         raise ValueError('invalid provider extension value')
 
     return visit(value, 0)
+
+
+def _require_screened_extensions(value: dict, known: set[str], policies: list[tuple[dict, list]]) -> None:
+    """Keep unknown fields inert and reject any that require either screening policy."""
+    extra = {key: item for key, item in value.items() if key not in known}
+    for policy, rules in policies:
+        if _safe_extensions(extra, rules, policy['limits']) != extra:
+            raise ValueError('staged extensions require screening')
+
+
+def _check_staged_extensions(snapshot: dict, request: dict, manifest: dict,
+                             context: dict, bundle: dict | None,
+                             policies: list[tuple[dict, list]]) -> None:
+    """Screen unknown keys and values at each schema boundary without dropping them."""
+    def check(value: object, known: set[str]) -> None:
+        if not isinstance(value, dict):
+            raise ValueError('invalid staged extension container')
+        _require_screened_extensions(value, known, policies)
+
+    check(snapshot, {'schema_version', 'observed_at', 'materialization', 'source', 'split',
+                     'provider_list', 'access_claims', 'training_claims', 'extensions'})
+    check(snapshot.get('extensions', {}), set())
+    check(snapshot['materialization'], {'kind', 'origin_snapshot_sha256', 'source_and_cache_verified_on_origin_host',
+                                        'full_source_paths_transferred', 'provider_extension_payloads_transferred'})
+    check(snapshot['source'], {'kind', 'project', 'project_association', 'source_locator_sha256', 'source_group_sha256',
+                               'selected_line', 'source_prefix_bytes', 'source_prefix_sha256', 'source_line_sha256',
+                               'user_text_sha256', 'user_text_utf8_bytes', 'source_file_sha256_at_inventory',
+                               'current_whole_file_sha256', 'verified'})
+    check(snapshot['split'], {'assignment', 'policy', 'heldout_separation', 'known_reserved_group_exclusion',
+                              'known_reserved_groups_checked', 'known_reserved_group_sha256',
+                              'known_reserved_manifest_sha256', 'known_reserved_groups_coverage',
+                              'known_reserved_source_identities', 'known_reserved_project_labels'})
+    check(snapshot['provider_list'], {'fetched_at', 'cache_sha256', 'cache_bytes', 'cache_mtime_utc',
+                                      'screen_policy_sha256', 'source_locator_sha256', 'models'})
+    models = snapshot['provider_list'].get('models')
+    if not isinstance(models, list):
+        raise ValueError('invalid staged provider models')
+    for model in models:
+        check(model, {'model_id', 'display_name', 'description', 'priority', 'provider_supported_efforts'})
+        if (not isinstance(model.get('model_id'), str) or not model['model_id'].strip()
+                or any(key in model and not isinstance(model[key], str) for key in ('display_name', 'description'))
+                or (model.get('priority') is not None
+                    and (type(model['priority']) is not int or model['priority'] < 0))
+                or ('provider_supported_efforts' in model
+                    and (not isinstance(model['provider_supported_efforts'], list)
+                         or any(not isinstance(effort, str) for effort in model['provider_supported_efforts'])))):
+            raise ValueError('invalid staged provider model metadata')
+    check(snapshot['access_claims'], {'provider_listing_is_entitlement', 'subscription_entitlement',
+                                      'historical_session_effort', 'historical_model_access'})
+    check(snapshot['training_claims'], {'task_outcome', 'teacher_proposal', 'review_status', 'promotion_eligible'})
+    check(request, {'schema_version', 'id', 'project', 'project_group', 'family', 'text', 'screened_text_sha256',
+                    'source_text_sha256_claim', 'candidate_file_sha256_claim', 'source_bound_snapshot_sha256',
+                    'source_prefix_sha256_claim', 'source_line_sha256_claim', 'split', 'split_policy',
+                    'heldout_separation', 'review_status', 'outcome'})
+    check(manifest, {'schema_version', 'selection_kind', 'source_bound_snapshot_sha256', 'selection_policy_sha256',
+                     'requests_sha256', 'requests', 'projects', 'skipped', 'redaction_counts', 'validation_opened',
+                     'test_opened', 'heldout_separation', 'human_reviewed', 'promotion_eligible'})
+    check(context, {'schema_version', 'source_bound_snapshot_sha256', 'materialized_from_verified_snapshot', 'projects'})
+    for entry in context['projects'].values():
+        check(entry, {'text', 'sha256', 'source_bound_snapshot_sha256', 'source_text_sha256_claim',
+                      'provider_cache_sha256', 'split_policy', 'heldout_separation'})
+    if bundle is not None:
+        check(bundle, {'schema_version', 'origin_snapshot_sha256', 'staged_snapshot_sha256', 'projection_kind',
+                       'full_source_paths_transferred', 'provider_extension_payloads_transferred',
+                       'requests_sha256', 'selection_manifest_sha256', 'project_context_sha256', 'screen_policy_sha256'})
 
 
 def _metadata(value: object, name: str, *, required: bool = False, rules=None,
@@ -127,6 +194,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
         raise ValueError('invalid provider cache byte limit')
     screen_policy_path = screen_policy_path or _default_screen_policy_path()
     policy, rules, policy_sha = screen_private_corpus.load_policy(screen_policy_path, 1024 * 1024)
+    baseline, baseline_rules, _ = screen_private_corpus.load_policy(_default_screen_policy_path(), 1024 * 1024)
     before = path.stat()
     if not path.is_file() or before.st_size > max_bytes:
         raise ValueError('provider cache unavailable or too large')
@@ -173,11 +241,13 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
             if effort is not None:
                 efforts.append(effort)
             extra = {key: value for key, value in level.items() if key != 'effort'}
+            extra = _safe_extensions(extra, baseline_rules, baseline['limits'])
             extra = _safe_extensions(extra, rules, policy['limits'])
             effort_extensions.append(extra)
         extensions = {key: value for key, value in model.items()
                       if key not in {'slug', 'display_name', 'description', 'priority',
                                      'supported_reasoning_levels', 'visibility'}}
+        extensions = _safe_extensions(extensions, baseline_rules, baseline['limits'])
         extensions = _safe_extensions(extensions, rules, policy['limits'])
         listed.append({'model_id': slug, 'display_name': label or slug,
                        'description': description or '', 'priority': priority,
@@ -186,6 +256,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
     if not listed:
         raise ValueError('provider cache contains no listed models')
     root_extensions = {key: value for key, value in cache.items() if key not in {'models', 'fetched_at'}}
+    root_extensions = _safe_extensions(root_extensions, baseline_rules, baseline['limits'])
     root_extensions = _safe_extensions(root_extensions, rules, policy['limits'])
     metadata = {'fetched_at': fetched_at, 'models': listed, 'extensions': root_extensions,
                 'cache_sha256': sha(raw), 'cache_bytes': len(raw),
@@ -847,9 +918,13 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or any(not isinstance(label, str) or not label.strip() for label in reserved_projects)
             or _project_key(source.get('project', '')) in {_project_key(label) for label in reserved_projects}):
         raise ValueError('staged reserved-group claims are inconsistent or exclude the selected source')
-    if source_snapshot.get('training_claims') != {
-            'task_outcome': 'unknown', 'teacher_proposal': 'none',
-            'review_status': 'unreviewed', 'promotion_eligible': False}:
+    expected_training_claims = {
+        'task_outcome': 'unknown', 'teacher_proposal': 'none',
+        'review_status': 'unreviewed', 'promotion_eligible': False}
+    training_claims = source_snapshot.get('training_claims')
+    if (not isinstance(training_claims, dict)
+            or any(training_claims.get(key) != expected for key, expected in expected_training_claims.items())
+            or training_claims.get('promotion_eligible') is not False):
         raise ValueError('staged training claims must remain unknown and unreviewed')
     expected_materialization = {
         'kind': 'origin-verified-private-projection',
@@ -877,11 +952,14 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
         raise ValueError('staged access claims must remain unknown')
     if policy_raw is not None and provider.get('screen_policy_sha256') != sha(policy_raw):
         raise ValueError('staged provider screening policy digest mismatch')
+    baseline_policy, baseline_rules, default_policy_sha = screen_private_corpus.load_policy(
+        _default_screen_policy_path(), 1024 * 1024)
     if policy_raw is None:
-        _default_policy, _default_rules, default_policy_sha = screen_private_corpus.load_policy(
-            _default_screen_policy_path(), 1024 * 1024)
         if provider.get('screen_policy_sha256') != default_policy_sha:
             raise ValueError('staged identity screening requires the declared policy bytes')
+        configured_policy, configured_rules = baseline_policy, baseline_rules
+    else:
+        configured_policy, configured_rules, _ = screen_private_corpus.load_policy_bytes(policy_raw, 1024 * 1024)
     if (manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
             or manifest.get('requests') != 1 or manifest.get('test_opened') is not False
             or manifest.get('validation_opened') is not False or manifest.get('heldout_separation') != 'unknown'
@@ -890,7 +968,17 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or manifest.get('source_bound_snapshot_sha256') != snapshot_sha
             or manifest.get('requests_sha256') != sha(request_raw)):
         raise ValueError('staged selection claims or digests do not match snapshot')
-    if (request.get('split') != 'train' or request.get('split_policy') != 'exploratory_train'
+    project = source['project']
+    expected_id = sha((source_group + '\0' + source['user_text_sha256'] + '\0' + snapshot_sha).encode('utf-8'))
+    projects = manifest.get('projects')
+    if (not project.strip() or not isinstance(projects, dict) or set(projects) != {project}
+            or type(projects[project]) is not int or projects[project] != 1):
+        raise ValueError('staged selection project does not match source')
+    if (request.get('schema_version') != 'lfg.source-bound-teacher-request.v1'
+            or request.get('project') != project or request.get('project_group') != source_group
+            or request.get('family') != source_group or request.get('id') != expected_id
+            or request.get('candidate_file_sha256_claim') != snapshot_sha
+            or request.get('split') != 'train' or request.get('split_policy') != 'exploratory_train'
             or request.get('heldout_separation') != 'unknown' or request.get('review_status') != 'unreviewed'
             or request.get('outcome') != 'unknown' or request.get('source_bound_snapshot_sha256') != snapshot_sha
             or request.get('source_text_sha256_claim') != source.get('user_text_sha256')
@@ -899,7 +987,8 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or not isinstance(request.get('text'), str)
             or request.get('screened_text_sha256') != sha(request['text'].encode('utf-8'))):
         raise ValueError('staged request does not match selected source')
-    if (not isinstance(context_file.get('projects'), dict) or context_file.get('source_bound_snapshot_sha256') != snapshot_sha
+    if (not isinstance(context_file.get('projects'), dict) or set(context_file['projects']) != {project}
+            or context_file.get('source_bound_snapshot_sha256') != snapshot_sha
             or context_file.get('materialized_from_verified_snapshot') is not True):
         raise ValueError('staged context does not match snapshot')
     entry = context_file['projects'].get(request.get('project'))
@@ -910,6 +999,8 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or not isinstance(entry.get('text'), str)
             or entry.get('sha256') != sha(entry['text'].encode('utf-8'))):
         raise ValueError('staged project context does not match snapshot')
+    _check_staged_extensions(source_snapshot, request, manifest, context_file, bundle,
+                             [(baseline_policy, baseline_rules), (configured_policy, configured_rules)])
     return {'snapshot_sha256': snapshot_sha, 'staged_snapshot_sha256': snapshot_copy_sha,
             'provider_cache_sha256': provider['cache_sha256'],
             'request_sha256': request['screened_text_sha256'], 'context_sha256': entry['sha256'],
