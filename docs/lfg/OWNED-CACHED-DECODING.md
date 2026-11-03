@@ -16,6 +16,66 @@ step; a native implementation should benchmark bounded preallocation and its
 memory costs rather than assume this implementation is optimal. There is no
 prompt-level task quality or concurrent-service measurement here.
 
+## Separate ONNX prefill and decode graphs
+
+`ml/lfg-encoder/export_owned_cached_onnx.py` exports a versioned experimental
+artifact with separate `prefill.onnx` and `decode.onnx` graphs. The prefill
+graph accepts `tokens` as `int64 [batch, sequence]` and returns the last-token
+`float32 [batch, 256]` logits plus cache tensors. The decode graph accepts one
+`int64 [batch]` token, a rank-zero `int64` absolute `position`, and those cache
+tensors; it returns next-token logits and the updated caches. Convolution state
+is named `conv_{layer}`; attention key and value state are `key_{layer}` and
+`value_{layer}`. Decode outputs add `_out` to each state name.
+
+The `manifest.json` declares the state order, dtype, shape, per-layer capacity,
+empty attention-state shape, and the maximum cache tensor bytes per batch. The
+consumer must validate byte token values, batch/rank/dtype/fixed dimensions,
+prefill length, `position < context`, and that each attention cache length
+equals `position`. The ONNX graphs do not add a serving wrapper that checks
+those relationships. The model uses absolute positions: the caller increments
+the absolute position, retains all attention history, and rejects context
+overflow. There is no cache eviction. The cache byte figure excludes model
+weights, allocator overhead, temporary graph tensors, and runtime buffers; it
+is not a process-memory cap.
+
+Export with a verified private checkpoint and already-framed local source
+bytes. Keep the export configuration, sources, measurements, ONNX files, and
+checkpoint outside Git:
+
+```powershell
+python ml/lfg-encoder/export_owned_cached_onnx.py `
+  --checkpoint PRIVATE_CHECKPOINT_DIRECTORY `
+  --config PRIVATE_EXPORT_CONFIG.json `
+  --source PRIVATE_FRAMED_SOURCE.bin `
+  --additional-source ANOTHER_PRIVATE_FRAMED_SOURCE.bin `
+  --output NEW_PRIVATE_OUTPUT_DIRECTORY `
+  --decode-steps 4 --warmup 0 --repeats 3
+```
+
+The config loader accepts at most 1 MiB; model, checkpoint, and manifest sizes
+use their explicit configuration limits. Export verifies checkpoint weights
+and source model code against the checkpoint manifest, checks that all inputs
+remain unchanged during export, checks ONNX files, and compares configured
+prefill lengths and each measured decode step with both full-prefix PyTorch and
+the Python cache reference. It records artifact/input hashes only in the
+private report and emits no prompt or generated text. `promotion_eligible`,
+`native_runtime_checked`, and quality evaluation are false in the manifest.
+
+One private local experiment used the owner-authorized 573-byte and 603-byte
+framed development inputs with the actual private checkpoint (context 4,352,
+width 512, eight layers). ONNX Runtime 1.31.1 with one CPU thread checked
+prefill lengths 1, 4, 32, 64, and 573, plus four greedy decode steps for each
+input, against both references. Greedy bytes matched exactly; maximum absolute
+logit and cache differences were 1.82e-5 and 1.05e-5 respectively. Median
+prefill times were 388.6 ms and 367.0 ms. Median four-byte decode batches were
+34.4 ms and 30.8 ms (8.60 ms and 7.70 ms per byte). This run used no warmup and
+three repeats. It did not measure a full-prefix timing baseline, evaluate
+assessment quality, or establish a reliable speedup. These measurements are a
+single local CPU case and must not be generalized to other hardware or loads.
+For this checkpoint and full context, the declared cache tensor upper bound is
+71,335,936 bytes per batch item. It does not include other runtime memory. The
+raw private experiment report and inputs remain outside Git.
+
 Run the local benchmark against an existing private checkpoint and an
 authorized local source prefix:
 
