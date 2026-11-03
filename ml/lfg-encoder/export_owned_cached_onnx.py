@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import stat
 import statistics
 import subprocess
 import time
@@ -60,6 +61,59 @@ def private_output(directory: Path) -> None:
                 raise ValueError('export outputs must be ignored and untracked')
     except OSError:
         raise ValueError('cannot verify output privacy') from None
+
+
+def create_private_output(directory: Path) -> None:
+    """Create a new private output directory or refuse before exporting data.
+
+    POSIX permission checks assume current-user and root processes are trusted.
+    Windows requires a verified ACL; POSIX mode bits are not sufficient there.
+    """
+    if os.name != 'posix':
+        raise ValueError('cached export output is disabled: verified private ACL creation is unavailable on this platform')
+    if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY') or os.mkdir not in os.supports_dir_fd:
+        raise ValueError('cached export output requires no-follow directory operations')
+    absolute = directory if directory.is_absolute() else Path.cwd() / directory
+    if '..' in absolute.parts or not absolute.name:
+        raise ValueError('output path must not contain parent traversal')
+    parent = absolute.parent
+    effective_uid = os.geteuid()
+    for ancestor in (parent, *parent.parents):
+        info = os.lstat(ancestor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (effective_uid, 0):
+            raise ValueError('output ancestors must be non-symlink directories owned by the user or root')
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise ValueError('output path has an unsafe writable ancestor')
+    info = os.lstat(parent)
+    if info.st_uid != effective_uid or info.st_mode & 0o077:
+        raise ValueError('output parent must be owned by the current user and private')
+    private_output(absolute)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(parent, flags)
+    try:
+        opened = os.fstat(parent_fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError('output parent changed during verification')
+        os.mkdir(absolute.name, mode=0o700, dir_fd=parent_fd)
+        child_fd = os.open(absolute.name, flags, dir_fd=parent_fd)
+        try:
+            child = os.fstat(child_fd)
+            if child.st_uid != effective_uid or stat.S_IMODE(child.st_mode) & 0o077:
+                raise ValueError('created output directory is not private')
+        finally:
+            os.close(child_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def matching_greedy_byte(actual, reference) -> int:
+    """Require identical byte choice even when near-tied logits are close."""
+    import numpy as np
+    actual_byte = int(np.argmax(actual[0]))
+    reference_byte = int(np.argmax(reference[0]))
+    if actual_byte != reference_byte:
+        raise ValueError('cached ONNX greedy output differs from independent full-prefix output')
+    return actual_byte
 
 
 def cache_layout(architecture: dict) -> list[dict]:
@@ -182,17 +236,18 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             or model_code_sha != checkpoint_manifest['code_sha256']['owned_student.py']):
         raise ValueError('checkpoint weights or model implementation do not match manifest')
     model = owned_student.OwnedByteStudent(checkpoint_manifest['architecture']).eval()
-    if max(config['parity_lengths']) > model.context:
-        raise ValueError('parity length exceeds model context')
+    if model.context < 2 or max(config['parity_lengths']) >= model.context:
+        raise ValueError('cached export requires parity lengths below context and room for a decode step')
     sources = [source, *(additional_sources or [])]
     source_raws = [read_bounded(path, model.context) for path in sources]
     if any(not raw for raw in source_raws):
         raise ValueError('development inputs must be nonempty')
+    if any(len(raw) >= model.context for raw in source_raws):
+        raise ValueError('cached export requires every development input to leave room for a decode step')
     if max(config['parity_lengths']) > len(source_raws[0]):
         raise ValueError('first development input is shorter than configured parity lengths')
     if output.exists():
         raise ValueError('output directory must be new')
-    private_output(output)
     model.load_state_dict(load_file(str(weights_path), device='cpu'))
     torch.set_num_threads(config['cpu_threads'])
     layout = cache_layout(checkpoint_manifest['architecture'])
@@ -204,7 +259,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         traced_prefill = prefill(trace_tokens)
         prefill_state = list(traced_prefill[1:])
         traced_decode = decode(trace_tokens[:, -1], torch.tensor(trace_length, dtype=torch.long), *prefill_state)
-    output.mkdir(mode=0o700)
+    create_private_output(output)
     prefill_path, decode_path = output / 'prefill.onnx', output / 'decode.onnx'
     state_names = [entry['name'] for entry in layout]
     prefill_output_names = ['logits', *state_names]
@@ -298,16 +353,19 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             np.testing.assert_allclose(state_value, expected_state, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
             max_cache_diff = max(max_cache_diff, float(np.max(np.abs(state_value - expected_state))) if state_value.size else 0.0)
         bytes_out = []
+        reference_bytes = []
         decode_samples = []
         decode_cpu_samples = []
         state_values = list(onnx_state[1:])
         logits = actual
+        reference_logits = expected
         measured_steps = min(decode_steps, model.context - prefix_length)
         if measured_steps < 1:
             raise ValueError('development input leaves no context for decode measurement')
         for step_index in range(measured_steps):
-            next_byte = int(np.argmax(logits[0]))
+            next_byte = matching_greedy_byte(logits, reference_logits)
             bytes_out.append(next_byte)
+            reference_bytes.append(int(np.argmax(reference_logits[0])))
             token = np.asarray([next_byte], dtype=np.int64)
             position = np.asarray(prefix_length + step_index, dtype=np.int64)
             feeds = {'token': token, 'position': position}
@@ -319,7 +377,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             decode_cpu_samples.append(time.process_time_ns() - cpu_start)
             logits, *state_values = decoded
             with torch.inference_mode():
-                full_tokens = torch.tensor([list(raw) + bytes_out], dtype=torch.long)
+                full_tokens = torch.tensor([list(raw) + reference_bytes], dtype=torch.long)
                 expected_next = model(full_tokens)[:, -1, :].detach().numpy()
                 cached_reference = python_cache.step(torch.tensor([next_byte], dtype=torch.long)).detach().cpu().numpy()
             if logits.shape != expected_next.shape or not np.isfinite(logits).all():
@@ -336,8 +394,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
                     raise ValueError('invalid cache decode state')
                 np.testing.assert_allclose(state_value, expected_state, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
                 max_cache_diff = max(max_cache_diff, float(np.max(np.abs(state_value - expected_state))) if state_value.size else 0.0)
-            if int(np.argmax(logits[0])) != int(np.argmax(expected_next[0])):
-                exact_greedy = False
+            reference_logits = expected_next
         # Warmed, alternating repeats measure prefill and a decode batch without exposing tokens or text.
         for _ in range(warmup):
             prefill_session.run(None, {'tokens': source_tokens.numpy()})
@@ -377,8 +434,6 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             'decode_step_cpu_ms_median': statistics.median(decode_cpu_samples) / 1e6,
             'full_prefix_cached_parity_checked': True,
         })
-    if not exact_greedy:
-        raise ValueError('cached ONNX greedy output differs from full-prefix output')
     if (read_bounded(config_path, MAX_CONFIG_BYTES) != config_raw
             or read_bounded(manifest_path, config['max_manifest_bytes']) != manifest_raw
             or read_bounded(weights_path, config['max_checkpoint_bytes']) != weights_raw
