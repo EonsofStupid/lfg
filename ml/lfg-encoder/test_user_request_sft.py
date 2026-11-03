@@ -256,6 +256,12 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertEqual(coverage['selected'], 1)
 
     def test_matched_effort_linked_to_negated_model_remains_unknown(self):
+        cache = json.loads(self.cache.read_bytes())
+        cache['models'][1]['supported_reasoning_levels'] = [{'effort': 'high'}]
+        self.cache.write_text(json.dumps(cache), encoding='utf-8')
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train', screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
         caller = json.loads(self.caller_input_path.read_bytes())
         caller['relations']['items'] = [
             {'model_span_id': 'span-2'},
