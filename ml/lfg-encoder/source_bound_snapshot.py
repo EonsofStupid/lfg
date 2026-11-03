@@ -201,7 +201,47 @@ def source_group_id(record: dict) -> str:
     return sha(('codex-session-path-v1\0' + path).encode('utf-8'))
 
 
-def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
+def _source_identity_claim(record: dict) -> dict:
+    return {key: record[key] for key in ('source_file_sha256', 'source_prefix_sha256',
+            'source_prefix_bytes', 'source_line', 'source_line_sha256', 'text_sha256')}
+
+
+def _validate_reserved_source_identities(value: object) -> list[dict]:
+    fields = {'source_file_sha256', 'source_prefix_sha256', 'source_prefix_bytes',
+              'source_line', 'source_line_sha256', 'text_sha256'}
+    if not isinstance(value, list) or len(value) > MAX_RESERVED_MANIFEST_BYTES // 200:
+        raise ValueError('invalid reserved source identities')
+    result = []
+    for item in value:
+        if (not isinstance(item, dict) or set(item) != fields
+                or any(not isinstance(item[key], str) or len(item[key]) != 64
+                       or any(char not in '0123456789abcdef' for char in item[key])
+                       for key in ('source_file_sha256', 'source_prefix_sha256',
+                                   'source_line_sha256', 'text_sha256'))
+                or type(item['source_prefix_bytes']) is not int or item['source_prefix_bytes'] < 1
+                or type(item['source_line']) is not int or item['source_line'] < 1):
+            raise ValueError('invalid reserved source identity')
+        result.append(dict(item))
+    if len({json.dumps(item, sort_keys=True) for item in result}) != len(result):
+        raise ValueError('duplicate reserved source identity')
+    if len(json_bytes(result)) > MAX_RESERVED_MANIFEST_BYTES:
+        raise ValueError('reserved source identities exceed byte limit')
+    return result
+
+
+def _matches_reserved_identity(record: dict, identities: list[dict]) -> bool:
+    """Compare independent identity keys; whole-file digest can drift on append."""
+    candidate = _source_identity_claim(record)
+    return any(candidate['source_file_sha256'] == item['source_file_sha256']
+               or candidate['text_sha256'] == item['text_sha256']
+               or (candidate['source_line'] == item['source_line']
+                   and candidate['source_line_sha256'] == item['source_line_sha256'])
+               or (candidate['source_prefix_bytes'] == item['source_prefix_bytes']
+                   and candidate['source_prefix_sha256'] == item['source_prefix_sha256'])
+               for item in identities)
+
+
+def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str, list[dict]]:
     """Read an owner-only POSIX manifest; completeness remains unknown.
 
     Windows direct reads are disabled because this module does not verify
@@ -254,6 +294,7 @@ def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
         raise ValueError('invalid reserved-session manifest') from None
     if (not isinstance(value, dict) or value.get('schema_version') != 'lfg.reserved-session-groups.v1'
             or not isinstance(value.get('groups'), list)
+            or 'identities' not in value
             or value.get('coverage') not in ('unknown', 'partial')):
         raise ValueError('invalid reserved-session manifest')
     groups = value['groups']
@@ -261,19 +302,23 @@ def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
             or any(char not in '0123456789abcdef' for char in item) for item in groups)
             or len(set(groups)) != len(groups)):
         raise ValueError('invalid reserved-session identity')
-    return groups, sha(raw), value['coverage']
+    identities = _validate_reserved_source_identities(value['identities'])
+    return groups, sha(raw), value['coverage'], identities
 
 
 def _recheck_reserved_manifest(locator: str | None, manifest_sha: str | None,
-                               groups: list[str], coverage: str) -> None:
+                               groups: list[str], coverage: str, identities: list[dict]) -> None:
     if manifest_sha is None:
         if locator is not None:
             raise ValueError('unexpected reserved-session manifest locator')
+        if identities:
+            raise ValueError('reserved source identities require a pinned manifest')
         return
     if not isinstance(locator, str) or not locator:
         raise ValueError('reserved-session manifest identity is incomplete')
-    current_groups, current_sha, current_coverage = read_reserved_session_manifest(Path(locator))
-    if current_sha != manifest_sha or current_groups != groups or current_coverage != coverage:
+    current_groups, current_sha, current_coverage, current_identities = read_reserved_session_manifest(Path(locator))
+    if (current_sha != manifest_sha or current_groups != groups or current_coverage != coverage
+            or current_identities != identities):
         raise ValueError('reserved-session manifest changed')
 
 
@@ -284,6 +329,8 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
     events append; those bytes are irrelevant to the selected line. The exact
     prefix digest and selected line digest must still match.
     """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
+        raise ValueError('source verification requires POSIX no-follow traversal')
     inspect_codex_inventory.verify_record(record)
     if (type(max_session_bytes) is not int or max_session_bytes < 1
             or type(max_line_bytes) is not int or max_line_bytes < 1
@@ -373,6 +420,7 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
 
 def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                    known_reserved_group_sha256: tuple[str, ...] | list[str] = (),
+                   known_reserved_source_identities: tuple[dict, ...] | list[dict] = (),
                    known_reserved_manifest_sha256: str | None = None,
                    known_reserved_manifest_locator: str | None = None,
                    known_reserved_groups_coverage: str = 'unknown',
@@ -388,6 +436,8 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
     holdout independence. ``reserved_train`` is intentionally unavailable until
     a separately verifiable split attestation is wired into this contract.
     """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
+        raise ValueError('source-bound snapshots require POSIX no-follow traversal')
     if split_policy not in {'exploratory_train', 'reserved_train'}:
         raise ValueError('split policy must be explicit')
     if split_policy == 'reserved_train':
@@ -409,15 +459,17 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
         raise ValueError('reserved-session manifest identity is incomplete')
     if known_reserved_groups_coverage not in ('unknown', 'partial'):
         raise ValueError('reserved-session coverage cannot be asserted complete')
+    identities = _validate_reserved_source_identities(list(known_reserved_source_identities))
     _recheck_reserved_manifest(known_reserved_manifest_locator, known_reserved_manifest_sha256,
-                               list(known_reserved_group_sha256), known_reserved_groups_coverage)
+                               list(known_reserved_group_sha256), known_reserved_groups_coverage, identities)
     if (not isinstance(known_reserved_project_labels, (tuple, list))
             or any(not isinstance(item, str) or not item.strip() for item in known_reserved_project_labels)):
         raise ValueError('invalid reserved-project list')
     inspect_codex_inventory.verify_record(record)
     group_id = source_group_id(record)
     reserved_projects = {_project_key(item) for item in known_reserved_project_labels}
-    if group_id in set(known_reserved_group_sha256) or _project_key(record['project']) in reserved_projects:
+    if (group_id in set(known_reserved_group_sha256) or _project_key(record['project']) in reserved_projects
+            or _matches_reserved_identity(record, identities)):
         # This check intentionally precedes opening the selected session file.
         raise ValueError('selected source belongs to a known reserved group')
     try:
@@ -466,6 +518,7 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                   'known_reserved_group_exclusion': 'checked',
                   'known_reserved_groups_checked': len(known_reserved_group_sha256),
                   'known_reserved_group_sha256': list(known_reserved_group_sha256),
+                  'known_reserved_source_identities': identities,
                   'known_reserved_manifest_sha256': known_reserved_manifest_sha256,
                   'known_reserved_groups_coverage': known_reserved_groups_coverage,
                   'known_reserved_project_labels': list(known_reserved_project_labels)},
@@ -502,6 +555,7 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     policy_path = Path(provider.get('screen_policy_locator') or _default_screen_policy_path())
     current = build_snapshot(record, Path(cache_path), split_policy='exploratory_train',
                              known_reserved_group_sha256=split.get('known_reserved_group_sha256', []),
+                             known_reserved_source_identities=split.get('known_reserved_source_identities', []),
                              known_reserved_manifest_sha256=split.get('known_reserved_manifest_sha256'),
                              known_reserved_manifest_locator=manifest_locator,
                              known_reserved_groups_coverage=split.get('known_reserved_groups_coverage', 'unknown'),
@@ -583,7 +637,8 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
     _recheck_reserved_manifest(value.get('reserved_session_manifest_locator'),
                                value['split'].get('known_reserved_manifest_sha256'),
                                value['split'].get('known_reserved_group_sha256', []),
-                               value['split'].get('known_reserved_groups_coverage', 'unknown'))
+                               value['split'].get('known_reserved_groups_coverage', 'unknown'),
+                               value['split'].get('known_reserved_source_identities', []))
     policy, rules, policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
     if value.get('provider_list', {}).get('screen_policy_sha256') != policy_sha:
         raise ValueError('snapshot provider extensions use a different screening policy')
@@ -666,7 +721,8 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
     _recheck_reserved_manifest(value.get('reserved_session_manifest_locator'),
                                value['split'].get('known_reserved_manifest_sha256'),
                                value['split'].get('known_reserved_group_sha256', []),
-                               value['split'].get('known_reserved_groups_coverage', 'unknown'))
+                               value['split'].get('known_reserved_groups_coverage', 'unknown'),
+                               value['split'].get('known_reserved_source_identities', []))
     return (manifest, row, context_file_value, request_raw, manifest_raw, context_raw,
             json_bytes(projection), json_bytes(bundle))
 
@@ -719,17 +775,37 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or not isinstance(source.get('source_prefix_sha256'), str)
             or not isinstance(source.get('source_line_sha256'), str)
             or not isinstance(source.get('user_text_sha256'), str)
+            or not isinstance(source.get('source_file_sha256_at_inventory'), str)
+            or type(source.get('source_prefix_bytes')) is not int or source['source_prefix_bytes'] < 1
+            or type(source.get('selected_line')) is not int or source['selected_line'] < 1
             or not isinstance(provider.get('cache_sha256'), str)
             or not isinstance(provider.get('screen_policy_sha256'), str)):
         raise ValueError('staged source provenance is incomplete')
     source_group = source.get('source_group_sha256')
     reserved_groups = split.get('known_reserved_group_sha256')
+    reserved_identities = split.get('known_reserved_source_identities')
     reserved_projects = split.get('known_reserved_project_labels')
     reserved_manifest_sha = split.get('known_reserved_manifest_sha256')
     reserved_coverage = split.get('known_reserved_groups_coverage')
     valid_sha = lambda item: (isinstance(item, str) and len(item) == 64
                               and all(char in '0123456789abcdef' for char in item))
-    if (not valid_sha(source_group) or not isinstance(reserved_groups, list)
+    try:
+        reserved_identities = _validate_reserved_source_identities(reserved_identities)
+    except (TypeError, ValueError, KeyError):
+        raise ValueError('staged reserved source identities are invalid') from None
+    staged_identity = {
+        'source_file_sha256': source.get('source_file_sha256_at_inventory'),
+        'source_prefix_sha256': source.get('source_prefix_sha256'),
+        'source_prefix_bytes': source.get('source_prefix_bytes'),
+        'source_line': source.get('selected_line'),
+        'source_line_sha256': source.get('source_line_sha256'),
+        'text_sha256': source.get('user_text_sha256'),
+    }
+    if (not valid_sha(source_group) or not valid_sha(source.get('source_file_sha256_at_inventory'))
+            or not valid_sha(source.get('source_prefix_sha256'))
+            or not valid_sha(source.get('source_line_sha256'))
+            or not valid_sha(source.get('user_text_sha256'))
+            or not isinstance(reserved_groups, list)
             or not valid_sha(snapshot_sha)
             or len(reserved_groups) > 100_000 or any(not valid_sha(item) for item in reserved_groups)
             or len(set(reserved_groups)) != len(reserved_groups)
@@ -740,6 +816,7 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or (reserved_manifest_sha is not None and not valid_sha(reserved_manifest_sha))
             or (reserved_manifest_sha is None and reserved_coverage != 'unknown')
             or source_group in reserved_groups
+            or _matches_reserved_identity(staged_identity, reserved_identities)
             or not isinstance(reserved_projects, list)
             or any(not isinstance(label, str) or not label.strip() for label in reserved_projects)
             or _project_key(source.get('project', '')) in {_project_key(label) for label in reserved_projects}):
@@ -1030,13 +1107,14 @@ def main() -> None:
         if not isinstance(record, dict):
             raise ValueError('invalid inventory record')
         if args.reserved_session_ids is None:
-            reserved_groups, reserved_manifest_sha, reserved_manifest_locator, reserved_coverage = [], None, None, 'unknown'
+            reserved_groups, reserved_manifest_sha, reserved_manifest_locator, reserved_coverage, reserved_identities = [], None, None, 'unknown', []
         else:
-            reserved_groups, reserved_manifest_sha, reserved_coverage = read_reserved_session_manifest(
+            reserved_groups, reserved_manifest_sha, reserved_coverage, reserved_identities = read_reserved_session_manifest(
                 args.reserved_session_ids)
             reserved_manifest_locator = str(args.reserved_session_ids.resolve())
         result = build_snapshot(record, args.provider_cache, split_policy=args.split_policy,
                                 known_reserved_group_sha256=reserved_groups,
+                                known_reserved_source_identities=reserved_identities,
                                 known_reserved_manifest_sha256=reserved_manifest_sha,
                                 known_reserved_manifest_locator=reserved_manifest_locator,
                                 known_reserved_groups_coverage=reserved_coverage,

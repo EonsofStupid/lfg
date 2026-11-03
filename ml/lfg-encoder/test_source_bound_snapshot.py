@@ -11,6 +11,7 @@ import inventory_codex_sessions as inventory
 import source_bound_snapshot as snapshot
 
 
+@unittest.skipUnless(os.name == 'posix', 'source-bound traversal is fail-closed on Windows')
 class SourceBoundSnapshotTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -231,6 +232,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         selected_group = json.loads(projection_raw)['source']['source_group_sha256']
         reserved_mutations = {
             'known_reserved_group_sha256': [selected_group],
+            'known_reserved_source_identities': [snapshot._source_identity_claim(self.record)],
             'known_reserved_groups_checked': 1,
             'known_reserved_groups_coverage': 'complete',
             'known_reserved_manifest_sha256': 'bad-digest',
@@ -298,11 +300,73 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         changed = {**self.record, 'source_file': alias}
         self.assertEqual(snapshot.source_group_id(self.record), snapshot.source_group_id(changed))
 
+    @unittest.skipUnless(os.name == 'posix', 'source identity checks require POSIX no-follow reads')
+    def test_reserved_identity_rejects_copy_and_relocated_hardlink_before_read(self):
+        identity = snapshot._source_identity_claim(self.record)
+        manifest = self.root / 'reserved-identities.json'
+        manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                  'coverage': 'partial', 'groups': [],
+                                                  'identities': [identity]}))
+        manifest.chmod(0o600)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(manifest)
+        copy_path = self.root / 'renamed-copy.jsonl'
+        copy_path.write_bytes(self.session.read_bytes())
+        copied = dict(self.record, source_file=str(copy_path))
+        appended_path = self.root / 'appended-copy.jsonl'
+        appended_path.write_bytes(self.session.read_bytes() + b'{"type":"later_event"}\n')
+        status, appended_records = inventory.scan_file(
+            appended_path, {'lfg': inventory.normalize(str(self.root / 'project'))}, 4096, 4096)
+        self.assertEqual(status, 'scanned')
+        appended = appended_records[0]
+        self.assertNotEqual(appended['source_file_sha256'], identity['source_file_sha256'])
+        self.assertEqual(appended['text_sha256'], identity['text_sha256'])
+        hardlink = self.root / 'moved-hardlink.jsonl'
+        os.link(self.session, hardlink)
+        self.session.unlink()
+        moved = dict(self.record, source_file=str(hardlink), source_file_sha256='b' * 64)
+        self.assertEqual(hardlink.stat().st_nlink, 1)
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            for candidate in (copied, appended, moved):
+                with self.subTest(path=candidate['source_file']), self.assertRaisesRegex(ValueError, 'reserved group'):
+                    snapshot.build_snapshot(candidate, self.cache, split_policy='exploratory_train',
+                                            known_reserved_group_sha256=groups,
+                                            known_reserved_source_identities=identities,
+                                            known_reserved_manifest_sha256=digest,
+                                            known_reserved_manifest_locator=str(manifest.resolve()),
+                                            known_reserved_groups_coverage=coverage)
+        opened.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'source identity checks require POSIX no-follow reads')
+    def test_reserved_source_identity_claim_requires_pinned_manifest(self):
+        with self.assertRaisesRegex(ValueError, 'require a pinned manifest'):
+            snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
+                                    known_reserved_source_identities=[
+                                        snapshot._source_identity_claim(self.record)])
+
     def test_reserved_project_aliases_are_case_and_punctuation_insensitive(self):
         with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')):
             with self.assertRaisesRegex(ValueError, 'reserved group'):
                 snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         known_reserved_project_labels=['L.F.G'])
+
+    @unittest.skipUnless(os.name == 'posix', 'reserved source identity checks are POSIX-specific')
+    def test_manifest_identity_rejects_candidate_before_source_open(self):
+        manifest = self.root / 'reserved-identity.json'
+        identity = snapshot._source_identity_claim(self.record)
+        manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                  'coverage': 'partial', 'groups': [],
+                                                  'identities': [identity]}))
+        manifest.chmod(0o600)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(manifest)
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            with self.assertRaisesRegex(ValueError, 'reserved group'):
+                snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
+                                        known_reserved_group_sha256=groups,
+                                        known_reserved_source_identities=identities,
+                                        known_reserved_manifest_sha256=digest,
+                                        known_reserved_manifest_locator=str(manifest.resolve()),
+                                        known_reserved_groups_coverage=coverage)
+        opened.assert_not_called()
 
     @unittest.skipUnless(os.name == 'posix', 'reserved manifest reads require POSIX no-follow handles')
     def test_cli_reserved_session_manifest_rejects_renamed_label_before_source_open(self):
@@ -312,14 +376,16 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         manifest_value = {'schema_version': 'lfg.reserved-session-groups.v1',
                           'coverage': 'partial',
                           'groups': [snapshot.source_group_id(self.record)],
+                          'identities': [],
                           'extension': {'kept_in_digest': True}}
         manifest_path.write_bytes(snapshot.json_bytes(manifest_value))
         if os.name == 'posix':
             manifest_path.chmod(0o600)
-        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest_path)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(manifest_path)
         self.assertEqual(groups, manifest_value['groups'])
         self.assertEqual(digest, snapshot.sha(manifest_path.read_bytes()))
         self.assertEqual(coverage, 'partial')
+        self.assertEqual(identities, [])
         changed = dict(self.record, project='renamed-project-label')
         inventory_path.write_bytes(snapshot.json_bytes(changed))
         output_path = self.root / 'snapshot.json'
@@ -338,7 +404,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             self.skipTest('reserved manifest reads require POSIX no-follow handles')
         path = self.root / 'complete-reserved.json'
         path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
-                                              'coverage': 'complete', 'groups': []}))
+                                              'coverage': 'complete', 'groups': [], 'identities': []}))
         path.chmod(0o600)
         with self.assertRaisesRegex(ValueError, 'invalid reserved-session manifest'):
             snapshot.read_reserved_session_manifest(path)
@@ -346,7 +412,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
     @unittest.skipUnless(os.name == 'posix', 'POSIX private-file checks are platform-specific')
     def test_reserved_manifest_rejects_symlink_hardlink_and_permissive_file(self):
         raw = snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
-                                   'coverage': 'partial', 'groups': []})
+                                   'coverage': 'partial', 'groups': [], 'identities': []})
         original = self.root / 'reserved-private.json'
         original.write_bytes(raw)
         original.chmod(0o600)
@@ -376,17 +442,47 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'require POSIX no-follow'):
                 snapshot.read_reserved_session_manifest(self.root / 'reserved.json')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows direct-library boundary is platform-specific')
+    def test_direct_builder_and_verifier_fail_before_retargeted_junction_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.mkdir(); second.mkdir()
+            source_a, source_b = first / 'session.jsonl', second / 'session.jsonl'
+            source_a.write_bytes(b'fixture source A')
+            source_b.write_bytes(b'fixture source B')
+            junction = root / 'sessions'
+            made = subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(junction), str(first)],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if made.returncode != 0:
+                self.skipTest('junction creation unavailable')
+            junction.rmdir()
+            subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(junction), str(second)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            record = {'source_file': str(junction / 'session.jsonl')}
+            with mock.patch.object(Path, 'stat', side_effect=AssertionError('junction traversed')), \
+                 mock.patch.object(Path, 'lstat', side_effect=AssertionError('junction traversed')), \
+                 mock.patch.object(Path, 'open', side_effect=AssertionError('junction traversed')):
+                with self.assertRaisesRegex(ValueError, 'requires POSIX no-follow'):
+                    snapshot.verify_selected_source(record, max_session_bytes=4096, max_line_bytes=4096)
+                with self.assertRaisesRegex(ValueError, 'require POSIX no-follow'):
+                    snapshot.build_snapshot(record, root / 'cache.json', split_policy='exploratory_train')
+            self.assertEqual(source_a.read_bytes(), b'fixture source A')
+            self.assertEqual(source_b.read_bytes(), b'fixture source B')
+            junction.rmdir()
+
     @unittest.skipUnless(os.name == 'posix', 'reserved-manifest no-follow checks are POSIX-specific')
     def test_materialization_rechecks_reserved_manifest_after_staging(self):
         manifest = self.root / 'reserved-final-check.json'
         initial = {'schema_version': 'lfg.reserved-session-groups.v1',
-                   'coverage': 'partial', 'groups': []}
+                   'coverage': 'partial', 'groups': [], 'identities': []}
         manifest.write_bytes(snapshot.json_bytes(initial))
         manifest.chmod(0o600)
-        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(manifest)
         value = snapshot.build_snapshot(
             self.record, self.cache, split_policy='exploratory_train',
             known_reserved_group_sha256=groups, known_reserved_manifest_sha256=digest,
+            known_reserved_source_identities=identities,
             known_reserved_manifest_locator=str(manifest.resolve()),
             known_reserved_groups_coverage=coverage)
         original_stage = snapshot.stage_snapshot_projection
@@ -395,7 +491,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             result = original_stage(snapshot_value, context_text)
             manifest.write_bytes(snapshot.json_bytes({
                 'schema_version': 'lfg.reserved-session-groups.v1',
-                'coverage': 'partial', 'groups': [snapshot.source_group_id(self.record)]}))
+                'coverage': 'partial', 'groups': [snapshot.source_group_id(self.record)], 'identities': []}))
             manifest.chmod(0o600)
             return result
 
@@ -410,12 +506,13 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             self.skipTest('reserved manifest reads require POSIX no-follow handles')
         manifest = self.root / 'mutable-reserved.json'
         manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
-                                                  'coverage': 'partial', 'groups': []}))
+                                                  'coverage': 'partial', 'groups': [], 'identities': []}))
         manifest.chmod(0o600)
-        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest)
+        groups, digest, coverage, identities = snapshot.read_reserved_session_manifest(manifest)
         value = snapshot.build_snapshot(
             self.record, self.cache, split_policy='exploratory_train',
             known_reserved_group_sha256=groups, known_reserved_manifest_sha256=digest,
+            known_reserved_source_identities=identities,
             known_reserved_manifest_locator=str(manifest.resolve()),
             known_reserved_groups_coverage=coverage)
         prepared = snapshot.prepare_single_request(
@@ -426,7 +523,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertEqual(projection['split']['known_reserved_manifest_sha256'], digest)
         manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
                                                   'coverage': 'partial',
-                                                  'groups': [snapshot.source_group_id(self.record)]}))
+                                                  'groups': [snapshot.source_group_id(self.record)], 'identities': []}))
         with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
             with self.assertRaisesRegex(ValueError, 'reserved-session manifest changed'):
                 snapshot.revalidate_snapshot(value)
@@ -572,6 +669,39 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Windows private snapshot output is disabled'):
                     snapshot.write_private_snapshot(junction / 'snapshot.json', {'ok': True})
             self.assertFalse((target / 'snapshot.json').exists())
+            junction.rmdir()
+
+
+@unittest.skipUnless(os.name == 'nt', 'Windows direct-library guard regression')
+class WindowsSourceBoundFailClosedTests(unittest.TestCase):
+    def test_builder_verifier_and_manifest_reader_refuse_retargeted_junction_before_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.mkdir(); second.mkdir()
+            (first / 'session.jsonl').write_bytes(b'fixture source A')
+            (second / 'session.jsonl').write_bytes(b'fixture source B')
+            junction = root / 'sessions'
+            made = subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(junction), str(first)],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if made.returncode != 0:
+                self.skipTest('junction creation unavailable')
+            # Change the target after a hypothetical inventory was created.
+            junction.rmdir()
+            subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(junction), str(second)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            record = {'source_file': str(junction / 'session.jsonl')}
+            with mock.patch.object(Path, 'stat', side_effect=AssertionError('junction traversed')), \
+                 mock.patch.object(Path, 'lstat', side_effect=AssertionError('junction traversed')), \
+                 mock.patch.object(Path, 'open', side_effect=AssertionError('junction traversed')):
+                with self.assertRaisesRegex(ValueError, 'requires POSIX no-follow'):
+                    snapshot.verify_selected_source(record, max_session_bytes=4096, max_line_bytes=4096)
+                with self.assertRaisesRegex(ValueError, 'require POSIX no-follow'):
+                    snapshot.build_snapshot(record, root / 'cache.json', split_policy='exploratory_train')
+                with self.assertRaisesRegex(ValueError, 'require POSIX no-follow'):
+                    snapshot.read_reserved_session_manifest(junction / 'reserved.json')
+            self.assertEqual((first / 'session.jsonl').read_bytes(), b'fixture source A')
+            self.assertEqual((second / 'session.jsonl').read_bytes(), b'fixture source B')
             junction.rmdir()
 
 

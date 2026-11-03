@@ -108,10 +108,10 @@ or changing the requested path. POSIX output requires an existing protected
 parent directory; it walks with no-follow directory handles, rejects untrusted
 writable ancestors, and creates the file relative to the retained parent handle
 after checking the Git ignored/untracked boundary for that opened location.
-The CLI also refuses Windows before opening inventory, provider-cache, or
-reserved-manifest inputs. This guarantee is scoped to the CLI: most Python
-library helpers are not a Windows path/ACL sandbox and callers must not treat
-direct library reads as private Windows materialization.
+The CLI refuses Windows before opening inventory, provider-cache, or
+reserved-manifest inputs. The source-bound builder, selected-source verifier,
+and reserved-manifest readers also fail closed on Windows before source-path
+access. Other helpers are not a general Windows path/ACL sandbox.
 
 When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment
@@ -125,20 +125,24 @@ therefore incomplete. The Makers Impulse candidate external-project group
 remains excluded from this selection. A separate, independently reserved
 evaluation group is still needed before any quality claim or promotion.
 The CLI accepts `--reserved-session-ids` with a private
-`lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs and an
-`unknown` or `partial` coverage marker. It binds the manifest digest into the
-snapshot, retains its private locator, and rereads the bounded manifest during
-revalidation and immediately before returning staged bytes. On POSIX the
-reader opens through no-follow directory/file handles and requires an owner-only
-regular file owned by the current account with no hard links. A changed digest,
-ID list or coverage marker fails before the selected session prompt is opened;
-matching IDs are rejected before source opening. This narrows the concurrent
-edit window but does not lock the manifest after the final check; callers must
-keep the manifest in a protected directory and avoid concurrent edits during
-materialization. It will not accept a completeness claim without separate
-verifiable evidence. Reserved-manifest reads are disabled for direct Windows
-library callers because this code does not verify effective ACLs or reparse
-points there.
+`lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs,
+predeclared source inventory identities, and an `unknown` or `partial` coverage
+marker. Each inventory identity includes whole-file digest, selected-text
+digest, selected line number/digest, and prefix byte count/digest. An exact
+whole-file digest, matching selected-text digest, matching selected line, or
+matching prefix independently excludes a candidate before source open. This
+catches copied/renamed aliases and append drift. The snapshot binds the full
+manifest digest and identities, retains its private locator, and rereads the
+bounded manifest during revalidation and immediately before returning staged
+bytes. On POSIX the reader opens through no-follow directory/file handles and
+requires an owner-only regular file owned by the current account with no hard
+links. This comparison trusts the protected inventory metadata; candidate
+identities cannot be verified against file contents without opening those
+contents, so it is not an absolute guarantee against maliciously forged
+metadata. Coverage remains unknown or partial. A changed digest, identity list
+or coverage marker fails before source open; the final check narrows but does
+not lock the concurrent edit window. The module will not accept a completeness
+claim without separate verifiable evidence.
 
 Staged validation reconstructs the required access claims as unknown and checks
 that the selected source is not listed in its own reserved session/project
