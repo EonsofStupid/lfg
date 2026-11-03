@@ -1,0 +1,353 @@
+{
+  "schema_version": "clyffy.handoff.v1",
+  "id": "lfg-developer-feedback-v1",
+  "status": "ready",
+  "objective": "Build an owned-model LFG developer prototype grounded in real user corrections and observed outcomes, with local and hosted paths and future RRFlow/SWAG integration.",
+  "baseline_commit": "03078c1170441a7e6027fd4d15a613db1565fd8a",
+  "evidence": [
+    {
+      "kind": "repository",
+      "location": "docs/lfg/GROUNDED-EXECUTION-PLAN-2026-11-03.md",
+      "claim": "Records source state, actual Spark observations, current boundaries and research."
+    },
+    {
+      "kind": "source",
+      "location": "crates/lfg-core/src/assessment.rs",
+      "claim": "Current assessment path is deterministic."
+    },
+    {
+      "kind": "source",
+      "location": "ml/lfg-encoder/review_corpus.py",
+      "claim": "A private source-bound review workflow exists."
+    },
+    {
+      "kind": "review",
+      "location": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
+      "claim": "Defines the private local feedback security, record, revision and tests contract."
+    }
+  ],
+  "constraints": [
+    "Follow AGENTS.md and newer user instructions; preserve existing user work.",
+    "Training on authorized private projects and conversations may continue; gates affect trust and promotion, not permission to train.",
+    "Keep private datasets, conversations, weights and secrets local and out of Git; review secret screening.",
+    "Models, runtime limits, policies and integrations must be configurable; preserve extension fields.",
+    "Do not claim a trained quality-qualified model, network security, integration or benchmark without evidence.",
+    "Inspect and preserve all unrelated tracked, untracked and user-created work."
+  ],
+  "authorized_scope": [
+    "Modify the listed task paths to implement the selected ready task and its tests.",
+    "Use the owner-authorized local projects and conversations within the privacy constraints.",
+    "Read local service and checkpoint status; avoid changing or terminating running jobs without task-specific justification."
+  ],
+  "anchors": [
+    {
+      "path": "crates/lfg-core/src/assessment.rs",
+      "sha256": "79f77cf142dea9b5598b8a4987dbc01ccf538bab226f748c7136fd9f638ee472",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "crates/lfg-server/src/lib.rs",
+      "sha256": "af6f32739cdc2bfa9316af4d6b3220ba2b8fd4f0448ed1c9a381f9b9c3e7826e",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "ui/master-clyffy-web/src/AssessmentView.tsx",
+      "sha256": "9f7ba078801371f30d1fdf91cb00532224cf95c711482a3177a3b4783de38903",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "ui/master-clyffy-web/src/api.ts",
+      "sha256": "f48691b6f46a018f2c4956e58e4f47ecbaeaf007c046053856490a8c46f205a3",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "ml/lfg-encoder/review_corpus.py",
+      "sha256": "599795b21693dcdee4d1c59c163d194c51350f662f73c1abfd91ff50b00c8b70",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "docs/lfg/ASSESSMENT-TRAINING.md",
+      "sha256": "35491417e90909e9c999d2f93c6afb31bb052007ed28fb26f3ee581505763a59",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "crates/lfg-server/src/main.rs",
+      "sha256": "3d56eaa0018ece7e30506376cbb73e1fa12776f8d6659f0afdbec802b8b66152",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "crates/lfg-server/src/kernel_journal.rs",
+      "sha256": "9e140f6fb721274a773f72db00de8a66a99fd6f0faaaf46a607cfb924521c162",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
+      "sha256": "9c0affb46ca69d1d8041f36fe59d5e5bccb7d0b3811350f026dbffd1abeac2fb",
+      "normalization": "text-lf"
+    },
+    {
+      "path": "docs/lfg/GROUNDED-EXECUTION-PLAN-2026-11-03.md",
+      "sha256": "1a4994412a0ffcd3e4f039f7f471eee201a9fc458eb8d6cb5fe5db67534f1ce3",
+      "normalization": "text-lf"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "feedback_journal",
+      "title": "Persist and review real assessment corrections",
+      "status": "pending",
+      "paths": [
+        "Cargo.lock",
+        "crates/lfg-server/Cargo.toml",
+        "crates/lfg-server/src",
+        "ui/master-clyffy-web/src",
+        "docs/lfg/FEEDBACK-JOURNAL-DESIGN.md",
+        "docs/lfg/ASSESSMENT.md"
+      ],
+      "depends_on": [],
+      "steps": [
+        "Read docs/lfg/FEEDBACK-JOURNAL-DESIGN.md and inspect the current server, kernel journal, private review ledger, assessment and UI. Preserve all unrelated tracked and untracked work.",
+        "Implement the versioned local feedback record, transactional durable revisions, optimistic concurrency and append-only rollback exactly as specified. Preserve extra fields and distinguish original recommendation, owner correction and confirmed or unknown outcome.",
+        "Implement disabled-by-default private storage and loopback-only API access, with the specified host, origin and session-token protections; hosted authorization is explicitly out of scope. Fail closed if privacy or listener identity cannot be established.",
+        "Add developer UI create, reopen, revise and rollback with visible provenance and unknown state. Keep raw prompt capture disabled unless explicitly configured.",
+        "Add the design-specified API/UI tests and configuration documentation; record actual test results and escalate any design or platform boundary that cannot be met."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "lfg-server"
+          ],
+          "expected": "All relevant server tests pass, including persistence, revisions and access boundaries."
+        },
+        {
+          "argv": [
+            "npm",
+            "--prefix",
+            "ui/master-clyffy-web",
+            "test"
+          ],
+          "expected": "UI tests pass including feedback interaction."
+        },
+        {
+          "argv": [
+            "npm",
+            "--prefix",
+            "ui/master-clyffy-web",
+            "run",
+            "build"
+          ],
+          "expected": "Production UI builds."
+        }
+      ],
+      "acceptance": [
+        "The complete record and access contract in docs/lfg/FEEDBACK-JOURNAL-DESIGN.md is implemented and tested, including persistence across restart, conflict handling, extensions, rollback, concurrent writes, permission failures, local-only and origin restrictions.",
+        "The UI distinguishes recommendations, corrections and confirmed or unknown outcomes and reports unavailable feedback.",
+        "No private data or session tokens are logged or committed; raw prompt content is not retained by default."
+      ]
+    },
+    {
+      "id": "owned_assessment",
+      "title": "Connect and inspect an experimental owned-model assessment",
+      "status": "pending",
+      "paths": [
+        "crates/lfg-server",
+        "ui/master-clyffy-web/src",
+        "docs/lfg"
+      ],
+      "depends_on": [
+        "feedback_journal"
+      ],
+      "steps": [
+        "Inspect existing owned-byte runtime and model artifact contract.",
+        "Add configurable, explicitly selected model backend with bounded input, output and execution time, explicit malformed, truncated, unavailable and timeout states; retain deterministic assessment.",
+        "Show engine identity, checkpoint provenance and results side by side in the developer UI; capture actual failures."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "lfg-server"
+          ],
+          "expected": "Backend tests pass, including failures and limits."
+        },
+        {
+          "argv": [
+            "npm",
+            "--prefix",
+            "ui/master-clyffy-web",
+            "test"
+          ],
+          "expected": "UI tests pass."
+        }
+      ],
+      "acceptance": [
+        "Run a real owned-model inference and record its actual output and artifact hash, or document the concrete operational blocker.",
+        "No synthetic output is represented as model output; deterministic behavior remains selectable."
+      ]
+    },
+    {
+      "id": "real_supervision",
+      "title": "Prepare private, source-grounded supervision and held-out data",
+      "status": "pending",
+      "paths": [
+        "ml/lfg-encoder",
+        "docs/lfg"
+      ],
+      "depends_on": [
+        "feedback_journal"
+      ],
+      "steps": [
+        "Reuse source-bound review ledger and ingest real corrections and verified outcomes with provenance.",
+        "Recover and connect the authored questions and templates; distinguish unknown facts and proposals from confirmed labels.",
+        "Version private datasets, scan and review secrets, deduplicate and split by independent project or conversation."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "ml/lfg-encoder",
+            "-p",
+            "test_review_corpus.py"
+          ],
+          "expected": "Corpus review tests pass."
+        }
+      ],
+      "acceptance": [
+        "Produce auditable private dataset and split manifests with no secrets or personal source content committed.",
+        "Training and evaluation examples have traceable target provenance."
+      ]
+    },
+    {
+      "id": "evaluation",
+      "title": "Score real assessments against independent targets",
+      "status": "pending",
+      "paths": [
+        "ml/lfg-encoder",
+        "docs/lfg"
+      ],
+      "depends_on": [
+        "owned_assessment",
+        "real_supervision"
+      ],
+      "steps": [
+        "Create real model predictions and evaluate field-by-field against adjudicated held-out targets.",
+        "Record coverage, missing targets, error categories, model identifiers and comparison with deterministic and teacher baselines.",
+        "Keep tuning data separate from final holdout; continue authorized training independent of quality promotion."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "ml/lfg-encoder",
+            "-p",
+            "test_assessment_evaluate.py"
+          ],
+          "expected": "Evaluator tests pass."
+        }
+      ],
+      "acceptance": [
+        "Produce a versioned reproducible scorecard with actual predictions and non-synthetic targets or report the specific unavailable data."
+      ]
+    },
+    {
+      "id": "hardware_runtime",
+      "title": "Measure and improve runtime and Spark training",
+      "status": "pending",
+      "paths": [
+        "crates",
+        "ml/lfg-encoder",
+        "docs/lfg"
+      ],
+      "depends_on": [
+        "owned_assessment"
+      ],
+      "steps": [
+        "Profile real CPU and Spark workloads with artifact IDs, input distributions, p50/p95 latency, memory, throughput and reproducible configuration.",
+        "Compare an owned single-pass classification head and owned generative path on the same real targets, including rationale quality; test original hybrid designs, offline top-k teacher caches and chunked distillation against online training. Measure actual Spark quality, latency, throughput, memory and model size rather than assuming published results transfer.",
+        "Make persistent training resumable, observable and resource-bounded with explicit failure and stop states."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "lfg-server"
+          ],
+          "expected": "Server regression tests pass."
+        }
+      ],
+      "acceptance": [
+        "A reproducible run proves actual training progress and captures measured performance; no unsupported 650 MB release claim."
+      ]
+    },
+    {
+      "id": "integration_distribution",
+      "title": "Integrate, secure and package the standalone product",
+      "status": "pending",
+      "paths": [
+        "crates",
+        "ui/master-clyffy-web",
+        "docs/lfg"
+      ],
+      "depends_on": [
+        "evaluation",
+        "hardware_runtime"
+      ],
+      "steps": [
+        "Implement versioned extensible interfaces for RRFlow, SWAG and MCP with configurable standalone and hosted use.",
+        "Implement authenticated remote access, signed updates and rollback as supported by the product design.",
+        "Build and verify a clean executable and actual model artifact for documented targets."
+      ],
+      "checks": [
+        {
+          "argv": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "lfg-server"
+          ],
+          "expected": "Server tests pass."
+        },
+        {
+          "argv": [
+            "npm",
+            "--prefix",
+            "ui/master-clyffy-web",
+            "run",
+            "build"
+          ],
+          "expected": "UI builds."
+        }
+      ],
+      "acceptance": [
+        "Demonstrate standalone and authorized integration flows and record binary, model, benchmark and update evidence."
+      ]
+    }
+  ],
+  "next_task": "feedback_journal",
+  "escalation_triggers": [
+    "Relevant source anchor changed or Git baseline is no longer an ancestor.",
+    "Scope conflicts with current user direction or a later instruction.",
+    "Privacy, access control or data provenance cannot be resolved within authorized scope.",
+    "Repeated test failure, unexpected side effects, missing real artifact or unsupported runtime capability.",
+    "The requested task requires an unapproved external communication or unverified claim."
+  ]
+}
