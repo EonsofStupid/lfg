@@ -57,27 +57,40 @@ def config(path: Path) -> dict:
         raise ValueError('segment_steps must be positive')
     if type(value.get('status_poll_seconds')) not in (int, float) or not 1 <= value['status_poll_seconds'] <= 3600:
         raise ValueError('invalid status poll interval')
+    if type(value.get('max_checkpoint_state_bytes', 67108864)) is not int or value.get('max_checkpoint_state_bytes', 67108864) < 1:
+        raise ValueError('invalid checkpoint state byte limit')
     return value
 
 
-def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-checkpoint.v1') -> tuple[int, Path, str] | None:
-    found = []
+def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-checkpoint.v1',
+                      max_state_bytes: int = 67108864) -> tuple[int, Path, str] | None:
+    if type(max_state_bytes) is not int or max_state_bytes < 1:
+        raise ValueError('invalid checkpoint state byte limit')
+    candidates = []
     for state_path in segments.glob('*/checkpoints/step-*/state.json'):
+        name = state_path.parent.name
+        digits = name.removeprefix('step-')
+        if len(digits) == 16 and digits.isascii() and digits.isdecimal() and int(digits) > 0:
+            candidates.append((int(digits), state_path))
+    if not candidates:
+        return None
+    latest_step = max(step for step, _ in candidates)
+    newest = []
+    for step, state_path in candidates:
+        if step != latest_step:
+            continue
         try:
-            if state_path.stat().st_size > 64 * 1024 * 1024:
+            with state_path.open('rb') as stream:
+                raw = stream.read(max_state_bytes + 1)
+            if len(raw) > max_state_bytes:
                 raise ValueError('checkpoint state too large')
-            state = json.loads(state_path.read_bytes())
-            step = state['progress']['step']
-            if (state.get('schema_version') != schema or type(step) is not int or step < 1
-                    or state_path.parent.name != f'step-{step:016d}'):
+            state = json.loads(raw)
+            if (state.get('schema_version') != schema or type(state['progress']['step']) is not int
+                    or state['progress']['step'] != step):
                 raise ValueError('checkpoint failed validation')
-            found.append((step, state_path.parent, digest(state_path), state))
+            newest.append((step, state_path.parent, hashlib.sha256(raw).hexdigest(), state))
         except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
             raise ValueError(f'cannot validate published checkpoint: {state_path}') from exc
-    if not found:
-        return None
-    found.sort(key=lambda item: item[0])
-    newest = [item for item in found if item[0] == found[-1][0]]
     for _, path, _, state in newest:
         try:
             if (digest(path / 'weights.safetensors') != state['model_sha256']
@@ -119,7 +132,7 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
     schema = ('lfg.owned-distillation-checkpoint.v1' if kind == 'distillation'
               else 'lfg.owned-assessment-sft-checkpoint.v1')
     while not complete.exists():
-        checkpoint = latest_checkpoint(segments, schema)
+        checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864))
         student = json.loads(Path(value['student_config'] if kind == 'distillation' else value['sft_config']).read_text(encoding='utf-8'))
         total = student['steps']
         if checkpoint and checkpoint[0] > total:
@@ -161,7 +174,7 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
             atomic_json(complete, {'completed_steps': manifest['steps'], 'weights_sha256': manifest['weights_sha256'],
                                    'result_path': str(output), 'assessment_quality_evaluated': False})
             break
-        next_checkpoint = latest_checkpoint(segments, schema)
+        next_checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864))
         if not next_checkpoint or next_checkpoint[0] <= (checkpoint[0] if checkpoint else 0):
             raise ValueError('segment completed without advancing its checkpoint')
     result = json.loads(complete.read_text(encoding='utf-8'))

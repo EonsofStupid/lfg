@@ -4,7 +4,7 @@ The owned-model supervisor runs one explicitly configured, finite distillation
 or assessment fine-tuning job in checkpointed segments. The model, teacher,
 corpus, device and training settings come from private configuration. Extra service-configuration fields
 are accepted but do not acquire behavior unless the service implements them.
-The service inspects published checkpoint metadata, verifies the latest step's
+The service selects the highest published checkpoint step by directory name, verifies its metadata and
 tensor digests and passes its state digest to the trainer, which
 checks its full continuation identity. An OS lock prevents two supervisors
 from owning the same state directory. A completed run remains available for
@@ -162,18 +162,18 @@ not proof that all secrets were removed. A separately configured 100,000-step
 run of a 19,264,512-parameter owned byte model was started from random weights
 on `clyffy-03`, using the existing small byte-aligned teacher. This is a new
 language-model pretraining experiment, not the previously fine-tuned 349-case
-assessment checkpoint. The full run and its quality have not yet been
-established, and neither model is the intended 650 MB release.
+assessment checkpoint. The run completed all 100,000 steps and wrote final
+weights. Its assessment quality has not been established, and neither model
+is the intended 650 MB release.
 The expanded run resumed from a completed step-1,500 checkpoint after an
 intentional service restart and then continued training. This does not prove
 recovery from power loss or all storage failures.
 
-Two additional user services now wait for that run: the first verifies the
-completed byte-model weights and launches an assessment fine-tune using the
-prepared 349-example dataset, and the second verifies that fine-tune and runs
+Two additional user services chain from that run: the first verified the
+completed byte-model weights and started assessment fine-tuning using the
+prepared 349-example dataset. The second waits for that fine-tune and runs
 the existing 10-request private development-format check. Their control flow
-was exercised with completed-checkpoint software fixtures on the Spark; the
-actual downstream jobs have not started because pretraining is still running.
+was also exercised with completed-checkpoint software fixtures on the Spark.
 The dashboard switches to the assessment job when its status appears and
 displays the resulting aggregate format count when the report is available.
 

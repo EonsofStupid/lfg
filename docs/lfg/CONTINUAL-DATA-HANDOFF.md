@@ -49,8 +49,9 @@ The [independent update evaluator](../../ml/lfg-encoder/owned-update-evaluator.e
 monitors completed queue jobs and runs the configured development-format
 check for each. Evaluation does not block training or promote a checkpoint.
 The same development examples can be reused for iteration, so they are not a
-final independent test. The dashboard exposes aggregate queue progress and
-format counts, not source records or labels.
+final independent test. The dashboard exposes aggregate queue progress, format
+counts and recent loss from completed initial-training checkpoints, not source
+records or labels. Loss is a training statistic, not assessment accuracy.
 The example [evaluator service](../../ml/lfg-encoder/systemd/owned-update-evaluator.service.example)
 runs independently from the training queue.
 

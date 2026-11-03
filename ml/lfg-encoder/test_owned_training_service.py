@@ -50,7 +50,10 @@ class CheckpointRecoveryTests(unittest.TestCase):
             self.assertEqual(service.latest_checkpoint(self.root)[1], latest)
         files = {call.args[0] for call in hashing.call_args_list}
         self.assertNotIn(old / 'weights.safetensors', files)
+        self.assertNotIn(old / 'state.json', files)
         self.assertIn(latest / 'weights.safetensors', files)
+        (old / 'state.json').write_text('invalid old metadata')
+        self.assertEqual(service.latest_checkpoint(self.root)[1], latest)
 
     def test_extra_configuration_fields_are_allowed(self):
         value = {'schema_version': 'lfg.owned-training-service.v1', 'teacher_format': 'owned-byte',
