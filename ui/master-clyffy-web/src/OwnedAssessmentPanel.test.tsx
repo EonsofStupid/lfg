@@ -42,6 +42,19 @@ test('reports malformed or truncated output without inventing assessment fields'
   expect(screen.getByText('{partial')).toBeInTheDocument()
 })
 
+test('displays the model reasons array and a separate reason extension without renaming either', async () => {
+  const api = client()
+  vi.mocked(api.assess).mockResolvedValue({ status: 'ok', engine: { id: 'owned-test' }, elapsedMs: 3, output: { intent: 'build', suggested_models: [], agent_count: 0, reasons: ['first reason', 'second reason'], reason: 'independent field' } })
+  render(<OwnedAssessmentPanel prompt="owner request" assessment={deterministic} client={api} />)
+  await connect()
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  expect(await screen.findByText('first reason')).toBeInTheDocument()
+  expect(screen.getByText('second reason')).toBeInTheDocument()
+  expect(screen.getByText('independent field')).toBeInTheDocument()
+  expect(screen.getByText('No models suggested')).toBeInTheDocument()
+  expect(screen.getByText('No agents suggested')).toBeInTheDocument()
+})
+
 test('explains when the composed request exceeds model context', async () => {
   const api = client()
   vi.mocked(api.assess).mockResolvedValue({ status: 'context_limit', engine: { id: 'owned-test' }, elapsedMs: 1 })
