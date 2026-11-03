@@ -314,12 +314,15 @@ persistent services, dataset boundaries, evaluation and dashboard are
 described in [the training service](CONTINUOUS-TRAINING-SERVICE.md) and
 [the continual handoff](CONTINUAL-DATA-HANDOFF.md). All proposals have unknown
 outcomes and are unreviewed; this is exploratory training, not a qualified
-model. The ~650 MB owned model and self-contained runtime remain future work.
+model. The first 10-request development-format check yielded two JSON
+objects with required fields and eight invalid responses; it did not test
+recommendation accuracy. The ~650 MB owned model and self-contained runtime
+remain future work.
 
 The next execution sequence is:
 
-1. Observe the first assessment development-format report, the running
-   369-record update and its own report. Investigate service failures
+1. Investigate the first assessment format failures and observe the running
+   369-record update and its own development report. Investigate service failures
    and preserve checkpoint and dataset lineage; do not treat JSON formatting
    as recommendation accuracy.
 2. Expand authorized train sources with provenance and secret screening;

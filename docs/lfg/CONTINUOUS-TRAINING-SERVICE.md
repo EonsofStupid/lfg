@@ -171,8 +171,12 @@ recovery from power loss or all storage failures.
 
 Two additional user services chain from that run: the first verified the
 completed byte-model weights and completed assessment fine-tuning using the
-prepared 349-example dataset. The second started the existing 10-request
-private development-format check; its report is pending. Their control flow
+prepared 349-example dataset. The second ran the existing 10-request private
+development-format check: two responses were JSON objects containing the
+required fields and eight were invalid JSON. Seven responses hit the byte
+limit and three hit a stop sequence. This reused development set does not
+establish independent generalization, field correctness, recommendation accuracy
+or native-binary behavior. Their control flow
 was also exercised with completed-checkpoint software fixtures on the Spark.
 The dashboard switches to the assessment job when its status appears and
 displays the resulting aggregate format count when the report is available.
