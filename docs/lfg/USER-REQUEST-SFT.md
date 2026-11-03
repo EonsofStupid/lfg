@@ -28,7 +28,8 @@ model's observed supported efforts. Ambiguous, unmatched, quoted, uncertain,
 and unresolved annotated spans appear in `unknown` with their mention and a
 categorical abstention status. These entries are not positive or negative model
 targets. Unmentioned candidates stay absent by task definition; they are not
-materialized as negative candidate labels. If screening would alter source
+materialized as negative candidate labels. The caller's annotations are not
+proof that every model or effort mention in the source was annotated. If screening would alter source
 text, this span-bound builder refuses the record rather than risk offset drift.
 The provider candidate projection is screened before storage.
 

@@ -471,6 +471,8 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or ref['effort_polarity'] not in ('affirmed', 'negated', 'quoted', 'uncertain')):
                 raise ValueError('invalid effort span reference')
             if ref['effort_span_id'] is not None:
+                if ref['effort_span_id'] in seen_spans:
+                    raise ValueError('duplicate source span reference')
                 effort_slice = request_bytes[ref['effort_span_start_byte']:ref['effort_span_end_byte']]
                 try:
                     effort_slice.decode('utf-8')
@@ -478,6 +480,7 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     raise ValueError('effort span splits a UTF-8 request character') from None
                 if sha(effort_slice) != ref['effort_span_sha256']:
                     raise ValueError('effort target span digest does not match actual request bytes')
+                seen_spans.add(ref['effort_span_id'])
             if (ref['effort_span_id'] is None
                     and any(ref[key] is not None for key in ('effort_span_sha256', 'effort_polarity',
                         'effort_span_start_byte', 'effort_span_end_byte'))):

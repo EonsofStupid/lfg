@@ -186,18 +186,18 @@ def _sparse_target(target: dict, provider_models: list[dict], observation: dict,
                                           else 'negated')
         requests.append(request)
         model_source_span = span_by_id[row['model_span']['id']]
-        effort_source_span = (None if row['effort_span'] is None
+        effort_source_span = (None if 'effort' not in request
                               else span_by_id[row['effort_span']['id']])
         refs.append({'model_span_id': row['model_span']['id'],
                      'model_span_sha256': row['model_span']['sha256'],
                      'model_span_start_byte': model_source_span['start_byte'],
                      'model_span_end_byte': model_source_span['end_byte'],
                      'model_polarity': row['model_span']['polarity'],
-                     'effort_span_id': None if row['effort_span'] is None else row['effort_span']['id'],
-                     'effort_span_sha256': None if row['effort_span'] is None else row['effort_span']['sha256'],
+                     'effort_span_id': None if effort_source_span is None else row['effort_span']['id'],
+                     'effort_span_sha256': None if effort_source_span is None else row['effort_span']['sha256'],
                      'effort_span_start_byte': None if effort_source_span is None else effort_source_span['start_byte'],
                      'effort_span_end_byte': None if effort_source_span is None else effort_source_span['end_byte'],
-                     'effort_polarity': None if row['effort_span'] is None else row['effort_span']['polarity']})
+                     'effort_polarity': None if effort_source_span is None else row['effort_span']['polarity']})
         if row['effort_span'] is not None and 'effort' not in request:
             effort = span_by_id[row['effort_span']['id']]
             effort_status = _unknown_effort_status(row)
@@ -244,6 +244,21 @@ def _validate_windows_projection_claims(value: object) -> dict:
             or not 1 <= value['origin_prefix_bytes_claim'] <= 512 * 1024 * 1024):
         raise ValueError('invalid optional unverified Windows origin locator claims')
     return value
+
+
+def _windows_origin_reserved_match(claims: dict, identities: list[dict]) -> bool:
+    for identity in identities:
+        if claims['user_text_sha256_claim'] == identity['text_sha256']:
+            return True
+        if claims['line_sha256_claim'] == identity['source_line_sha256']:
+            return True
+        if claims['prefix_sha256_claim'] == identity['source_prefix_sha256']:
+            return True
+        locator_claim = claims.get('origin_locator_sha256_claim')
+        if locator_claim is not None and any(identity.get(key) == locator_claim for key in
+                ('source_locator_sha256', 'source_path_sha256', 'locator_sha256')):
+            return True
+    return False
 
 
 def _screen_inert_extensions(value: object, screen_policy_path: Path, max_bytes: int) -> dict:
@@ -303,11 +318,23 @@ def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dic
             or not isinstance(caller_input.get('interpretation'), dict)
             or not isinstance(caller_input.get('relations'), dict)):
         raise ValueError('invalid private caller-interpretation input')
-    source_bound_snapshot.revalidate_snapshot(snapshot)
     split = snapshot['split']
-    reserved = None
+    if not isinstance(split, dict):
+        raise ValueError('snapshot split evidence is unavailable')
     manifest_sha = split.get('known_reserved_manifest_sha256')
     locator = snapshot.get('reserved_session_manifest_locator')
+    identities = split.get('known_reserved_source_identities', [])
+    groups = split.get('known_reserved_group_sha256', [])
+    coverage = split.get('known_reserved_groups_coverage', 'unknown')
+    # Reopen the current reservation before any selected projection source read.
+    source_bound_snapshot._recheck_reserved_manifest(
+        locator, manifest_sha, groups, coverage, identities, screen_policy_path=screen_policy_path)
+    claims = (None if 'windows_origin_projection_claims' not in caller_input else
+              _validate_windows_projection_claims(caller_input['windows_origin_projection_claims']))
+    if claims is not None and _windows_origin_reserved_match(claims, identities):
+        raise ValueError('Windows-origin projection claim matches a known reserved source identity')
+    source_bound_snapshot.revalidate_snapshot(snapshot)
+    reserved = None
     if manifest_sha is not None or locator is not None:
         if not isinstance(manifest_sha, str) or not isinstance(locator, str):
             raise ValueError('incomplete pinned reserved-session evidence')
@@ -322,8 +349,6 @@ def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dic
         config, screen_policy_path, reserved=reserved,
         reserved_project_labels=split.get('known_reserved_project_labels', []),
         extensions=caller_extensions)
-    claims = (None if 'windows_origin_projection_claims' not in caller_input else
-              _validate_windows_projection_claims(caller_input['windows_origin_projection_claims']))
     return observation, caller_input['relations'], raw, claims, observation['extensions']
 
 

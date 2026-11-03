@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import inventory_codex_sessions as inventory
 import source_bound_snapshot
@@ -230,6 +231,30 @@ class UserRequestSFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'span digest does not match actual request bytes'):
             trainer.read_training(mutated, config)
 
+    def test_trainer_rejects_rehashed_duplicate_effort_span_reference(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        source_ref = next(ref for ref in row['metadata']['target_span_refs'] if ref['effort_span_id'] is not None)
+        target['unknown'].append({'field': 'effort', 'mention': 'high', 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'effort', 'span_id': source_ref['effort_span_id'],
+            'sha256': source_ref['effort_span_sha256'],
+            'start_byte': source_ref['effort_span_start_byte'],
+            'end_byte': source_ref['effort_span_end_byte'], 'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'duplicate-effort-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate source span'):
+            trainer.read_training(mutated, config)
+
     def test_unknown_only_example_remains_trainable_without_negative_candidates(self):
         caller = json.loads(self.caller_input_path.read_bytes())
         caller['spans'] = [span for span in caller['spans'] if span['id'] in ('phase', 'model-unlisted')]
@@ -281,6 +306,41 @@ class UserRequestSFTTests(unittest.TestCase):
         records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', config)
         self.assertEqual(len(records), 1)
         self.assertEqual(coverage['selected'], 1)
+
+    def test_windows_origin_claim_matching_reserved_source_blocks_before_projection_open(self):
+        reserved_dir = self.root / 'reserved'
+        reserved_dir.mkdir(mode=0o700)
+        reserved_dir.chmod(0o700)
+        manifest = reserved_dir / 'reserved.json'
+        identity = {'source_file_sha256': 'a' * 64, 'source_prefix_sha256': 'b' * 64,
+                    'source_prefix_bytes': 8192, 'source_line': 17,
+                    'source_line_sha256': '1' * 64, 'text_sha256': 'c' * 64}
+        manifest.write_bytes(source_bound_snapshot.json_bytes({
+            'schema_version': 'lfg.reserved-session-groups.v1', 'groups': [],
+            'identities': [identity], 'coverage': 'partial'}))
+        manifest.chmod(0o600)
+        groups, manifest_sha, coverage, identities = source_bound_snapshot.read_reserved_session_manifest(manifest)
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_source_identities=identities,
+            known_reserved_manifest_sha256=manifest_sha,
+            known_reserved_manifest_locator=str(manifest),
+            known_reserved_groups_coverage=coverage, screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
+        }
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with mock.patch.object(source_bound_snapshot, 'verify_selected_source',
+                               side_effect=AssertionError('projection opened')) as verify:
+            with self.assertRaisesRegex(ValueError, 'matches a known reserved source identity'):
+                self._build()
+            verify.assert_not_called()
+        self.assertFalse((self.root / 'dataset.json').exists())
 
     def test_config_and_caller_extensions_are_inert_bounded_and_screened(self):
         caller = json.loads(self.caller_input_path.read_bytes())
