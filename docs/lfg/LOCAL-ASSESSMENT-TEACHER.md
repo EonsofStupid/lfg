@@ -56,8 +56,8 @@ rendered teacher user request.
 Context is operator-supplied opaque transport. The context file has no source
 record identity or split field, so the software cannot establish that its
 contents are derived only from train-split material or prove held-out material
-was excluded. The caller must attest that boundary; source-bound context
-provenance is not implemented.
+was excluded. The caller must attest that boundary for this legacy transport.
+The optional source-bound path described below adds checks for supported sources.
 
 Teacher collection and `/api/lfg/assess/owned` share the same user rendering:
 context text, two newline characters, then request text. The API accepts
