@@ -135,6 +135,19 @@ class CheckpointPairTests(unittest.TestCase):
 
 
 class OutputSafetyTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'POSIX owner/mode checks are platform-specific')
+    def test_accepts_private_parent_and_creates_owner_only_file(self):
+        import evaluate_owned_checkpoint_pair as subject
+        import stat
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'report.json'
+            subject.require_private_output_directory(output)
+            descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                 getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            os.close(descriptor)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+
     def test_windows_fails_closed_before_reading_inputs_or_writing_output(self):
         import evaluate_owned_checkpoint_pair as subject
         from unittest.mock import patch
