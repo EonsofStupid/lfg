@@ -290,29 +290,80 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
             or record['source_prefix_bytes'] > max_session_bytes):
         raise ValueError('invalid source verification bounds')
     path = Path(record['source_file'])
-    before = path.stat()
+    directory_fd = -1
+    source_fd = -1
+    try:
+        if (os.name == 'posix' and hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'supports_dir_fd')
+                and os.open in os.supports_dir_fd):
+            directory_fd, name, _actual_parent = _open_private_parent(path)
+            _verify_parent_binding(path, directory_fd, name)
+            source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0),
+                                dir_fd=directory_fd)
+            before = os.fstat(source_fd)
+        else:
+            # On platforms without dirfd/O_NOFOLLOW support, compare no-follow
+            # metadata with the opened handle before reading any source bytes.
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError('selected source must be a single-link regular file')
+            source_fd = os.open(os.fspath(path), os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+            opened = os.fstat(source_fd)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise ValueError('selected source changed before opening')
+            before = opened
+    except Exception:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        raise
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        os.close(source_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        raise ValueError('selected source must be a single-link regular file')
     if before.st_size < record['source_prefix_bytes']:
+        os.close(source_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
         raise ValueError('source prefix is unavailable')
     digest = hashlib.sha256()
     total = 0
     line = b''
-    with path.open('rb') as stream:
-        for number in range(1, record['source_line'] + 1):
-            line = stream.readline(max_line_bytes + 1)
-            if not line or len(line) > max_line_bytes:
-                raise ValueError('selected source line is unavailable or too large')
-            total += len(line)
-            if total > max_session_bytes:
-                raise ValueError('selected source prefix exceeds limit')
-            digest.update(line)
-            if number == record['source_line']:
-                selected = line.rstrip(b'\r\n')
-    if (total != record['source_prefix_bytes'] or digest.hexdigest() != record['source_prefix_sha256']
-            or sha(selected) != record['source_line_sha256']):
-        raise ValueError('selected source prefix or line changed')
-    after = path.stat()
-    if before.st_ino != after.st_ino or after.st_size < total:
-        raise ValueError('source was replaced during verification')
+    try:
+        with os.fdopen(source_fd, 'rb') as stream:
+            source_fd = -1
+            for number in range(1, record['source_line'] + 1):
+                line = stream.readline(max_line_bytes + 1)
+                if not line or len(line) > max_line_bytes:
+                    raise ValueError('selected source line is unavailable or too large')
+                total += len(line)
+                if total > max_session_bytes:
+                    raise ValueError('selected source prefix exceeds limit')
+                digest.update(line)
+                if number == record['source_line']:
+                    selected = line.rstrip(b'\r\n')
+            after = os.fstat(stream.fileno())
+        if (total != record['source_prefix_bytes'] or digest.hexdigest() != record['source_prefix_sha256']
+                or sha(selected) != record['source_line_sha256']):
+            raise ValueError('selected source prefix or line changed')
+        if ((before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or after.st_nlink != 1 or after.st_size < before.st_size or after.st_size < total):
+            raise ValueError('source was replaced or linked during verification')
+        if directory_fd >= 0:
+            named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            _verify_parent_binding(path, directory_fd, name)
+        else:
+            named = path.lstat()
+        if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or (named.st_dev, named.st_ino) != (after.st_dev, after.st_ino)):
+            raise ValueError('source path changed during verification')
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
     try:
         text = inspect_codex_inventory.message_text(selected, record)
     except (ValueError, KeyError, TypeError, UnicodeError):

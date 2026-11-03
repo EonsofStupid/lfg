@@ -250,6 +250,19 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'source identity'):
             snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train')
 
+    def test_selected_source_rejects_hardlinks_before_reading_content(self):
+        alias = self.root / 'session-hardlink.jsonl'
+        try:
+            os.link(self.session, alias)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f'hardlinks unavailable: {error}')
+        changed_record = dict(self.record, source_file=str(alias))
+        with mock.patch('source_bound_snapshot.os.fdopen', side_effect=AssertionError('read source bytes')) as opened:
+            with self.assertRaisesRegex(ValueError, 'single-link regular file'):
+                snapshot.verify_selected_source(
+                    changed_record, max_session_bytes=4096, max_line_bytes=4096)
+        opened.assert_not_called()
+
     def test_append_only_suffix_keeps_selected_prefix_verifiable(self):
         with self.session.open('ab') as stream:
             stream.write(b'{"type":"later_event"}\n')
