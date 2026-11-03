@@ -228,6 +228,19 @@ def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
     return groups, sha(raw), value['coverage']
 
 
+def _recheck_reserved_manifest(locator: str | None, manifest_sha: str | None,
+                               groups: list[str], coverage: str) -> None:
+    if manifest_sha is None:
+        if locator is not None:
+            raise ValueError('unexpected reserved-session manifest locator')
+        return
+    if not isinstance(locator, str) or not locator:
+        raise ValueError('reserved-session manifest identity is incomplete')
+    current_groups, current_sha, current_coverage = read_reserved_session_manifest(Path(locator))
+    if current_sha != manifest_sha or current_groups != groups or current_coverage != coverage:
+        raise ValueError('reserved-session manifest changed')
+
+
 def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_bytes: int) -> str:
     """Verify exactly the recorded prefix and line while allowing append-only suffix growth.
 
@@ -274,6 +287,7 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
 def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                    known_reserved_group_sha256: tuple[str, ...] | list[str] = (),
                    known_reserved_manifest_sha256: str | None = None,
+                   known_reserved_manifest_locator: str | None = None,
                    known_reserved_groups_coverage: str = 'unknown',
                    known_reserved_project_labels: tuple[str, ...] | list[str] = (),
                    screen_policy_path: Path | None = None,
@@ -302,8 +316,14 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
              or len(known_reserved_manifest_sha256) != 64
              or any(char not in '0123456789abcdef' for char in known_reserved_manifest_sha256))):
         raise ValueError('invalid reserved-session manifest digest')
+    if ((known_reserved_manifest_sha256 is None) != (known_reserved_manifest_locator is None)
+            or (known_reserved_manifest_locator is not None
+                and (not isinstance(known_reserved_manifest_locator, str) or not known_reserved_manifest_locator))):
+        raise ValueError('reserved-session manifest identity is incomplete')
     if known_reserved_groups_coverage not in ('unknown', 'partial'):
         raise ValueError('reserved-session coverage cannot be asserted complete')
+    _recheck_reserved_manifest(known_reserved_manifest_locator, known_reserved_manifest_sha256,
+                               list(known_reserved_group_sha256), known_reserved_groups_coverage)
     if (not isinstance(known_reserved_project_labels, (tuple, list))
             or any(not isinstance(item, str) or not item.strip() for item in known_reserved_project_labels)):
         raise ValueError('invalid reserved-project list')
@@ -371,6 +391,7 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
         },
         'training_claims': {'task_outcome': 'unknown', 'teacher_proposal': 'none',
                             'review_status': 'unreviewed', 'promotion_eligible': False},
+        'reserved_session_manifest_locator': known_reserved_manifest_locator,
         'extensions': {},
     }
 
@@ -389,10 +410,13 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     if (not isinstance(record, dict) or not isinstance(source_path, str) or record.get('source_file') != source_path
             or not isinstance(cache_path, str) or split.get('policy') != 'exploratory_train'):
         raise ValueError('snapshot source identity is incomplete')
+    manifest_sha = split.get('known_reserved_manifest_sha256')
+    manifest_locator = value.get('reserved_session_manifest_locator')
     policy_path = Path(provider.get('screen_policy_locator') or _default_screen_policy_path())
     current = build_snapshot(record, Path(cache_path), split_policy='exploratory_train',
                              known_reserved_group_sha256=split.get('known_reserved_group_sha256', []),
                              known_reserved_manifest_sha256=split.get('known_reserved_manifest_sha256'),
+                             known_reserved_manifest_locator=manifest_locator,
                              known_reserved_groups_coverage=split.get('known_reserved_groups_coverage', 'unknown'),
                              known_reserved_project_labels=split.get('known_reserved_project_labels', []),
                              screen_policy_path=policy_path,
@@ -468,6 +492,10 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
                                      max_line_bytes=16 * 1024 * 1024)
     if sha(request.encode('utf-8')) != source['user_text_sha256']:
         raise ValueError('source prompt changed before selection')
+    _recheck_reserved_manifest(value.get('reserved_session_manifest_locator'),
+                               value['split'].get('known_reserved_manifest_sha256'),
+                               value['split'].get('known_reserved_group_sha256', []),
+                               value['split'].get('known_reserved_groups_coverage', 'unknown'))
     policy, rules, policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
     if value.get('provider_list', {}).get('screen_policy_sha256') != policy_sha:
         raise ValueError('snapshot provider extensions use a different screening policy')
@@ -732,7 +760,8 @@ def _verify_windows_ancestor_chain(path: Path) -> None:
     script = r'''
 $private = Get-Item -LiteralPath $env:LFG_PRIVATE_DIRECTORY_PATH
 $trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
-$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::Delete -bor
+                    [int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
                     [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
                     [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
 $directory = $private.Parent
@@ -740,10 +769,17 @@ while ($null -ne $directory) {
   if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
   $parentAcl = Get-Acl -LiteralPath $directory.FullName
   $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+  $componentMask = $replaceMask
+  # The volume root itself cannot be replaced; its child-delete right is still checked.
+  if ($null -eq $directory.Parent) {
+    $componentMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                            [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                            [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
+  }
   foreach ($r in $parentRules) {
     if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
         $r.IdentityReference.Value -notin $trusted -and
-        (([long]$r.FileSystemRights -band $replaceMask) -ne 0)) { exit 11 }
+        (([long]$r.FileSystemRights -band $componentMask) -ne 0)) { exit 11 }
   }
   $directory = $directory.Parent
 }
@@ -755,15 +791,17 @@ exit 0
         raise ValueError(f'Windows private ancestor ACL verification failed ({result.returncode})')
 
 
-def _secure_windows_directory(path: Path) -> None:
+def _secure_windows_directory(path: Path, *, created: bool) -> None:
     """Protect a dedicated output directory and reject writable untrusted ancestors."""
     env = dict(os.environ, LFG_PRIVATE_DIRECTORY_PATH=str(path.resolve()))
     _verify_windows_ancestor_chain(path)
-    try:
-        empty = next(path.iterdir(), None) is None
-    except OSError:
-        raise ValueError('cannot inspect Windows private output directory') from None
-    if empty:
+    if created:
+        try:
+            empty = next(path.iterdir(), None) is None
+        except OSError:
+            raise ValueError('cannot inspect Windows private output directory') from None
+        if not empty:
+            raise ValueError('new Windows private output directory is not empty')
         sid = _current_windows_sid()
         acl = subprocess.run(['icacls.exe', str(path), '/inheritance:r', '/grant:r',
                               f'*{sid}:(F)', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'],
@@ -785,7 +823,8 @@ foreach ($r in $rules) {
 }
 if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
 $trusted = @($expected | Sort-Object -Unique)
-$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::Delete -bor
+                    [int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
                     [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
                     [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
 $directory = $private.Parent
@@ -793,10 +832,17 @@ while ($null -ne $directory) {
   if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
   $parentAcl = Get-Acl -LiteralPath $directory.FullName
   $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+  $componentMask = $replaceMask
+  # The volume root itself cannot be replaced; its child-delete right is still checked.
+  if ($null -eq $directory.Parent) {
+    $componentMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                            [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                            [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
+  }
   foreach ($r in $parentRules) {
     if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
         $r.IdentityReference.Value -notin $trusted -and
-        (([long]$r.FileSystemRights -band $replaceMask) -ne 0)) { exit 11 }
+        (([long]$r.FileSystemRights -band $componentMask) -ne 0)) { exit 11 }
   }
   $directory = $directory.Parent
 }
@@ -806,6 +852,28 @@ exit 0
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
     if verified.returncode:
         raise ValueError(f'Windows private directory or ancestor ACL verification failed ({verified.returncode})')
+
+
+def _prepare_windows_private_directory(path: Path) -> None:
+    """Create only the requested leaf, or verify an existing directory without changing it."""
+    try:
+        path.mkdir()
+    except FileExistsError:
+        _secure_windows_directory(path, created=False)
+        return
+    except OSError as error:
+        if error.errno != 17:
+            raise ValueError('cannot create Windows private output directory') from None
+        _secure_windows_directory(path, created=False)
+        return
+    try:
+        _secure_windows_directory(path, created=True)
+    except Exception:
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def _secure_windows_file(path: Path) -> None:
@@ -869,9 +937,10 @@ def write_private_snapshot(path: Path, snapshot: dict) -> None:
     """Write a new ignored snapshot with verified local-only file permissions."""
     raw = json_bytes(snapshot)
     _require_ignored_untracked(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
-        _secure_windows_directory(path.parent)
+        _prepare_windows_private_directory(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
@@ -902,9 +971,10 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
     if not isinstance(raw, bytes):
         raise ValueError('private output must be bytes')
     _require_ignored_untracked(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == 'nt':
-        _secure_windows_directory(path.parent)
+        _prepare_windows_private_directory(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
@@ -977,13 +1047,15 @@ def main() -> None:
         if not isinstance(record, dict):
             raise ValueError('invalid inventory record')
         if args.reserved_session_ids is None:
-            reserved_groups, reserved_manifest_sha, reserved_coverage = [], None, 'unknown'
+            reserved_groups, reserved_manifest_sha, reserved_manifest_locator, reserved_coverage = [], None, None, 'unknown'
         else:
             reserved_groups, reserved_manifest_sha, reserved_coverage = read_reserved_session_manifest(
                 args.reserved_session_ids)
+            reserved_manifest_locator = str(args.reserved_session_ids.resolve())
         result = build_snapshot(record, args.provider_cache, split_policy=args.split_policy,
                                 known_reserved_group_sha256=reserved_groups,
                                 known_reserved_manifest_sha256=reserved_manifest_sha,
+                                known_reserved_manifest_locator=reserved_manifest_locator,
                                 known_reserved_groups_coverage=reserved_coverage,
                                 known_reserved_project_labels=args.reserved_project,
                                 screen_policy_path=args.screen_policy,

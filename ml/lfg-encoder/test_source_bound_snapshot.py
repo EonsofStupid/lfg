@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -210,6 +211,30 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid reserved-session manifest'):
             snapshot.read_reserved_session_manifest(path)
 
+    def test_snapshot_revalidation_detects_newly_reserved_session_before_source_open(self):
+        manifest = self.root / 'mutable-reserved.json'
+        manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                  'coverage': 'partial', 'groups': []}))
+        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest)
+        value = snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_group_sha256=groups, known_reserved_manifest_sha256=digest,
+            known_reserved_manifest_locator=str(manifest.resolve()),
+            known_reserved_groups_coverage=coverage)
+        prepared = snapshot.prepare_single_request(
+            value, policy_path=Path(__file__).with_name('private-corpus-screen.example.json'),
+            max_request_bytes=4096, max_context_bytes=100_000)
+        projection = json.loads(prepared[6])
+        self.assertNotIn('reserved_session_manifest_locator', projection)
+        self.assertEqual(projection['split']['known_reserved_manifest_sha256'], digest)
+        manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                  'coverage': 'partial',
+                                                  'groups': [snapshot.source_group_id(self.record)]}))
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            with self.assertRaisesRegex(ValueError, 'reserved-session manifest changed'):
+                snapshot.revalidate_snapshot(value)
+        opened.assert_not_called()
+
     def test_reserved_train_requires_split_evidence(self):
         with self.assertRaisesRegex(ValueError, 'split evidence'):
             snapshot.build_snapshot(self.record, self.cache, split_policy='reserved_train')
@@ -277,7 +302,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
 
     def test_windows_private_write_fails_closed(self):
         with mock.patch.object(snapshot.os, 'name', 'nt'), \
-                mock.patch.object(snapshot, '_secure_windows_directory', side_effect=ValueError('ACL unavailable')), \
+                mock.patch.object(snapshot, '_prepare_windows_private_directory', side_effect=ValueError('ACL unavailable')), \
                 mock.patch.object(snapshot, '_secure_windows_file', side_effect=ValueError('ACL unavailable')):
             with self.assertRaisesRegex(ValueError, 'ACL unavailable'):
                 snapshot.write_private_snapshot(self.root / 'snapshot.json', {'ok': True})
@@ -285,10 +310,33 @@ class SourceBoundSnapshotTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
     def test_windows_private_write_succeeds_under_normal_readable_ancestor_chain(self):
-        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as private_directory:
-            destination = Path(private_directory) / 'snapshot.json'
+        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
+            destination = Path(sandbox) / 'private-output' / 'snapshot.json'
             snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
             self.assertEqual(json.loads(destination.read_text(encoding='utf-8'))['schema_version'], snapshot.SCHEMA)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
+    def test_windows_existing_empty_directory_is_verified_without_acl_mutation(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
+            existing = Path(sandbox) / 'existing-output'
+            existing.mkdir()
+            before = subprocess.run(['icacls.exe', str(existing)], capture_output=True, check=True).stdout
+            with self.assertRaisesRegex(ValueError, 'Windows private directory or ancestor ACL verification failed'):
+                snapshot._secure_windows_directory(existing, created=False)
+            after = subprocess.run(['icacls.exe', str(existing)], capture_output=True, check=True).stdout
+            self.assertEqual(before, after)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
+    def test_windows_ancestor_delete_right_rejects_replaceable_component(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
+            parent = Path(sandbox)
+            child = parent / 'child'
+            child.mkdir()
+            acl = subprocess.run(['icacls.exe', str(parent), '/grant', '*S-1-5-11:(D)'],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            self.assertEqual(acl.returncode, 0)
+            with self.assertRaisesRegex(ValueError, 'ancestor ACL verification failed'):
+                snapshot._verify_windows_ancestor_chain(child)
 
     def test_windows_writer_rejects_replaced_path_identity(self):
         destination = self.root / 'replacement.json'
@@ -325,7 +373,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 with mock.patch.object(snapshot.os, 'name', 'nt'), \
                         mock.patch.object(snapshot.os, 'open', side_effect=tracked_open), \
                         mock.patch.object(snapshot, '_require_ignored_untracked'), \
-                        mock.patch.object(snapshot, '_secure_windows_directory'), \
+                        mock.patch.object(snapshot, '_prepare_windows_private_directory'), \
                         mock.patch.object(snapshot, '_secure_windows_file'), \
                         mock.patch.object(Path, 'stat', autospec=True,
                                           side_effect=lambda path, *args, **kwargs:

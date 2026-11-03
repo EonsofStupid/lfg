@@ -101,10 +101,12 @@ a copy of an origin-verified snapshot. Project association comes from an
 inventory label and is explicitly marked unverified. Session group identity
 does not include that mutable label. Windows writes fail closed unless the
 dedicated output directory has a protected current-user, SYSTEM, and
-Administrators ACL, untrusted ancestors cannot delete child paths or change
-ACLs/take ownership, and the original open file handle still has the same
-identity as the named path. Ancestors may grant read/traverse or create-only
-rights that cannot replace an already existing path component. Writes use the
+Administrators ACL, untrusted ancestors cannot delete or replace path
+components, change ACLs or take ownership, and the original open file handle
+still has the same identity as the named path. Ancestors may grant
+read/traverse or create-only rights that cannot replace an already existing
+path component. A new dedicated output directory is secured before writing;
+an existing directory is verified without changing its ACL. Writes use the
 original handle without reopening the path.
 
 When no separately verified reserved final-test group exists, the caller can
@@ -121,8 +123,11 @@ evaluation group is still needed before any quality claim or promotion.
 The CLI accepts `--reserved-session-ids` with a private
 `lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs and an
 `unknown` or `partial` coverage marker. It binds the manifest digest into the
-snapshot and rejects matching IDs before opening the session source. It will
-not accept a completeness claim without separate verifiable evidence.
+snapshot, retains its private locator, and rereads the bounded manifest during
+revalidation. A changed digest, ID list or coverage marker fails before the
+selected session prompt is opened; matching IDs are rejected before source
+opening. It will not accept a completeness claim without separate verifiable
+evidence.
 
 The collector's `--source-bound-snapshot` and `--source-bound-bundle` options
 recheck the staged snapshot, request, context, bundle, and screening-policy
