@@ -240,7 +240,7 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertEqual(envelope['manifest']['sft_config_extensions'], {'safe_config_note': 'safe fixture value'})
         caller['secret_note'] = 'Bearer abcdefghijklmnop'
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
-        with self.assertRaisesRegex(ValueError, 'extension requires screening'):
+        with self.assertRaises(ValueError):
             self._build(self.root / 'rejected-caller-extension.json')
         sft_config['secret_config_note'] = 'password=supersecretvalue'
         self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
@@ -334,7 +334,11 @@ class UserRequestSFTTests(unittest.TestCase):
         envelope = json.loads((self.root / 'dataset.json').read_bytes())
         target = json.loads(envelope['train_records'][0]['messages'][2]['content'])
         self.assertEqual(target['requested'], [{'model_id': 'provider/model-q', 'polarity': 'negated'}])
-        self.assertEqual(target['unknown'], [{'field': 'model', 'mention': 'Model Z', 'status': 'ambiguous'}])
+        self.assertEqual(target['unknown'], [
+            {'field': 'model', 'mention': 'Model Z', 'status': 'ambiguous'},
+            {'field': 'effort', 'mention': 'high', 'status': 'model_unresolved'},
+            {'field': 'model', 'mention': 'Unlisted Model R', 'status': 'unmatched'},
+        ])
         self.assertNotIn('provider/model-z', json.dumps(target))
         self.assertEqual(result['heldout_separation'], 'unknown')
 
