@@ -79,6 +79,24 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         selected = [json.loads(line) for line in (self.selected / 'requests.jsonl').read_text().splitlines()]
         self.assertNotIn(selected[0]['id'], config['exclude_ids'])
 
+    def test_split_preserves_and_revalidates_completed_records(self):
+        import split_teacher_collection
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        response = '{"intent":"x","complexity":"unknown"}'
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}):
+            with patch.object(collector, 'ask', side_effect=[response, ValueError('incomplete')]):
+                with self.assertRaises(ValueError):
+                    collector.collect(self.selected, self.collection_config, self.policy, self.output)
+            dest = self.root / 'split'
+            report = split_teacher_collection.split(self.selected, self.collection_config, self.policy, self.output, dest)
+            self.assertEqual(report['completed_prefix'], 1)
+            self.assertEqual(report['remaining'], 0)
+            with patch.object(collector, 'ask', side_effect=AssertionError('must reuse saved record')):
+                result = collector.collect(dest / 'prefix-selection', self.collection_config, self.policy,
+                                           dest / 'prefix-output', resume=True)
+            self.assertEqual(result['requests'], 1)
+            self.assertFalse(result['promotion_eligible'])
+
     def test_interruption_resumes_and_outputs_preparable_unreviewed_traces(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
         response = json.dumps({'intent': 'fixture-secret-7', 'complexity': 'unknown', 'extra': 'allowed'})
