@@ -49,6 +49,9 @@ The optional `on_incomplete` policy defaults to `fail`. When explicitly set to
 and the collector continues; the final manifest reports requested, successful,
 and failed counts. HTTP server errors still fail the job for supervision to
 retry. Failed records contain an identifier and digest, not a fabricated label.
+For subsequent batches the selector can exclude prior request IDs and
+SHA-256 digests of normalized, rescreened request text. Exact normalized
+deduplication does not prove semantic or conversation independence.
 
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `

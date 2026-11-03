@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import unicodedata
 
 import screen_private_corpus as screen
@@ -37,6 +38,11 @@ def select(dataset: Path, policy_path: Path, config_path: Path, output: Path) ->
             or len(set(excluded)) != len(excluded)):
         raise ValueError('invalid excluded request identifiers')
     excluded = set(excluded)
+    excluded_text = config.get('exclude_normalized_sha256', [])
+    if (not isinstance(excluded_text, list) or any(not isinstance(item, str) or not re.fullmatch(r'[0-9a-f]{64}', item)
+                                                    for item in excluded_text)):
+        raise ValueError('invalid excluded normalized text digests')
+    excluded_text = set(excluded_text)
     policy, rules, policy_sha = screen.load_policy(policy_path, config['max_manifest_bytes'])
     manifest_raw = screen._read(dataset / 'manifest.json', config['max_manifest_bytes'], 'dataset_manifest_unavailable')
     manifest = screen._json(manifest_raw, 'invalid_dataset_manifest')
@@ -74,7 +80,7 @@ def select(dataset: Path, policy_path: Path, config_path: Path, output: Path) ->
         if not config['min_text_bytes'] <= size <= config['max_text_bytes']:
             continue
         key = sha(' '.join(unicodedata.normalize('NFKC', text).casefold().split()).encode())
-        if key in seen_text:
+        if key in seen_text or key in excluded_text:
             continue
         seen_text.add(key)
         rank = sha((config['seed'] + '\0' + row['id']).encode())

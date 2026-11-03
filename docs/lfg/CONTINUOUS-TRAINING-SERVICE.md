@@ -39,6 +39,10 @@ status file and binds to loopback. If shared through a proxy, configure an
 appropriate authenticated private network and TLS; the dashboard itself has
 no authentication or access control. Its status is not assessment quality,
 and it does not control training, operate a queue, or expose examples.
+The lab deployment routes `/lfg-training/` through the existing tailnet-only
+HTTPS proxy to this dashboard. Tailnet access controls that route; it does not
+inherit the Clyffy application's login. The public site and Clyffy application
+do not yet embed the dashboard or control training.
 
 `local_teacher_service.py` starts the local teacher collector and chooses its
 resume mode when an output already exists. The collector keeps incomplete
@@ -104,6 +108,19 @@ development format check, nine outputs were invalid JSON and one was JSON
 missing required fields. This is not a task-accuracy result or evidence of a
 usable release. The split requires a contiguous prefix and intentionally does
 not infer or invent a response for an excluded request.
+
+The remaining 52-request collection completed with no additional failures.
+Combining its records with the prior verified prefixes produced 219 unreviewed
+training examples. A 3,000-step assessment fine-tune completed with 1,384,398
+supervised byte positions. On the same 10 development requests, all outputs
+were invalid JSON with a 512-byte output bound. A second run allowing 2,048
+new bytes also produced 10 invalid JSON outputs: six stopped at a newline,
+three reached the output bound and one reached the model's context limit.
+This remains a format check rather than assessment-quality evaluation.
+Another 131 eligible requests were selected after excluding prior IDs and
+auditing exact normalized text overlap, then queued on the local teacher.
+Those 131 come mainly from two declared projects, so they do not establish
+broad source independence or sufficient training diversity.
 
 Each collection is a finite, resumable job; preparing its outputs for training
 and triggering the next fine-tune are not yet automated. The installed Spark

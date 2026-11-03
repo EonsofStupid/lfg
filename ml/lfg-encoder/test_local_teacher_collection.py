@@ -1,10 +1,12 @@
 import importlib.util
 import json
 import os
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 import urllib.error
+import unicodedata
 from unittest.mock import patch
 
 import assessment_distill
@@ -96,6 +98,18 @@ class LocalTeacherCollectionTests(unittest.TestCase):
                                            dest / 'prefix-output', resume=True)
             self.assertEqual(result['requests'], 1)
             self.assertFalse(result['promotion_eligible'])
+
+    def test_selection_excludes_normalized_text_from_prior_batches(self):
+        config = json.loads(self.selection_config.read_text())
+        row = json.loads(self.train_raw.splitlines()[0])
+        policy, rules, _ = selection.screen.load_policy(self.policy, 65536)
+        screened, _ = selection.screen._screen(row['text'], rules, policy['limits'])
+        normalized = ' '.join(unicodedata.normalize('NFKC', screened).casefold().split())
+        config['exclude_normalized_sha256'] = [hashlib.sha256(normalized.encode()).hexdigest()]
+        self.selection_config.write_text(json.dumps(config))
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        selected = [json.loads(line) for line in (self.selected / 'requests.jsonl').read_text().splitlines()]
+        self.assertNotIn(row['id'], [item['id'] for item in selected])
 
     def test_interruption_resumes_and_outputs_preparable_unreviewed_traces(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
