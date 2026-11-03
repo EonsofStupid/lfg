@@ -19,6 +19,7 @@ import screen_private_corpus as screen
 import train
 from owned_sft_checkpoint import private_directory
 import project_training_context as project_context
+import source_bound_snapshot as source_snapshot
 
 
 def sha(raw: bytes) -> str:
@@ -141,7 +142,9 @@ def clean_response(value: object, rules, limits: dict) -> object:
 
 
 def collect(selection: Path, config_path: Path, policy_path: Path, output: Path, *, resume: bool = False,
-            project_context_path: Path | None = None) -> dict:
+            project_context_path: Path | None = None,
+            source_bound_snapshot_path: Path | None = None,
+            source_bound_bundle_path: Path | None = None) -> dict:
     config, config_raw = config_file(config_path)
     teacher_system_sha = sha(config['system_prompt'].encode('utf-8'))
     key = os.environ.get(config['api_key_env'])
@@ -174,6 +177,44 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
         if screen._screen(row['text'], rules, policy['limits'])[0] != row['text']:
             raise ValueError('request needs additional screening')
         ids.add(row['id'])
+    if (source_bound_snapshot_path is None) != (source_bound_bundle_path is None):
+        raise ValueError('source-bound snapshot and bundle must be supplied together')
+    if source_bound_snapshot_path is not None and project_context_path is None:
+        raise ValueError('source-bound collection requires a project context file')
+    bound_artifact_raw = None
+    bound_bundle_raw = None
+    bound_sha = None
+    bound_bundle_sha = None
+    if source_bound_snapshot_path is not None:
+        # This runs after every selected request split is checked and before
+        # opening the optional context asset or making any teacher request.
+        bound_artifact_raw = screen._read(source_bound_snapshot_path, config['max_manifest_bytes'],
+                                          'source_bound_snapshot_unavailable')
+        bound_bundle_raw = screen._read(source_bound_bundle_path, config['max_manifest_bytes'],
+                                        'source_bound_bundle_unavailable')
+        context_raw = screen._read(project_context_path, config['max_manifest_bytes'],
+                                   'project_context_unavailable')
+        policy_raw = screen._read(policy_path, config['max_manifest_bytes'], 'policy_unavailable')
+        bound = source_snapshot.validate_staged_artifacts(bound_artifact_raw, source_raw, selection_raw,
+                                                          context_raw, bound_bundle_raw, policy_raw)
+        if any(row.get('source_bound_snapshot_sha256') != bound['snapshot_sha256'] for row in rows):
+            raise ValueError('selected row does not match source-bound snapshot')
+        bound_sha, bound_bundle_sha = bound['snapshot_sha256'], sha(bound_bundle_raw)
+
+        def validate_bound_inputs() -> None:
+            current = source_snapshot.validate_staged_artifacts(
+                screen._read(source_bound_snapshot_path, config['max_manifest_bytes'], 'snapshot_changed'),
+                screen._read(selection / 'requests.jsonl', config['max_request_bytes'] * config['max_requests'], 'requests_changed'),
+                screen._read(selection / 'manifest.json', config['max_manifest_bytes'], 'selection_changed'),
+                screen._read(project_context_path, config['max_manifest_bytes'], 'project_context_changed'),
+                screen._read(source_bound_bundle_path, config['max_manifest_bytes'], 'bundle_changed'),
+                screen._read(policy_path, config['max_manifest_bytes'], 'policy_changed'))
+            if (current['snapshot_sha256'] != bound_sha or
+                    current['staged_snapshot_sha256'] != source_snapshot.sha(bound_artifact_raw) or
+                    current['request_sha256'] != bound['request_sha256']):
+                raise ValueError('source-bound artifacts changed')
+    else:
+        validate_bound_inputs = lambda: None
     # The selected request split is validated before opening any optional context asset.
     if project_context_path is not None:
         context_map, context_file_sha, context_file_extensions = project_context.load(
@@ -191,6 +232,10 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                 'selection_manifest_sha256': sha(selection_raw), 'requests_sha256': sha(source_raw),
                 'policy_sha256': policy_sha, 'collector_sha256': sha(Path(__file__).read_bytes()),
                 'screen_code_sha256': sha(Path(screen.__file__).read_bytes())}
+    if source_bound_snapshot_path is not None:
+        identity['source_bound_snapshot_sha256'] = bound_sha
+        identity['source_bound_bundle_sha256'] = bound_bundle_sha
+        identity['source_bound_validator_sha256'] = sha(Path(source_snapshot.__file__).read_bytes())
     if project_context_path is not None:
         identity['project_context_file_sha256'] = context_file_sha
         identity['project_context_code_sha256'] = sha(Path(project_context.__file__).read_bytes())
@@ -244,6 +289,7 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                     raise ValueError('record digest mismatch')
             else:
                 try:
+                    validate_bound_inputs()
                     response = ask(config, request_text, key)
                     parsed = screen._json(response.encode(), 'invalid_assessment_json')
                     if not isinstance(parsed, dict) or any(field not in parsed for field in config['required_fields']):
@@ -269,6 +315,9 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                          'teacher': config['teacher_identity'], 'review_status': 'unreviewed', 'outcome': 'unknown',
                          'source_ref': row['id'], 'source_sha256': row['source_text_sha256_claim'],
                          'teacher_system_sha256': teacher_system_sha,
+                         **({'source_bound_snapshot_sha256': bound_sha,
+                             'source_bound_bundle_sha256': bound_bundle_sha}
+                            if source_bound_snapshot_path is not None else {}),
                          **({'project_context_sha256': context_entry['sha256'],
                              'project_context_byte_length': len(context_entry['text'].encode('utf-8')),
                              **({'project_context_extensions': context_entry['extensions']}
@@ -289,6 +338,8 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                     or trace.get('outcome') != 'unknown' or trace.get('source_ref') != row['id']
                     or trace.get('source_sha256') != row['source_text_sha256_claim']
                     or trace.get('teacher_system_sha256') != teacher_system_sha
+                    or trace.get('source_bound_snapshot_sha256') != bound_sha
+                    or trace.get('source_bound_bundle_sha256') != bound_bundle_sha
                     or trace.get('project_context_sha256') != (context_entry['sha256'] if context_entry else None)
                     or not isinstance(trace.get('response'), str)
                     or envelope.get('schema_version') != 'lfg.local-teacher-record.v1'
@@ -309,6 +360,7 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                 or sha(Path(__file__).read_bytes()) != identity['collector_sha256']
                 or sha(Path(screen.__file__).read_bytes()) != identity['screen_code_sha256']):
             raise ValueError('collection inputs changed')
+        validate_bound_inputs()
         # Per-project trace files are consumable by assessment_distill.build.
         groups = {}
         for row, trace in traces:
@@ -345,11 +397,15 @@ if __name__ == '__main__':
     for name in ('selection', 'config', 'policy', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--project-context', type=Path)
+    parser.add_argument('--source-bound-snapshot', type=Path)
+    parser.add_argument('--source-bound-bundle', type=Path)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     try:
         result = collect(args.selection, args.config, args.policy, args.output, resume=args.resume,
-                         project_context_path=args.project_context)
+                         project_context_path=args.project_context,
+                         source_bound_snapshot_path=args.source_bound_snapshot,
+                         source_bound_bundle_path=args.source_bound_bundle)
         print(json.dumps({k: result[k] for k in ('requested_requests', 'requests', 'failed_requests',
                                                  'projects', 'review_status', 'outcome', 'test_opened')}))
     except TeacherHTTPError as error:

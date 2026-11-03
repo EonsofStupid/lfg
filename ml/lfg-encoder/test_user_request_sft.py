@@ -1,0 +1,726 @@
+"""Synthetic integration tests for the teacherless user-request SFT adapter."""
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import inventory_codex_sessions as inventory
+import source_bound_snapshot
+import user_requested_observation
+import user_request_sft
+import user_request_targets
+
+
+@unittest.skipUnless(os.name == 'posix', 'private source-bound SFT output is POSIX-only')
+class UserRequestSFTTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / 'fixture-project'
+        self.project.mkdir()
+        self.source = self.root / 'fixture-session.jsonl'
+        self.text = 'For planning use Model Z at high effort; avoid Model Q and request Unlisted Model R.'
+        self._write_source(self.text)
+        status, records = inventory.scan_file(
+            self.source, {'fixture-project': inventory.normalize(str(self.project))}, 16_384, 8192)
+        self.assertEqual(status, 'scanned')
+        self.record = records[0]
+        self.policy = Path(__file__).with_name('private-corpus-screen.example.json')
+        self.obs_config = {
+            'schema_version': user_requested_observation.CONFIG_SCHEMA,
+            'phase_labels': ['planning'], 'claim_polarities': ['affirmed', 'negated', 'quoted', 'uncertain'],
+            'max_source_prefix_bytes': 16_384, 'max_line_bytes': 8192, 'max_user_message_bytes': 2048,
+            'max_span_count': 8, 'max_span_bytes': 256, 'max_extension_bytes': 4096,
+            'max_extension_nodes': 128, 'max_extension_depth': 8, 'max_extension_string_bytes': 1024,
+            'max_observation_bytes': 32_768, 'max_reserved_manifest_bytes': 4096,
+            'max_reserved_project_labels': 32, 'max_claims_per_field': 8,
+        }
+        self.spans = self._spans()
+        self.interpretation = {
+            'phase_label': 'planning', 'phase_span_id': 'phase',
+            'model_claims': [
+                {'text': 'Model Z', 'span_id': 'model-z', 'polarity': 'affirmed'},
+                {'text': 'Model Q', 'span_id': 'model-q', 'polarity': 'negated'},
+                {'text': 'Unlisted Model R', 'span_id': 'model-unlisted', 'polarity': 'affirmed'},
+            ],
+            'effort_claims': [{'text': 'high', 'span_id': 'effort-high', 'polarity': 'affirmed'}],
+        }
+        self.cache = self.root / 'provider-cache.json'
+        self._write_cache()
+        self.obs_config_path = self.root / 'observation-config.json'
+        self.obs_config_path.write_text(json.dumps(self.obs_config), encoding='utf-8')
+        self.observation, self.snapshot, self.relations = self._inputs()
+        self.observation_path = self.root / 'observation.json'
+        self.snapshot_path = self.root / 'snapshot.json'
+        self.relations_path = self.root / 'relations.json'
+        self.observation_path.write_text(json.dumps(self.observation), encoding='utf-8')
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        self.relations_path.write_text(json.dumps(self.relations), encoding='utf-8')
+        self.caller_input_path = self.root / 'caller-input.json'
+        self.caller_input_path.write_text(json.dumps({
+            'schema_version': user_request_sft.CALLER_INPUT_SCHEMA,
+            'spans': self.spans, 'interpretation': self.interpretation,
+            'relations': self.relations,
+        }), encoding='utf-8')
+        config_path = Path(user_request_sft.__file__).with_name('user-request-sft.example.json')
+        self.sft_config_path = self.root / 'user-request-sft.json'
+        config = json.loads(config_path.read_bytes())
+        config.update(max_dataset_bytes=1_000_000, max_record_bytes=200_000, max_request_bytes=4096)
+        self.sft_config_path.write_text(json.dumps(config), encoding='utf-8')
+
+    def _write_source(self, text):
+        header = {'type': 'session_meta', 'payload': {'cwd': str(self.project)}}
+        message = {'type': 'response_item', 'payload': {
+            'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': text}],
+            'internal_chat_message_metadata_passthrough': {'content_item_kinds': ['user.text']},
+        }}
+        self.source.write_bytes((json.dumps(header, ensure_ascii=False) + '\n'
+                                 + json.dumps(message, ensure_ascii=False) + '\n').encode('utf-8'))
+
+    def _spans(self):
+        spans = []
+        raw = self.text.encode('utf-8')
+        for identifier, field, value in (
+                ('phase', 'phase', 'planning'), ('model-z', 'model', 'Model Z'),
+                ('effort-high', 'effort', 'high'), ('model-q', 'model', 'Model Q'),
+                ('model-unlisted', 'model', 'Unlisted Model R')):
+            start = raw.index(value.encode('utf-8'))
+            spans.append({'id': identifier, 'field': field, 'start_byte': start,
+                          'end_byte': start + len(value.encode('utf-8'))})
+        return spans
+
+    def _write_cache(self, duplicate_display_name=False):
+        models = [
+            {'slug': 'provider/model-z', 'display_name': 'Model Z', 'visibility': 'list',
+             'supported_reasoning_levels': [{'effort': 'high'}, {'effort': 'low'}]},
+            {'slug': 'provider/model-q', 'display_name': 'Model Q', 'visibility': 'list',
+             'supported_reasoning_levels': [{'effort': 'medium'}]},
+        ]
+        if duplicate_display_name:
+            models.append({'slug': 'provider/model-z2', 'display_name': 'Model Z', 'visibility': 'list',
+                           'supported_reasoning_levels': [{'effort': 'high'}]})
+        self.cache.write_text(json.dumps({'fetched_at': '2026-11-03T12:00:00Z', 'models': models}),
+                              encoding='utf-8')
+
+    def _inputs(self):
+        snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train', screen_policy_path=self.policy)
+        observation = user_requested_observation.build_observation(
+            self.record, self.spans, self.interpretation, self.obs_config, self.policy)
+        relations = {'schema_version': user_request_targets.RELATIONS_SCHEMA,
+                     'origin': 'caller_supplied_interpretation', 'review_status': 'unreviewed',
+                     'items': [{'model_span_id': 'span-2', 'effort_span_id': 'span-3'},
+                               {'model_span_id': 'span-4'}, {'model_span_id': 'span-5'}]}
+        return observation, snapshot, relations
+
+    def _build(self, output=None):
+        return user_request_sft.build_dataset(
+            None, self.snapshot_path, None,
+            self.obs_config_path, self.sft_config_path, self.policy,
+            output or (self.root / 'dataset.json'), caller_input_path=self.caller_input_path)
+
+    def test_builds_sparse_explicit_targets_and_trainer_reads_separate_task(self):
+        result = self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        self.assertEqual(result['records'], 1)
+        self.assertEqual(envelope['schema_version'], user_request_sft.DATASET_SCHEMA)
+        row = envelope['train_records'][0]
+        user = json.loads(row['messages'][1]['content'])
+        target = json.loads(row['messages'][2]['content'])
+        self.assertEqual(target['task'], user_request_sft.TASK)
+        self.assertEqual(target['requested'], [
+            {'model_id': 'provider/model-z', 'polarity': 'affirmed',
+             'effort': 'high', 'effort_polarity': 'affirmed'},
+            {'model_id': 'provider/model-q', 'polarity': 'negated'},
+        ])
+        self.assertEqual([item['model_id'] for item in user['provider_candidates']],
+                         ['provider/model-z', 'provider/model-q'])
+        self.assertNotIn('provider/model-unlisted', json.dumps(target))
+        manifest = envelope['manifest']
+        self.assertEqual(manifest['review_status'], 'unreviewed')
+        self.assertEqual(manifest['outcome'], 'unknown')
+        self.assertEqual(manifest['provider_entitlement'], 'unknown')
+        self.assertFalse(manifest['provider_listing_is_entitlement'])
+        self.assertEqual(manifest['heldout_separation'], 'unknown')
+        self.assertFalse(manifest['promotion_eligible'])
+        self.assertNotIn(str(self.source), json.dumps(envelope))
+        self.assertNotIn('teacher', row['metadata'])
+
+        import train_owned_assessment_sft as trainer
+        train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        train_config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                            max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', train_config)
+        self.assertEqual(coverage['training_task'], user_request_sft.TASK)
+        self.assertEqual(coverage['selected'], 1)
+        self.assertEqual(coverage['claims'], {'explicit_user_request_records': 1,
+                                               'outcome_unknown': 1, 'unreviewed': 1})
+        expected_prefix = (train_config['framing']['system_prefix'] + row['messages'][0]['content']
+            + train_config['framing']['system_suffix'] + train_config['framing']['user_prefix']
+            + row['messages'][1]['content'] + train_config['framing']['user_suffix']
+            + train_config['framing']['assistant_prefix']).encode('utf-8')
+        self.assertTrue(records[0]['bytes'].startswith(expected_prefix))
+        self.assertEqual(records[0]['response_start'], len(expected_prefix))
+
+    def test_screened_single_message_projection_keeps_windows_origin_claims_unverified(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
+            'origin_locator_sha256_claim': '4' * 64, 'origin_line_number_claim': 17,
+            'origin_prefix_bytes_claim': 8192,
+        }
+        caller['harmless_extension'] = {'note': 'fixture-only-safe', 'enabled': False}
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        sft_config = json.loads(self.sft_config_path.read_bytes())
+        sft_config['inert_extension_note'] = 'fixture-only-safe'
+        sft_config['framing']['future_delimiter_label'] = 'fixture-only-safe'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        manifest = envelope['manifest']
+        metadata = envelope['train_records'][0]['metadata']
+        self.assertEqual(manifest['source_representation'], 'verified_posix_single_message_projection')
+        self.assertTrue(manifest['byte_exact_to_screened'])
+        self.assertEqual(manifest['projection_sha256'], metadata['user_text_sha256'])
+        self.assertEqual(manifest['windows_origin_claims']['origin_verification'], 'unverified_claim')
+        self.assertEqual(manifest['windows_origin_claims']['origin_line_number_claim'], 17)
+        self.assertEqual(manifest['caller_extensions'], {'harmless_extension': {'note': 'fixture-only-safe', 'enabled': False}})
+        self.assertEqual(manifest['sft_config_extensions'], {
+            'top_level': {'inert_extension_note': 'fixture-only-safe'},
+            'framing': {'future_delimiter_label': 'fixture-only-safe'}})
+        self.assertEqual(metadata['windows_origin_claims'], manifest['windows_origin_claims'])
+        import train_owned_assessment_sft as trainer
+        train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        train_config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                            max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', train_config)
+        self.assertEqual(coverage['training_task'], user_request_sft.TASK)
+        self.assertEqual(len(records), 1)
+        forged = json.loads((self.root / 'dataset.json').read_bytes())
+        forged_claim = 'f' * 64
+        forged['manifest']['windows_origin_claims']['user_text_sha256_claim'] = forged_claim
+        forged['train_records'][0]['metadata']['windows_origin_claims']['user_text_sha256_claim'] = forged_claim
+        forged['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(row) for row in forged['train_records'])).hexdigest()
+        forged_path = self.root / 'forged-projection-dataset.json'
+        forged_path.write_text(json.dumps(forged), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'screened POSIX projection provenance'):
+            trainer.read_training(forged_path, train_config)
+
+    def test_trainer_hashes_actual_utf8_request_slices(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        row['metadata']['target_span_refs'][0]['model_span_sha256'] = 'f' * 64
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'mutated-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'span digest does not match actual request bytes'):
+            trainer.read_training(mutated, config)
+
+    def test_trainer_rejects_rehashed_duplicate_effort_span_reference(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        source_ref = next(ref for ref in row['metadata']['target_span_refs'] if ref['effort_span_id'] is not None)
+        target['unknown'].append({'field': 'effort', 'mention': 'high', 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'effort', 'span_id': source_ref['effort_span_id'],
+            'sha256': source_ref['effort_span_sha256'],
+            'start_byte': source_ref['effort_span_start_byte'],
+            'end_byte': source_ref['effort_span_end_byte'], 'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'duplicate-effort-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
+            trainer.read_training(mutated, config)
+
+    def test_trainer_rejects_renamed_identical_span_interval(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        ref = row['metadata']['target_span_refs'][0]
+        request = json.loads(row['messages'][1]['content'])['user_request'].encode('utf-8')
+        mention = request[ref['model_span_start_byte']:ref['model_span_end_byte']].decode('utf-8')
+        target['unknown'].append({'field': 'model', 'mention': mention, 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'model', 'span_id': 'renamed-identical-span',
+            'sha256': hashlib.sha256(mention.encode('utf-8')).hexdigest(),
+            'start_byte': ref['model_span_start_byte'], 'end_byte': ref['model_span_end_byte'],
+            'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'renamed-identical-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
+            trainer.read_training(mutated, config)
+
+    def test_trainer_rejects_partial_overlapping_span_interval(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        ref = row['metadata']['target_span_refs'][0]
+        request = json.loads(row['messages'][1]['content'])['user_request'].encode('utf-8')
+        start, end = ref['model_span_start_byte'] + 1, ref['model_span_end_byte'] - 1
+        mention = request[start:end].decode('utf-8')
+        target['unknown'].append({'field': 'model', 'mention': mention, 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'model', 'span_id': 'partial-overlap-span',
+            'sha256': hashlib.sha256(mention.encode('utf-8')).hexdigest(),
+            'start_byte': start, 'end_byte': end, 'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'partial-overlap-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
+            trainer.read_training(mutated, config)
+
+    def test_unknown_only_example_remains_trainable_without_negative_candidates(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['spans'] = [span for span in caller['spans'] if span['id'] in ('phase', 'model-unlisted')]
+        caller['interpretation']['model_claims'] = [claim for claim in caller['interpretation']['model_claims']
+                                                    if claim['span_id'] == 'model-unlisted']
+        caller['interpretation']['effort_claims'] = []
+        caller['relations'] = {'schema_version': user_request_targets.RELATIONS_SCHEMA,
+            'origin': 'caller_supplied_interpretation', 'review_status': 'unreviewed',
+            'items': [{'model_span_id': 'span-2'}]}
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        output = json.loads(envelope['train_records'][0]['messages'][2]['content'])
+        input_value = json.loads(envelope['train_records'][0]['messages'][1]['content'])
+        self.assertEqual(output['requested'], [])
+        self.assertEqual(output['unknown'], [{'field': 'model', 'mention': 'Unlisted Model R', 'status': 'unmatched'}])
+        self.assertEqual(input_value['provider_candidates'], [])
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', config)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(coverage['selected'], 1)
+
+    def test_matched_effort_linked_to_negated_model_remains_unknown(self):
+        cache = json.loads(self.cache.read_bytes())
+        cache['models'][1]['supported_reasoning_levels'] = [{'effort': 'high'}]
+        self.cache.write_text(json.dumps(cache), encoding='utf-8')
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train', screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['relations']['items'] = [
+            {'model_span_id': 'span-2'},
+            {'model_span_id': 'span-4', 'effort_span_id': 'span-3'},
+            {'model_span_id': 'span-5'},
+        ]
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        target = json.loads(envelope['train_records'][0]['messages'][2]['content'])
+        self.assertEqual(target['requested'][1], {'model_id': 'provider/model-q', 'polarity': 'negated'})
+        self.assertIn({'field': 'effort', 'mention': 'high', 'status': 'model_not_affirmed'}, target['unknown'])
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', config)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(coverage['selected'], 1)
+
+    def test_windows_origin_claim_matching_reserved_source_blocks_before_projection_open(self):
+        reserved_dir = self.root / 'reserved'
+        reserved_dir.mkdir(mode=0o700)
+        reserved_dir.chmod(0o700)
+        manifest = reserved_dir / 'reserved.json'
+        identity = {'source_file_sha256': 'a' * 64, 'source_prefix_sha256': 'b' * 64,
+                    'source_prefix_bytes': 8192, 'source_line': 17,
+                    'source_line_sha256': '1' * 64, 'text_sha256': 'c' * 64}
+        manifest.write_bytes(source_bound_snapshot.json_bytes({
+            'schema_version': 'lfg.reserved-session-groups.v1', 'groups': [],
+            'identities': [identity], 'coverage': 'partial'}))
+        manifest.chmod(0o600)
+        groups, manifest_sha, coverage, identities = source_bound_snapshot.read_reserved_session_manifest(manifest)
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_source_identities=identities,
+            known_reserved_manifest_sha256=manifest_sha,
+            known_reserved_manifest_locator=str(manifest),
+            known_reserved_groups_coverage=coverage, screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
+        }
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with mock.patch.object(source_bound_snapshot, 'verify_selected_source',
+                               side_effect=AssertionError('projection opened')) as verify:
+            with self.assertRaisesRegex(ValueError, 'matches a known reserved source identity'):
+                self._build()
+            verify.assert_not_called()
+        self.assertFalse((self.root / 'dataset.json').exists())
+
+    def test_config_and_caller_extensions_are_inert_bounded_and_screened(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['safe_note'] = {'owner_comment': 'safe fixture value'}
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        sft_config = json.loads(self.sft_config_path.read_bytes())
+        sft_config['safe_config_note'] = 'safe fixture value'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        self.assertEqual(envelope['manifest']['caller_extensions'], {'safe_note': {'owner_comment': 'safe fixture value'}})
+        self.assertEqual(envelope['manifest']['sft_config_extensions'], {
+            'top_level': {'safe_config_note': 'safe fixture value'}, 'framing': {}})
+        caller['secret_note'] = 'Bearer abcdefghijklmnop'
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self._build(self.root / 'rejected-caller-extension.json')
+        sft_config['secret_config_note'] = 'password=supersecretvalue'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
+        caller.pop('secret_note')
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'inert extension requires screening'):
+            self._build(self.root / 'rejected-config-extension.json')
+
+    def test_sequential_screens_reject_cross_policy_reintroduction(self):
+        policy = json.loads(self.policy.read_bytes())
+        policy['rules'] = [{'id': 'introduce-bearer', 'pattern': 'TRIGGER_VALUE',
+                            'replacement': 'Bearer abcdefghijklmnop'}]
+        path = self.root / 'reintroducing-screen.json'
+        path.write_text(json.dumps(policy), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'reintroduced content'):
+            user_request_sft._screen('TRIGGER_VALUE', path, 65536)
+
+    def test_projection_claims_malformed_or_screened_content_changed_rejected(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'verified',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': '3' * 64,
+        }
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'unverified Windows-origin'):
+            self._build()
+        caller['windows_origin_projection_claims']['origin_verification'] = 'unverified_claim'
+        caller['windows_origin_projection_claims']['user_text_sha256_claim'] = 'f' * 64
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'does not match the verified POSIX projection'):
+            self._build()
+        caller['windows_origin_projection_claims']['user_text_sha256_claim'] = (
+            hashlib.sha256(self.text.encode('utf-8')).hexdigest())
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        altered_policy = json.loads(self.policy.read_bytes())
+        altered_policy['rules'] = [{'id': 'fixture-model', 'pattern': 'Model Z', 'replacement': '[redacted]'}]
+        changed_policy = self.root / 'changed-screen.json'
+        changed_policy.write_text(json.dumps(altered_policy), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            user_request_sft.build_dataset(None, self.snapshot_path, None, self.obs_config_path,
+                self.sft_config_path, changed_policy, self.root / 'dataset.json',
+                caller_input_path=self.caller_input_path)
+
+    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors')),
+                         'torch and safetensors required for one-step fixture training')
+    def test_user_request_task_runs_one_private_fixture_step(self):
+        self._build()
+        import assessment_distill
+        import owned_student
+        import train_owned_assessment_sft as trainer
+        from safetensors.torch import save_file
+        sha = lambda raw: hashlib.sha256(raw).hexdigest()
+        checkpoint = self.root / 'checkpoint'
+        checkpoint.mkdir()
+        architecture = {'width': 8, 'layers': 2, 'heads': 2, 'conv_kernel': 3,
+                        'context': 8, 'ff_multiplier': 2, 'attention_every': 2}
+        weights = checkpoint / 'weights.safetensors'
+        save_file(owned_student.OwnedByteStudent(architecture).state_dict(), str(weights))
+        (checkpoint / 'manifest.json').write_text(json.dumps({
+            'schema_version': 'lfg.owned-student-experiment-result.v1', 'architecture': architecture,
+            'weights_sha256': sha(weights.read_bytes()),
+            'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}))
+        trace = {'id': 'assessment-fixture', 'request': 'Fixture assessment request',
+                 'response': '{"intent":"fixture"}', 'teacher': 'fixture-teacher',
+                 'review_status': 'unreviewed', 'outcome': 'unknown',
+                 'source_ref': 'fixture-source', 'source_sha256': 'a' * 64}
+        trace_path = self.root / 'assessment-trace.jsonl'
+        trace_path.write_text(json.dumps(trace) + '\n', encoding='utf-8')
+        plan = {'schema_version': assessment_distill.PLAN_SCHEMA, 'revision': 'assessment-fixture-v1',
+                'task': 'assessment-recommendation', 'system_prompt': 'Assess this fixture.',
+                'authorization_attestation': 'fixture-only', 'redaction_attestation': 'fixture-only',
+                'forbidden_literals': [], 'include_outcomes': ['unknown'], 'max_source_bytes': 8192,
+                'max_total_bytes': 8192, 'max_examples': 1,
+                'sources': [{'path': trace_path.name, 'sha256': sha(trace_path.read_bytes()),
+                    'project': 'fixture', 'project_group': 'fixture', 'split': 'train', 'origin': 'owner_chat'}]}
+        plan_path = self.root / 'assessment-plan.json'
+        plan_path.write_text(json.dumps(plan), encoding='utf-8')
+        assessment_dataset = self.root / 'assessment-dataset'
+        assessment_distill.build(plan_path, assessment_dataset)
+        assessment_config = json.loads(Path(trainer.__file__).with_name('owned-assessment-sft.example.json').read_bytes())
+        assessment_config.update(context=128, batch_size=1, steps=1, checkpoint_every=1,
+            max_parameters=100_000, max_attention_elements=100_000, max_dataset_bytes=1_000_000,
+            max_record_bytes=200_000, max_manifest_bytes=1_000_000, max_checkpoint_bytes=10_000_000,
+            max_optimizer_bytes=10_000_000, max_examples=10)
+        assessment_config_path = self.root / 'owned-assessment-sft.json'
+        assessment_config_path.write_text(json.dumps(assessment_config), encoding='utf-8')
+        completed_assessment = self.root / 'completed-assessment-sft'
+        assessment_result = trainer.experiment(
+            assessment_dataset, checkpoint, assessment_config_path, completed_assessment)
+        self.assertEqual(assessment_result['schema_version'], 'lfg.owned-assessment-sft-result.v1')
+        self.assertTrue(assessment_result['completed'])
+        legacy_manifest_path = completed_assessment / 'manifest.json'
+        legacy_manifest = json.loads(legacy_manifest_path.read_bytes())
+        legacy_manifest.pop('system_sha256')
+        legacy_manifest.pop('framing_sha256')
+        legacy_manifest['coverage'].pop('system_sha256')
+        legacy_manifest['coverage'].pop('framing_sha256')
+        legacy_manifest_path.write_text(json.dumps(legacy_manifest), encoding='utf-8')
+        train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        train_config.update(context=2048, batch_size=1, steps=1, checkpoint_every=1,
+                            max_parameters=100_000, max_attention_elements=10_000_000,
+                            max_dataset_bytes=1_000_000, max_record_bytes=200_000,
+                            max_manifest_bytes=1_000_000, max_checkpoint_bytes=10_000_000,
+                            max_optimizer_bytes=10_000_000, max_examples=10)
+        config_path = self.root / 'owned-user-request-sft.json'
+        config_path.write_text(json.dumps(train_config), encoding='utf-8')
+        output = self.root / 'trained-user-request-task'
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.experiment(self.root / 'dataset.json', completed_assessment, config_path,
+                               self.root / 'strict-default-output')
+        self.assertFalse((self.root / 'strict-default-output').exists())
+        train_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        config_path.write_text(json.dumps(train_config), encoding='utf-8')
+        result = trainer.experiment(self.root / 'dataset.json', completed_assessment, config_path, output)
+        self.assertEqual(result['schema_version'], 'lfg.owned-user-request-sft-result.v1')
+        self.assertEqual(result['source_checkpoint_schema'], 'lfg.owned-assessment-sft-result.v1')
+        self.assertEqual(result['source_checkpoint_system_linkage'], 'unknown_unlinked')
+        self.assertEqual(result['source_checkpoint_framing_linkage'], 'unknown_unlinked')
+        self.assertEqual(result['training_task'], user_request_sft.TASK)
+        self.assertFalse(result['assistant_teacher_claimed'])
+        self.assertEqual(result['outcome_claim'], 'unknown')
+        self.assertEqual(result['provider_entitlement'], 'unknown')
+        self.assertEqual(result['heldout_separation'], 'unknown')
+        self.assertFalse(result['runtime_compatible'])
+        self.assertFalse(result['deployment_ready'])
+        self.assertFalse(result['promotion_eligible'])
+
+    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors')),
+                         'torch and safetensors required for end-to-end trainer CLI')
+    def test_user_request_cli_os_error_does_not_print_private_path(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config_path = self.root / 'user-request-config.json'
+        config_path.write_text(json.dumps(config), encoding='utf-8')
+        marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
+        missing_checkpoint = self.root / marker / 'missing-checkpoint'
+        run = subprocess.run([sys.executable, str(Path(trainer.__file__)),
+            '--dataset', str(self.root / 'dataset.json'), '--checkpoint', str(missing_checkpoint),
+            '--config', str(config_path), '--output', str(self.root / 'unused-output')],
+            capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('FileNotFoundError', run.stderr)
+        self.assertIn('filesystem operation failed', run.stderr)
+        self.assertNotIn(marker, run.stderr)
+
+    def test_user_request_error_formatter_redacts_os_error_without_ml_dependencies(self):
+        import argparse
+        import train_owned_assessment_sft as trainer
+
+        config_path = self.root / 'user-request-config.json'
+        config_path.write_text(json.dumps({'schema_version': trainer.USER_REQUEST_CONFIG_SCHEMA}), encoding='utf-8')
+        marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
+        try:
+            (self.root / marker / 'missing-checkpoint').read_bytes()
+        except OSError as error:
+            args = argparse.Namespace(config=config_path, max_config_bytes=65536, dataset=self.root / 'missing')
+            message = trainer._format_cli_error(error, args)
+        else:
+            self.fail('fixture missing checkpoint unexpectedly exists')
+        self.assertIn('FileNotFoundError', message)
+        self.assertIn('filesystem operation failed', message)
+        self.assertNotIn(marker, message)
+
+    def test_completed_sft_checkpoint_provenance_validator_rejects_tampering(self):
+        import train_owned_assessment_sft as trainer
+        code_dir = Path(trainer.__file__).parent
+        code_paths = [code_dir / name for name in ('train_owned_assessment_sft.py',
+                      'owned_sft_checkpoint.py', 'owned_student.py', 'train_owned_student.py')]
+        code = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in code_paths}
+        weights = b'fixture-weights'
+        system_sha = hashlib.sha256(b'fixture system').hexdigest()
+        framing_sha = hashlib.sha256(b'fixture framing').hexdigest()
+        manifest = {'schema_version': 'lfg.owned-assessment-sft-result.v1', 'completed': True,
+            'weights_sha256': hashlib.sha256(weights).hexdigest(),
+            'source_checkpoint_manifest_sha256': '1' * 64, 'source_checkpoint_weights_sha256': '2' * 64,
+            'dataset_manifest_sha256': '3' * 64, 'training_file_sha256': '4' * 64,
+            'system_sha256': system_sha, 'framing_sha256': framing_sha, 'config_sha256': '5' * 64,
+            'architecture': {'fixture': True}, 'coverage': {'system_sha256': system_sha,
+                'framing_sha256': framing_sha}, 'code_sha256': code,
+            'steps': 1, 'parameters': 1, 'supervised_tokens': 1}
+        links = trainer.validate_completed_sft_checkpoint(manifest, weights, code)
+        self.assertEqual(links, {'system_sha256': 'verified_linked', 'framing_sha256': 'verified_linked'})
+        incomplete = dict(manifest)
+        incomplete.pop('framing_sha256')
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(incomplete, weights, code)
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(incomplete, weights, code, allow_unlinked_legacy=True)
+        unlinked = json.loads(json.dumps(manifest))
+        unlinked.pop('system_sha256')
+        unlinked.pop('framing_sha256')
+        unlinked['coverage'].pop('system_sha256')
+        unlinked['coverage'].pop('framing_sha256')
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(unlinked, weights, code)
+        self.assertEqual(trainer.validate_completed_sft_checkpoint(
+            unlinked, weights, code, allow_unlinked_legacy=True),
+            {'system_sha256': 'unknown_unlinked', 'framing_sha256': 'unknown_unlinked'})
+        partial_link = json.loads(json.dumps(unlinked))
+        partial_link['framing_sha256'] = framing_sha
+        partial_link['coverage']['framing_sha256'] = framing_sha
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(partial_link, weights, code, allow_unlinked_legacy=True)
+        null_link = json.loads(json.dumps(unlinked))
+        null_link['system_sha256'] = None
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(null_link, weights, code, allow_unlinked_legacy=True)
+        null_coverage = json.loads(json.dumps(unlinked))
+        null_coverage['coverage']['system_sha256'] = None
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(null_coverage, weights, code, allow_unlinked_legacy=True)
+        bad_link = json.loads(json.dumps(manifest))
+        bad_link['system_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_link, weights, code, allow_unlinked_legacy=True)
+        not_completed = dict(manifest)
+        not_completed['completed'] = False
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(not_completed, weights, code)
+        bad_weights = dict(manifest)
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_weights, weights + b'changed', code)
+        bad_code = json.loads(json.dumps(manifest))
+        bad_code['code_sha256']['owned_student.py'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'code provenance'):
+            trainer.validate_completed_sft_checkpoint(bad_code, weights, code)
+        bad_framing = json.loads(json.dumps(manifest))
+        bad_framing['coverage']['framing_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(bad_framing, weights, code)
+
+    def test_unlinked_legacy_checkpoint_policy_is_user_request_only(self):
+        import train_owned_assessment_sft as trainer
+        user_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        user_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        user_path = self.root / 'user-request-policy.json'
+        user_path.write_text(json.dumps(user_config), encoding='utf-8')
+        parsed, _ = trainer.configuration(user_path)
+        self.assertTrue(parsed['allow_unlinked_legacy_sft_checkpoint'])
+
+        assessment_config = json.loads(Path(trainer.__file__).with_name('owned-assessment-sft.example.json').read_bytes())
+        assessment_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        assessment_path = self.root / 'assessment-policy.json'
+        assessment_path.write_text(json.dumps(assessment_config), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'invalid supervised training configuration'):
+            trainer.configuration(assessment_path)
+
+    def test_ambiguous_provider_match_is_not_emitted_as_a_model_target(self):
+        self._write_cache(duplicate_display_name=True)
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train', screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        self.assertFalse((self.root / 'dataset.json').exists())
+        result = self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        target = json.loads(envelope['train_records'][0]['messages'][2]['content'])
+        self.assertEqual(target['requested'], [{'model_id': 'provider/model-q', 'polarity': 'negated'}])
+        self.assertEqual(target['unknown'], [
+            {'field': 'model', 'mention': 'Model Z', 'status': 'ambiguous'},
+            {'field': 'effort', 'mention': 'high', 'status': 'model_unresolved'},
+            {'field': 'model', 'mention': 'Unlisted Model R', 'status': 'unmatched'},
+        ])
+        self.assertNotIn('provider/model-z', json.dumps(target))
+        self.assertEqual(result['heldout_separation'], 'unknown')
+
+    def test_changed_provider_cache_and_changed_source_are_rejected(self):
+        self._write_cache(duplicate_display_name=True)
+        with self.assertRaisesRegex(ValueError, 'provider cache changed'):
+            self._build()
+        self._write_cache()
+        self.snapshot = source_bound_snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train', screen_policy_path=self.policy)
+        self.snapshot_path.write_text(json.dumps(self.snapshot), encoding='utf-8')
+        self._write_source(self.text + ' changed')
+        with self.assertRaisesRegex(ValueError, 'source identity|source request changed'):
+            self._build()
+        self.assertFalse((self.root / 'dataset.json').exists())
+
+    def test_existing_assessment_sft_reader_keeps_legacy_schema(self):
+        import assessment_distill
+        import train_owned_assessment_sft as trainer
+        request_file = self.root / 'legacy-teacher-trace.jsonl'
+        trace = {'id': 'fixture-assessment', 'request': 'Fixture request',
+                 'response': '{"intent":"fixture"}', 'teacher': 'fixture-teacher',
+                 'review_status': 'unreviewed', 'outcome': 'unknown',
+                 'source_ref': 'fixture-source', 'source_sha256': 'a' * 64}
+        request_file.write_text(json.dumps(trace) + '\n', encoding='utf-8')
+        plan = {'schema_version': assessment_distill.PLAN_SCHEMA, 'revision': 'legacy-fixture',
+                'task': 'assessment-recommendation', 'system_prompt': 'Assess this fixture.',
+                'authorization_attestation': 'fixture-only', 'redaction_attestation': 'fixture-only',
+                'forbidden_literals': [], 'include_outcomes': ['unknown'],
+                'max_source_bytes': 8192, 'max_total_bytes': 8192, 'max_examples': 1,
+                'sources': [{'path': request_file.name,
+                    'sha256': hashlib.sha256(request_file.read_bytes()).hexdigest(),
+                    'project': 'fixture-project', 'project_group': 'fixture-group',
+                    'split': 'train', 'origin': 'owner_chat'}]}
+        plan_path = self.root / 'legacy-plan.json'
+        plan_path.write_text(json.dumps(plan), encoding='utf-8')
+        legacy_dataset = self.root / 'legacy-assessment-dataset'
+        assessment_distill.build(plan_path, legacy_dataset)
+        config = json.loads(Path(trainer.__file__).with_name('owned-assessment-sft.example.json').read_bytes())
+        config.update(context=256, batch_size=1, max_examples=2)
+        records, _, _, coverage = trainer.read_training(legacy_dataset, config)
+        self.assertEqual(len(records), 1)
+        self.assertNotIn('training_task', coverage)
+        self.assertEqual(coverage['claims'], {'outcome:unknown': 1, 'review_status:unreviewed': 1})
+
+
+if __name__ == '__main__':
+    unittest.main()

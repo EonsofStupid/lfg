@@ -49,6 +49,11 @@ Read this before planning work. It is the owner's direction.
 - Run the checks needed for the change and report their actual scope. While
   checked merges or builds run, continue independent substantive work; reconcile
   moving bases and finish authorized merges without bypassing required checks.
+- For pull requests targeting main, use the reviewed `ready-to-auto-merge`
+  workflow described in [checked merges](docs/lfg/CHECKED-MERGE.md). Do not
+  call `gh pr merge` directly, including `--auto`: this private repository does
+  not enforce required checks, so that command can merge before CI completes.
+  If main changes, update the branch and rerun the checked workflow.
 - Report the real blocker and the next action when the end state is incomplete.
   Do not present scaffolding, synthetic fixtures or a passing smoke test as a
   trained, qualified product.

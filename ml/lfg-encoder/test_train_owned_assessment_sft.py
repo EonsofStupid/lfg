@@ -273,6 +273,16 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ignored and untracked'):
             self.subject.checkpoints.private_directory(target)
 
+    def test_legacy_cli_os_errors_keep_existing_path_detail(self):
+        private_marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
+        missing_checkpoint = self.root / private_marker / 'missing-checkpoint'
+        legacy_run = subprocess.run([sys.executable, str(Path(self.subject.__file__)),
+            '--dataset', str(self.dataset), '--checkpoint', str(missing_checkpoint),
+            '--config', str(self.config_path), '--output', str(self.root / 'legacy-output')],
+            capture_output=True, text=True)
+        self.assertNotEqual(legacy_run.returncode, 0)
+        self.assertIn(str(missing_checkpoint), legacy_run.stderr)
+
     def test_additional_input_and_config_fields_are_accepted(self):
         train_path = self.dataset / 'train.jsonl'
         row = json.loads(train_path.read_bytes())

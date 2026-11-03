@@ -69,6 +69,15 @@ def load_policy(path: Path, read_limit: int) -> tuple[dict, list[tuple[str, re.P
     if type(read_limit) is not int or read_limit < 1:
         raise ScreenError('invalid_policy_read_limit')
     raw = _read(path, read_limit, 'policy_unavailable_or_oversize')
+    return load_policy_bytes(raw, read_limit)
+
+
+def load_policy_bytes(raw: bytes, read_limit: int) -> tuple[dict, list[tuple[str, re.Pattern, str]], str]:
+    """Validate a bounded caller-supplied policy byte string without writing it."""
+    if type(read_limit) is not int or read_limit < 1:
+        raise ScreenError('invalid_policy_read_limit')
+    if not isinstance(raw, bytes) or len(raw) > read_limit:
+        raise ScreenError('policy_unavailable_or_oversize')
     policy = _json(raw, 'invalid_policy')
     if (not isinstance(policy, dict) or set(policy) != {'schema_version', 'revision', 'limits', 'rules'}
             or policy['schema_version'] != POLICY_VERSION or not isinstance(policy['revision'], str)

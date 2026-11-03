@@ -2,6 +2,12 @@
 
 The owned assessment API is an opt-in local inference route backed by the experimental owned byte ONNX checkpoint. It does not alter the deterministic `POST /api/lfg/assess` endpoint and never substitutes deterministic output when the owned runtime is unavailable.
 
+For a private Linux loopback deployment with a systemd user service, see the
+[deployment runbook](OWNED-ASSESSMENT-DEPLOYMENT-RUNBOOK.md). The runbook
+covers host-specific resource measurement, fresh credentials, feedback
+persistence, loopback access, and rollback; its tested reference limits are
+not defaults for other hosts.
+
 ## Local setup
 
 Build the server with `--features owned-byte-onnx`. Copy `crates/lfg-server/config/owned-assessment-service.example.json` to an owner-only location outside the repository, then set `LFG_OWNED_ASSESSMENT_CONFIG` to that file. Set `LFG_OWNED_ASSESSMENT_TOKEN` to a randomly generated secret with at least 32 non-whitespace bytes and at least 12 distinct byte values. The token is separate from `LFG_FEEDBACK_TOKEN`; using the same secret is an operator choice. Do not put either token in a URL, source file, or log.
