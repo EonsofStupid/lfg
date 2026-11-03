@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +87,20 @@ class ContextualSelectionTests(unittest.TestCase):
         self.config.write_text(json.dumps(cfg), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'no eligible contextual requests'):
             selection.select(self.plan, self.dataset, self.policy, self.config, self.root / 'selected')
+
+    @unittest.skipUnless(shutil.which('git'), 'Git is required for output privacy checks')
+    def test_git_output_must_be_ignored_and_not_tracked(self):
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        output = self.root / 'private' / 'selection'
+        with self.assertRaisesRegex(ValueError, 'ignored and untracked'):
+            selection.private_directory(output)
+        (self.root / '.gitignore').write_text('private/\n', encoding='utf-8')
+        selection.private_directory(output)
+        output.mkdir(parents=True)
+        (output / 'requests.jsonl').write_text('fixture\n', encoding='utf-8')
+        subprocess.run(['git', '-C', str(self.root), 'add', '-f', 'private/selection/requests.jsonl'], check=True)
+        with self.assertRaisesRegex(ValueError, 'ignored and untracked'):
+            selection.private_directory(output)
 
 
 if __name__ == '__main__':

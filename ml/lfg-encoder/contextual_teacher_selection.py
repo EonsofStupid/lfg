@@ -4,17 +4,46 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import inspect_claude_inventory as claude
 import inspect_codex_inventory as codex
 import corpus_audit
 import inventory_claude_sessions
-import owned_sft_checkpoint
 import screen_private_corpus as screen
-import select_teacher_requests
-from owned_sft_checkpoint import private_directory
-from select_teacher_requests import encoded, sha
+
+
+def sha(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def encoded(value) -> bytes:
+    return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+def private_directory(directory: Path) -> None:
+    directory = directory.resolve()
+    ancestor = directory.parent
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    result = subprocess.run(['git', '-C', str(ancestor), 'rev-parse', '--show-toplevel'],
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        if any((item / '.git').exists() for item in (ancestor, *ancestor.parents)):
+            raise ValueError('cannot verify selection output privacy')
+        return
+    root = Path(result.stdout.rstrip('\r\n')).resolve()
+    if not directory.is_relative_to(root):
+        raise ValueError('cannot resolve selection output in Git worktree')
+    for name in ('requests.jsonl', 'manifest.json'):
+        relative = (directory / name).relative_to(root).as_posix()
+        ignored = subprocess.run(['git', '-C', str(root), 'check-ignore', '-q', '--no-index', '--', relative],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        tracked = subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--', relative],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if ignored.returncode != 0 or tracked.returncode != 1:
+            raise ValueError('selection outputs must be ignored and untracked')
 
 
 def select(plan_path: Path, dataset: Path, policy_path: Path, config_path: Path, output: Path) -> dict:
@@ -36,7 +65,7 @@ def select(plan_path: Path, dataset: Path, policy_path: Path, config_path: Path,
         raise ValueError('invalid contextual selection configuration')
     excluded = set(cfg.get('exclude_ids', []))
     policy, rules, policy_sha = screen.load_policy(policy_path, cfg['max_manifest_bytes'])
-    helpers = (codex, claude, inventory_claude_sessions, owned_sft_checkpoint, screen, corpus_audit, select_teacher_requests)
+    helpers = (codex, claude, inventory_claude_sessions, screen, corpus_audit)
     helper_hashes = {Path(module.__file__).name: sha(Path(module.__file__).read_bytes()) for module in helpers}
     plan_raw = screen._read(plan_path, cfg['max_manifest_bytes'], 'plan_unavailable')
     plan = json.loads(plan_raw)
