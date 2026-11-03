@@ -744,218 +744,22 @@ def _require_ignored_untracked(path: Path) -> None:
         raise ValueError('snapshot must be ignored and untracked')
 
 
-def _current_windows_sid() -> str:
-    get_sid = subprocess.run(
-        ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
-         '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-    sid = get_sid.stdout.strip()
-    if get_sid.returncode or not re.fullmatch(r'S-1-(?:\d+-)+\d+', sid):
-        raise ValueError('cannot establish current Windows identity')
-    return sid
-
-
-def _verify_windows_ancestor_chain(path: Path) -> None:
-    env = dict(os.environ, LFG_PRIVATE_DIRECTORY_PATH=str(path.resolve()))
-    script = r'''
-$private = Get-Item -LiteralPath $env:LFG_PRIVATE_DIRECTORY_PATH
-$trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
-$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::Delete -bor
-                    [int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                    [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                    [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
-$directory = $private.Parent
-while ($null -ne $directory) {
-  if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
-  $parentAcl = Get-Acl -LiteralPath $directory.FullName
-  $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-  $componentMask = $replaceMask
-  # The volume root itself cannot be replaced; its child-delete right is still checked.
-  if ($null -eq $directory.Parent) {
-    $componentMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                            [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                            [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
-  }
-  foreach ($r in $parentRules) {
-    if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-        $r.IdentityReference.Value -notin $trusted -and
-        (([long]$r.FileSystemRights -band $componentMask) -ne 0)) { exit 11 }
-  }
-  $directory = $directory.Parent
-}
-exit 0
-'''
-    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
-    if result.returncode:
-        raise ValueError(f'Windows private ancestor ACL verification failed ({result.returncode})')
-
-
-def _secure_windows_directory(path: Path, *, created: bool) -> None:
-    """Protect a dedicated output directory and reject writable untrusted ancestors."""
-    env = dict(os.environ, LFG_PRIVATE_DIRECTORY_PATH=str(path.resolve()))
-    _verify_windows_ancestor_chain(path)
-    if created:
-        try:
-            empty = next(path.iterdir(), None) is None
-        except OSError:
-            raise ValueError('cannot inspect Windows private output directory') from None
-        if not empty:
-            raise ValueError('new Windows private output directory is not empty')
-        sid = _current_windows_sid()
-        acl = subprocess.run(['icacls.exe', str(path), '/inheritance:r', '/grant:r',
-                              f'*{sid}:(F)', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
-        if acl.returncode:
-            raise ValueError('cannot secure Windows private directory ACL')
-    verify_script = r'''
-$p = $env:LFG_PRIVATE_DIRECTORY_PATH
-$private = Get-Item -LiteralPath $p
-if (-not $private.PSIsContainer -or ($private.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 6 }
-$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
-$a = Get-Acl -LiteralPath $p
-$rules = @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if (-not $a.AreAccessRulesProtected -or $rules.Count -ne 3) { exit 7 }
-foreach ($r in $rules) {
-  if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-      $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
-      $r.IdentityReference.Value -notin $expected) { exit 8 }
-}
-if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
-$trusted = @($expected | Sort-Object -Unique)
-$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::Delete -bor
-                    [int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                    [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                    [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
-$directory = $private.Parent
-while ($null -ne $directory) {
-  if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
-  $parentAcl = Get-Acl -LiteralPath $directory.FullName
-  $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-  $componentMask = $replaceMask
-  # The volume root itself cannot be replaced; its child-delete right is still checked.
-  if ($null -eq $directory.Parent) {
-    $componentMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-                            [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-                            [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
-  }
-  foreach ($r in $parentRules) {
-    if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-        $r.IdentityReference.Value -notin $trusted -and
-        (([long]$r.FileSystemRights -band $componentMask) -ne 0)) { exit 11 }
-  }
-  $directory = $directory.Parent
-}
-exit 0
-'''
-    verified = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', verify_script],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
-    if verified.returncode:
-        raise ValueError(f'Windows private directory or ancestor ACL verification failed ({verified.returncode})')
-
-
-def _prepare_windows_private_directory(path: Path) -> None:
-    """Create only the requested leaf, or verify an existing directory without changing it."""
-    try:
-        path.mkdir()
-    except FileExistsError:
-        _secure_windows_directory(path, created=False)
-        return
-    except OSError as error:
-        if error.errno != 17:
-            raise ValueError('cannot create Windows private output directory') from None
-        _secure_windows_directory(path, created=False)
-        return
-    try:
-        _secure_windows_directory(path, created=True)
-    except Exception:
-        try:
-            path.rmdir()
-        except OSError:
-            pass
-        raise
-
-
-def _secure_windows_file(path: Path) -> None:
-    env = dict(os.environ, LFG_PRIVATE_SNAPSHOT_PATH=str(path.resolve()),
-               LFG_PRIVATE_DIRECTORY_PATH=str(path.parent.resolve()))
-    _verify_windows_ancestor_chain(path.parent)
-    sid = _current_windows_sid()
-    env['LFG_PRIVATE_CURRENT_SID'] = sid
-    set_acl_script = r'''
-$p = $env:LFG_PRIVATE_SNAPSHOT_PATH
-$a = Get-Acl -LiteralPath $p
-$a.SetAccessRuleProtection($true, $false)
-foreach ($r in @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
-  [void]$a.RemoveAccessRuleSpecific($r)
-}
-foreach ($id in @($env:LFG_PRIVATE_CURRENT_SID, 'S-1-5-18', 'S-1-5-32-544')) {
-  $sid = New-Object Security.Principal.SecurityIdentifier($id)
-  $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-    $sid, [Security.AccessControl.FileSystemRights]::FullControl,
-    [Security.AccessControl.AccessControlType]::Allow)
-  [void]$a.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $p -AclObject $a
-'''
-    acl = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', set_acl_script],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
-    if acl.returncode:
-        raise ValueError('cannot secure Windows snapshot ACL')
-    verify_script = r'''
-$p = $env:LFG_PRIVATE_SNAPSHOT_PATH
-$a = Get-Acl -LiteralPath $p
-$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
-$rules = @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if (-not $a.AreAccessRulesProtected -or $rules.Count -ne 3) { exit 7 }
-foreach ($r in $rules) {
-  if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-      $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
-      $r.IdentityReference.Value -notin $expected) { exit 8 }
-}
-if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
-$private = Get-Item -LiteralPath $env:LFG_PRIVATE_DIRECTORY_PATH
-if (-not $private.PSIsContainer -or ($private.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 10 }
-$da = Get-Acl -LiteralPath $private.FullName
-$dr = @($da.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-if (-not $da.AreAccessRulesProtected -or $dr.Count -ne 3) { exit 11 }
-foreach ($r in $dr) {
-  if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-      $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
-      $r.IdentityReference.Value -notin $expected) { exit 12 }
-}
-if (@($dr | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 13 }
-exit 0
-'''
-    verified = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', verify_script],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
-    if verified.returncode:
-        raise ValueError(f'Windows snapshot ACL verification failed ({verified.returncode})')
-
-
 def write_private_snapshot(path: Path, snapshot: dict) -> None:
-    """Write a new ignored snapshot with verified local-only file permissions."""
+    """Write a new ignored snapshot on POSIX; Windows path safety is not proven."""
+    if os.name == 'nt':
+        raise ValueError('Windows private snapshot output is disabled until no-follow ACL verification is available')
     raw = json_bytes(snapshot)
     _require_ignored_untracked(path)
-    if os.name == 'nt':
-        _prepare_windows_private_directory(path.parent)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        if os.name == 'nt':
-            _secure_windows_file(path)
-            handle = descriptor
+        with os.fdopen(descriptor, 'wb') as stream:
             descriptor = -1
-            _write_verified_windows_handle(handle, path, raw)
-        else:
-            with os.fdopen(descriptor, 'wb') as stream:
-                descriptor = -1
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if stat.S_IMODE(path.stat().st_mode) & 0o077:
-                raise ValueError('POSIX snapshot permissions are broader than owner-only')
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise ValueError('POSIX snapshot permissions are broader than owner-only')
     except Exception:
         if descriptor >= 0:
             os.close(descriptor)
@@ -967,29 +771,22 @@ def write_private_snapshot(path: Path, snapshot: dict) -> None:
 
 
 def write_private_bytes(path: Path, raw: bytes) -> None:
-    """Write new bytes after Git/privacy and ACL checks; never overwrite."""
+    """Write private POSIX bytes; Windows path safety is not proven."""
     if not isinstance(raw, bytes):
         raise ValueError('private output must be bytes')
-    _require_ignored_untracked(path)
     if os.name == 'nt':
-        _prepare_windows_private_directory(path.parent)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        raise ValueError('Windows private snapshot output is disabled until no-follow ACL verification is available')
+    _require_ignored_untracked(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        if os.name == 'nt':
-            _secure_windows_file(path)
-            handle = descriptor
+        with os.fdopen(descriptor, 'wb') as stream:
             descriptor = -1
-            _write_verified_windows_handle(handle, path, raw)
-        else:
-            with os.fdopen(descriptor, 'wb') as stream:
-                descriptor = -1
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if stat.S_IMODE(path.stat().st_mode) & 0o077:
-                raise ValueError('POSIX snapshot permissions are broader than owner-only')
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise ValueError('POSIX snapshot permissions are broader than owner-only')
     except Exception:
         if descriptor >= 0:
             os.close(descriptor)
@@ -998,24 +795,6 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
         except OSError:
             pass
         raise
-
-
-def _write_verified_windows_handle(descriptor: int, path: Path, raw: bytes) -> None:
-    """Write through the originally created handle after ACL and identity checks."""
-    try:
-        opened = os.fstat(descriptor)
-        named = path.stat()
-        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
-            raise ValueError('Windows private file identity changed during ACL verification')
-        view = memoryview(raw)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError('Windows private write made no progress')
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def main() -> None:
@@ -1033,6 +812,8 @@ def main() -> None:
     parser.add_argument('--max-line-bytes', type=int, default=16 * 1024 * 1024)
     parser.add_argument('--max-cache-bytes', type=int, default=MAX_CACHE_BYTES)
     args = parser.parse_args()
+    if os.name == 'nt':
+        raise SystemExit('Snapshot validation failed; Windows private snapshot output is disabled.')
     try:
         if args.record < 1:
             raise ValueError('invalid inventory record number')

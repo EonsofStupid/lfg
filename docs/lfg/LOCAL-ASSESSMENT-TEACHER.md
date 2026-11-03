@@ -99,15 +99,12 @@ projection carries the original cache digest and selected provider fields,
 omits raw source paths and provider extension payloads, and records that it is
 a copy of an origin-verified snapshot. Project association comes from an
 inventory label and is explicitly marked unverified. Session group identity
-does not include that mutable label. Windows writes fail closed unless the
-dedicated output directory has a protected current-user, SYSTEM, and
-Administrators ACL, untrusted ancestors cannot delete or replace path
-components, change ACLs or take ownership, and the original open file handle
-still has the same identity as the named path. Ancestors may grant
-read/traverse or create-only rights that cannot replace an already existing
-path component. A new dedicated output directory is secured before writing;
-an existing directory is verified without changing its ACL. Writes use the
-original handle without reopening the path.
+does not include that mutable label. Private snapshot writes are currently
+disabled on Windows because the implementation cannot yet prove no-follow
+handling for junctions and trusted ownership across path components. Use the
+owner-only POSIX writer for private snapshot materialization until a proven
+Windows path/handle guard is available; Windows attempts fail before resolving
+or changing the requested path.
 
 When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment

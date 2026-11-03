@@ -301,89 +301,51 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             snapshot.read_provider_cache(self.cache)
 
     def test_windows_private_write_fails_closed(self):
+        destination = self.root / 'snapshot.json'
         with mock.patch.object(snapshot.os, 'name', 'nt'), \
-                mock.patch.object(snapshot, '_prepare_windows_private_directory', side_effect=ValueError('ACL unavailable')), \
-                mock.patch.object(snapshot, '_secure_windows_file', side_effect=ValueError('ACL unavailable')):
-            with self.assertRaisesRegex(ValueError, 'ACL unavailable'):
+                mock.patch.object(Path, 'resolve', side_effect=AssertionError('resolved Windows path')):
+            with self.assertRaisesRegex(ValueError, 'Windows private snapshot output is disabled'):
                 snapshot.write_private_snapshot(self.root / 'snapshot.json', {'ok': True})
-        self.assertFalse((self.root / 'snapshot.json').exists())
+            with self.assertRaisesRegex(ValueError, 'Windows private snapshot output is disabled'):
+                snapshot.write_private_bytes(self.root / 'bytes.bin', b'private')
+        self.assertFalse(destination.exists())
+        self.assertFalse((self.root / 'bytes.bin').exists())
+
+    def test_windows_cli_fails_before_opening_inventory_or_source(self):
+        argv = ['source_bound_snapshot.py', '--inventory', str(self.root / 'inventory.jsonl'),
+                '--record', '1', '--provider-cache', str(self.cache),
+                '--split-policy', 'exploratory_train', '--output', str(self.root / 'snapshot.json')]
+        with mock.patch('sys.argv', argv), \
+                mock.patch.object(snapshot.os, 'name', 'nt'), \
+                mock.patch.object(Path, 'open', side_effect=AssertionError('opened private input')) as opened:
+            with self.assertRaisesRegex(SystemExit, 'Windows private snapshot output is disabled'):
+                snapshot.main()
+        opened.assert_not_called()
 
     @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
-    def test_windows_private_write_succeeds_under_normal_readable_ancestor_chain(self):
+    def test_windows_existing_directory_acl_is_unchanged_when_write_fails_closed(self):
         with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
-            destination = Path(sandbox) / 'private-output' / 'snapshot.json'
-            snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
-            self.assertEqual(json.loads(destination.read_text(encoding='utf-8'))['schema_version'], snapshot.SCHEMA)
-
-    @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
-    def test_windows_existing_empty_directory_is_verified_without_acl_mutation(self):
-        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
-            existing = Path(sandbox) / 'existing-output'
-            existing.mkdir()
+            existing = Path(sandbox)
             before = subprocess.run(['icacls.exe', str(existing)], capture_output=True, check=True).stdout
-            with self.assertRaisesRegex(ValueError, 'Windows private directory or ancestor ACL verification failed'):
-                snapshot._secure_windows_directory(existing, created=False)
+            with self.assertRaisesRegex(ValueError, 'Windows private snapshot output is disabled'):
+                snapshot.write_private_snapshot(existing / 'snapshot.json', {'schema_version': snapshot.SCHEMA})
             after = subprocess.run(['icacls.exe', str(existing)], capture_output=True, check=True).stdout
             self.assertEqual(before, after)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
-    def test_windows_ancestor_delete_right_rejects_replaceable_component(self):
+    def test_windows_junction_path_is_refused_without_writing_target(self):
         with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as sandbox:
-            parent = Path(sandbox)
-            child = parent / 'child'
-            child.mkdir()
-            acl = subprocess.run(['icacls.exe', str(parent), '/grant', '*S-1-5-11:(D)'],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            self.assertEqual(acl.returncode, 0)
-            with self.assertRaisesRegex(ValueError, 'ancestor ACL verification failed'):
-                snapshot._verify_windows_ancestor_chain(child)
-
-    def test_windows_writer_rejects_replaced_path_identity(self):
-        destination = self.root / 'replacement.json'
-        destination.write_bytes(b'')
-        descriptor = os.open(destination, os.O_WRONLY)
-        original_stat = destination.stat()
-        replaced = mock.Mock(st_dev=original_stat.st_dev, st_ino=original_stat.st_ino + 1)
-        real_stat = Path.stat
-        with mock.patch.object(Path, 'stat', autospec=True,
-                               side_effect=lambda path, *args, **kwargs:
-                                   replaced if path == destination else real_stat(path, *args, **kwargs)):
-            with self.assertRaisesRegex(ValueError, 'file identity changed'):
-                snapshot._write_verified_windows_handle(descriptor, destination, b'private')
-        with self.assertRaises(OSError):
-            os.fstat(descriptor)
-
-    def test_windows_writers_remove_empty_file_and_close_handle_on_identity_mismatch(self):
-        for name, writer, value in (
-            ('snapshot', snapshot.write_private_snapshot, {'schema_version': snapshot.SCHEMA}),
-            ('bytes', snapshot.write_private_bytes, b'private'),
-        ):
-            with self.subTest(writer=name):
-                destination = self.root / f'{name}.json'
-                mismatch = mock.Mock(st_dev=os.stat(destination.parent).st_dev, st_ino=-1)
-                real_stat = Path.stat
-                real_open = os.open
-                opened_descriptors = []
-
-                def tracked_open(*args, **kwargs):
-                    descriptor = real_open(*args, **kwargs)
-                    opened_descriptors.append(descriptor)
-                    return descriptor
-
-                with mock.patch.object(snapshot.os, 'name', 'nt'), \
-                        mock.patch.object(snapshot.os, 'open', side_effect=tracked_open), \
-                        mock.patch.object(snapshot, '_require_ignored_untracked'), \
-                        mock.patch.object(snapshot, '_prepare_windows_private_directory'), \
-                        mock.patch.object(snapshot, '_secure_windows_file'), \
-                        mock.patch.object(Path, 'stat', autospec=True,
-                                          side_effect=lambda path, *args, **kwargs:
-                                              mismatch if path == destination else real_stat(path, *args, **kwargs)):
-                    with self.assertRaisesRegex(ValueError, 'file identity changed'):
-                        writer(destination, value)
-                self.assertFalse(destination.exists())
-                self.assertEqual(len(opened_descriptors), 1)
-                with self.assertRaises(OSError):
-                    os.fstat(opened_descriptors[0])
+            target = Path(sandbox) / 'target'
+            junction = Path(sandbox) / 'junction'
+            target.mkdir()
+            link = subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(junction), str(target)],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            self.assertEqual(link.returncode, 0, 'could not create disposable junction for regression')
+            with mock.patch.object(Path, 'resolve', side_effect=AssertionError('resolved junction path')):
+                with self.assertRaisesRegex(ValueError, 'Windows private snapshot output is disabled'):
+                    snapshot.write_private_snapshot(junction / 'snapshot.json', {'ok': True})
+            self.assertFalse((target / 'snapshot.json').exists())
+            junction.rmdir()
 
 
 if __name__ == '__main__':
