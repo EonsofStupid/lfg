@@ -81,6 +81,33 @@ fn digest(raw: &[u8]) -> String {
     format!("{:x}", Sha256::digest(raw))
 }
 
+fn read_pinned_config(path: &Path, maximum_bytes: u64, expected_sha256: &str) -> Result<Vec<u8>> {
+    if maximum_bytes == 0
+        || expected_sha256.len() != 64
+        || !expected_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("invalid pinned runtime configuration limit or digest".into());
+    }
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err("runtime configuration must be a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(
+        maximum_bytes
+            .checked_add(1)
+            .ok_or("runtime configuration limit overflow")?,
+    )
+    .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err("runtime configuration exceeds pinned byte limit".into());
+    }
+    if digest(&bytes) != expected_sha256.to_ascii_lowercase() {
+        return Err("runtime configuration digest mismatch".into());
+    }
+    Ok(bytes)
+}
+
 fn greedy(logits: &[f32]) -> Result<u8> {
     if logits.len() != 256 || logits.iter().any(|value| !value.is_finite()) {
         return Err("invalid owned byte logits".into());
@@ -165,10 +192,23 @@ fn execute(
     artifact: Artifact<'_>,
     manifest_sha: &str,
     config_path: Option<&Path>,
+    runtime_config_sha256: Option<&str>,
+    runtime_config_max_bytes: Option<u64>,
     mode: Mode<'_>,
 ) -> Result<()> {
     let raw_config: Cow<'_, [u8]> = match config_path {
-        Some(path) => Cow::Owned(std::fs::read(path)?),
+        Some(path) => match (runtime_config_sha256, runtime_config_max_bytes) {
+            (Some(sha), Some(max)) => Cow::Owned(read_pinned_config(path, max, sha)?),
+            (None, None) => Cow::Owned(std::fs::read(path)?),
+            _ => {
+                return Err(
+                    "runtime config digest and byte limit must be provided together".into(),
+                );
+            }
+        },
+        None if runtime_config_sha256.is_some() || runtime_config_max_bytes.is_some() => {
+            return Err("runtime config pin requires a config file".into());
+        }
         None => Cow::Borrowed(include_bytes!("../config/owned-byte-runtime.example.json")),
     };
     let config: Config = serde_json::from_slice(&raw_config)?;
@@ -316,6 +356,8 @@ pub fn directory(
         Artifact::Directory(root),
         manifest_sha,
         Some(config),
+        None,
+        None,
         Mode::Probe { include_logits },
     )
 }
@@ -326,6 +368,8 @@ pub fn embedded(config: Option<&Path>, include_logits: bool) -> Result<()> {
         Artifact::Embedded,
         embedded::MANIFEST_SHA256,
         config,
+        None,
+        None,
         Mode::Probe { include_logits },
     )
 }
@@ -336,11 +380,15 @@ pub fn generate_directory(
     config: &Path,
     limit: usize,
     stop: Option<&str>,
+    runtime_config_sha256: Option<&str>,
+    runtime_config_max_bytes: Option<u64>,
 ) -> Result<()> {
     execute(
         Artifact::Directory(root),
         manifest_sha,
         Some(config),
+        runtime_config_sha256,
+        runtime_config_max_bytes,
         Mode::Generate {
             limit,
             stop: stop.map(str::as_bytes),
@@ -354,6 +402,8 @@ pub fn generate_embedded(config: Option<&Path>, limit: usize, stop: Option<&str>
         Artifact::Embedded,
         embedded::MANIFEST_SHA256,
         config,
+        None,
+        None,
         Mode::Generate {
             limit,
             stop: stop.map(str::as_bytes),
@@ -392,5 +442,22 @@ mod tests {
             (bytes.as_slice(), reason),
             (b"A".as_slice(), "context_limit")
         );
+    }
+
+    #[test]
+    fn pinned_runtime_config_rejects_changed_and_oversized_files_before_parse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime.json");
+        let original = br#"{"schema_version":"lfg.owned-byte-runtime.v1"}"#;
+        std::fs::write(&path, original).unwrap();
+        let pinned = digest(original);
+        assert_eq!(
+            read_pinned_config(&path, original.len() as u64, &pinned).unwrap(),
+            original
+        );
+        std::fs::write(&path, br#"{"schema_version":"changed"}"#).unwrap();
+        assert!(read_pinned_config(&path, 1024, &pinned).is_err());
+        std::fs::write(&path, vec![b'x'; 32]).unwrap();
+        assert!(read_pinned_config(&path, 8, &pinned).is_err());
     }
 }

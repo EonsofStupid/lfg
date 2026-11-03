@@ -154,7 +154,9 @@ ACL inheritance. Hosted access and public reverse-proxy use are unsupported.
 For an interactive Windows developer run, from a private PowerShell session:
 
 ```powershell
-$env:LFG_FEEDBACK_DIR = Join-Path $env:LOCALAPPDATA 'LFG-feedback'
+$feedbackParent = Join-Path $env:LOCALAPPDATA 'LFG'
+New-Item -ItemType Directory -Force -Path $feedbackParent | Out-Null
+$env:LFG_FEEDBACK_DIR = Join-Path $feedbackParent 'feedback'
 $feedbackBytes = New-Object byte[] 32
 $feedbackRng = [Security.Cryptography.RandomNumberGenerator]::Create()
 $feedbackRng.GetBytes($feedbackBytes)
