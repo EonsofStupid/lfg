@@ -1,0 +1,13 @@
+{
+  "schema_version": "lfg.owned-training-chain.v1",
+  "python": "/PATH/TO/PYTHON",
+  "supervisor": "/PATH/TO/owned_training_service.py",
+  "trainer": "/PATH/TO/train_owned_assessment_sft.py",
+  "source_state": "/PATH/TO/PRIVATE_PRETRAINING_STATE",
+  "target_state": "/PATH/TO/NEW_PRIVATE_SFT_STATE",
+  "dataset": "/PATH/TO/PRIVATE_ASSESSMENT_DATASET",
+  "sft_config": "/PATH/TO/PRIVATE_SFT_CONFIG.json",
+  "segment_steps": 200,
+  "poll_seconds": 30,
+  "max_checkpoint_bytes": 268435456
+}
