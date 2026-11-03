@@ -18,6 +18,7 @@ import urllib.request
 import screen_private_corpus as screen
 import train
 from owned_sft_checkpoint import private_directory
+import project_training_context as project_context
 
 
 def sha(raw: bytes) -> str:
@@ -50,7 +51,9 @@ def config_file(path: Path) -> tuple[dict, bytes]:
             or any(not isinstance(k, str) or not k for k in value['required_fields'])
             or len(set(value['required_fields'])) != len(value['required_fields'])
             or type(value.get('temperature')) not in (float, int) or not math.isfinite(value['temperature'])
-            or not 0 <= value['temperature'] <= 2 or type(value.get('json_mode')) is not bool):
+            or not 0 <= value['temperature'] <= 2 or type(value.get('json_mode')) is not bool
+            or ('max_context_bytes' in value and (type(value['max_context_bytes']) is not int
+                                                  or value['max_context_bytes'] < 1))):
         raise ValueError('invalid teacher collection configuration')
     url = urllib.parse.urlsplit(value['endpoint'])
     try:
@@ -137,18 +140,23 @@ def clean_response(value: object, rules, limits: dict) -> object:
     raise ValueError('invalid assessment value')
 
 
-def collect(selection: Path, config_path: Path, policy_path: Path, output: Path, *, resume: bool = False) -> dict:
+def collect(selection: Path, config_path: Path, policy_path: Path, output: Path, *, resume: bool = False,
+            project_context_path: Path | None = None) -> dict:
     config, config_raw = config_file(config_path)
+    teacher_system_sha = sha(config['system_prompt'].encode('utf-8'))
     key = os.environ.get(config['api_key_env'])
     if not key or '\n' in key or '\r' in key:
         raise ValueError('teacher API key is unavailable')
     policy, rules, policy_sha = screen.load_policy(policy_path, config['max_manifest_bytes'])
     selection_raw = screen._read(selection / 'manifest.json', config['max_manifest_bytes'], 'selection_manifest_unavailable')
     manifest = screen._json(selection_raw, 'invalid_selection_manifest')
-    source_raw = screen._read(selection / 'requests.jsonl', config['max_request_bytes'] * config['max_requests'], 'requests_unavailable')
     if (not isinstance(manifest, dict) or manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
-            or manifest.get('requests_sha256') != sha(source_raw) or manifest.get('test_opened') is not False
-            or manifest.get('validation_opened') is not False):
+            or manifest.get('test_opened') is not False or manifest.get('validation_opened') is not False):
+        raise ValueError('invalid selected request identity')
+    context_map, context_file_sha, context_file_extensions = ({}, None, {})
+    source_raw = screen._read(selection / 'requests.jsonl', config['max_request_bytes'] * config['max_requests'], 'requests_unavailable')
+    if (manifest.get('requests_sha256') != sha(source_raw)
+            or screen._read(selection / 'manifest.json', config['max_manifest_bytes'], 'selection_changed') != selection_raw):
         raise ValueError('invalid selected request identity')
     rows = [screen._json(line, 'invalid_selected_request') for line in source_raw.splitlines()]
     if not rows or len(rows) > config['max_requests'] or len(rows) != manifest.get('requests'):
@@ -166,11 +174,26 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
         if screen._screen(row['text'], rules, policy['limits'])[0] != row['text']:
             raise ValueError('request needs additional screening')
         ids.add(row['id'])
+    # The selected request split is validated before opening any optional context asset.
+    if project_context_path is not None:
+        context_map, context_file_sha, context_file_extensions = project_context.load(
+            project_context_path, max_file_bytes=config['max_manifest_bytes'],
+            max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']))
+        context_strings = [*project_context.strings(context_file_extensions)]
+        for entry in context_map.values():
+            context_strings.extend((entry['text'], *project_context.strings(entry['extensions'])))
+        if any(screen._screen(text, rules, policy['limits'])[0] != text for text in context_strings):
+            raise ValueError('project context needs additional screening')
+    if project_context_path is not None and any(row['project'] not in context_map for row in rows):
+        raise ValueError('selected project has no supplied context')
     private_directory(output)
     identity = {'schema_version': 'lfg.local-teacher-run.v1', 'config_sha256': sha(config_raw),
                 'selection_manifest_sha256': sha(selection_raw), 'requests_sha256': sha(source_raw),
                 'policy_sha256': policy_sha, 'collector_sha256': sha(Path(__file__).read_bytes()),
                 'screen_code_sha256': sha(Path(screen.__file__).read_bytes())}
+    if project_context_path is not None:
+        identity['project_context_file_sha256'] = context_file_sha
+        identity['project_context_code_sha256'] = sha(Path(project_context.__file__).read_bytes())
     # The OS lock is held across all requests; the marker is not removed after exit.
     with train.training_run_lock(output):
         if not output.exists():
@@ -193,6 +216,13 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                 raise ValueError('invalid failure directory')
         traces, failures = [], []
         for index, row in enumerate(rows):
+            context_entry = context_map.get(row['project'])
+            request_text = project_context.render(
+                context_entry['text'] if context_entry else None, row['text'],
+                max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']),
+                expected_sha256=context_entry['sha256'] if context_entry else None)
+            if len(request_text.encode('utf-8')) > config.get('max_context_bytes', config['max_request_bytes']):
+                raise ValueError('rendered teacher request exceeds configured context limit')
             record_path = records_dir / f'{index:06d}.json'
             failure_path = failure_dir / f'{index:06d}.json'
             if record_path.is_symlink():
@@ -214,7 +244,7 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                     raise ValueError('record digest mismatch')
             else:
                 try:
-                    response = ask(config, row['text'], key)
+                    response = ask(config, request_text, key)
                     parsed = screen._json(response.encode(), 'invalid_assessment_json')
                     if not isinstance(parsed, dict) or any(field not in parsed for field in config['required_fields']):
                         raise ValueError('teacher response lacks required fields')
@@ -235,9 +265,17 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                     os.replace(temporary, failure_path)
                     failures.append(failed)
                     continue
-                trace = {'id': row['id'], 'request': row['text'], 'response': clean,
+                trace = {'id': row['id'], 'request': request_text, 'response': clean,
                          'teacher': config['teacher_identity'], 'review_status': 'unreviewed', 'outcome': 'unknown',
-                         'source_ref': row['id'], 'source_sha256': row['source_text_sha256_claim']}
+                         'source_ref': row['id'], 'source_sha256': row['source_text_sha256_claim'],
+                         'teacher_system_sha256': teacher_system_sha,
+                         **({'project_context_sha256': context_entry['sha256'],
+                             'project_context_byte_length': len(context_entry['text'].encode('utf-8')),
+                             **({'project_context_extensions': context_entry['extensions']}
+                                if context_entry['extensions'] else {}),
+                             **({'project_context_file_extensions': context_file_extensions}
+                                if context_file_extensions else {})}
+                            if context_entry else {})}
                 envelope = {'schema_version': 'lfg.local-teacher-record.v1', 'trace': trace,
                             'trace_sha256': sha(encoded(trace)),
                             'source_claims': {k: row.get(k) for k in ('project', 'project_group', 'family',
@@ -246,10 +284,12 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
                 with os.fdopen(fd, 'wb') as stream:
                     stream.write(encoded(envelope)); stream.flush(); os.fsync(stream.fileno())
                 os.replace(temporary, record_path)
-            if (trace.get('id') != row['id'] or trace.get('request') != row['text']
+            if (trace.get('id') != row['id'] or trace.get('request') != request_text
                     or trace.get('teacher') != config['teacher_identity'] or trace.get('review_status') != 'unreviewed'
                     or trace.get('outcome') != 'unknown' or trace.get('source_ref') != row['id']
                     or trace.get('source_sha256') != row['source_text_sha256_claim']
+                    or trace.get('teacher_system_sha256') != teacher_system_sha
+                    or trace.get('project_context_sha256') != (context_entry['sha256'] if context_entry else None)
                     or not isinstance(trace.get('response'), str)
                     or envelope.get('schema_version') != 'lfg.local-teacher-record.v1'
                     or envelope.get('source_claims') != {k: row.get(k) for k in ('project', 'project_group', 'family',
@@ -263,6 +303,9 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
         if (config_file(config_path)[1] != config_raw or screen.load_policy(policy_path, config['max_manifest_bytes'])[2] != policy_sha
                 or screen._read(selection / 'manifest.json', config['max_manifest_bytes'], 'selection_changed') != selection_raw
                 or screen._read(selection / 'requests.jsonl', config['max_request_bytes'] * config['max_requests'], 'requests_changed') != source_raw
+                or (project_context_path is not None and project_context.load(
+                    project_context_path, max_file_bytes=config['max_manifest_bytes'],
+                    max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']))[1] != context_file_sha)
                 or sha(Path(__file__).read_bytes()) != identity['collector_sha256']
                 or sha(Path(screen.__file__).read_bytes()) != identity['screen_code_sha256']):
             raise ValueError('collection inputs changed')
@@ -301,10 +344,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('selection', 'config', 'policy', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--project-context', type=Path)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     try:
-        result = collect(args.selection, args.config, args.policy, args.output, resume=args.resume)
+        result = collect(args.selection, args.config, args.policy, args.output, resume=args.resume,
+                         project_context_path=args.project_context)
         print(json.dumps({k: result[k] for k in ('requested_requests', 'requests', 'failed_requests',
                                                  'projects', 'review_status', 'outcome', 'test_opened')}))
     except TeacherHTTPError as error:
