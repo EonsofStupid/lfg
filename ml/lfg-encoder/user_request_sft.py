@@ -81,7 +81,7 @@ def load_config(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
                    ('max_config_bytes', 'max_dataset_bytes', 'max_record_bytes', 'max_request_bytes',
                     'max_target_bytes', 'max_examples'))
             or not isinstance(value.get('framing'), dict)
-            or set(value['framing']) != set(FRAMING_FIELDS)
+            or not set(FRAMING_FIELDS) <= set(value['framing'])
             or any(not isinstance(value['framing'].get(name), str) for name in FRAMING_FIELDS)):
         raise ValueError('invalid user-request SFT configuration')
     if len(value['system_prompt'].encode('utf-8')) > value['max_config_bytes']:
@@ -392,8 +392,10 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         source_bound_snapshot._default_screen_policy_path(), min(config['max_config_bytes'], 1024 * 1024))
     policy, policy_rules, loaded_policy_sha = screen_private_corpus.load_policy(
         screen_policy_path, min(config['max_config_bytes'], 1024 * 1024))
-    sft_config_extensions = _screen_inert_extensions(
-        {key: value for key, value in config.items() if key not in CONFIG_FIELDS},
+    sft_config_extensions = _screen_inert_extensions({
+        'top_level': {key: value for key, value in config.items() if key not in CONFIG_FIELDS},
+        'framing': {key: value for key, value in config['framing'].items()
+                    if key not in FRAMING_FIELDS}},
         screen_policy_path, config['max_config_bytes'])
     if policy_sha != loaded_policy_sha or policy_sha != target['provider_observation']['screen_policy_sha256']:
         raise ValueError('SFT screening policy does not match source-bound request evidence')

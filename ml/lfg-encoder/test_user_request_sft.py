@@ -180,6 +180,7 @@ class UserRequestSFTTests(unittest.TestCase):
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
         sft_config = json.loads(self.sft_config_path.read_bytes())
         sft_config['inert_extension_note'] = 'fixture-only-safe'
+        sft_config['framing']['future_delimiter_label'] = 'fixture-only-safe'
         self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
         self._build()
         envelope = json.loads((self.root / 'dataset.json').read_bytes())
@@ -191,7 +192,9 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertEqual(manifest['windows_origin_claims']['origin_verification'], 'unverified_claim')
         self.assertEqual(manifest['windows_origin_claims']['origin_line_number_claim'], 17)
         self.assertEqual(manifest['caller_extensions'], {'harmless_extension': {'note': 'fixture-only-safe', 'enabled': False}})
-        self.assertEqual(manifest['sft_config_extensions'], {'inert_extension_note': 'fixture-only-safe'})
+        self.assertEqual(manifest['sft_config_extensions'], {
+            'top_level': {'inert_extension_note': 'fixture-only-safe'},
+            'framing': {'future_delimiter_label': 'fixture-only-safe'}})
         self.assertEqual(metadata['windows_origin_claims'], manifest['windows_origin_claims'])
         import train_owned_assessment_sft as trainer
         train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
@@ -227,6 +230,31 @@ class UserRequestSFTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'span digest does not match actual request bytes'):
             trainer.read_training(mutated, config)
 
+    def test_unknown_only_example_remains_trainable_without_negative_candidates(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['spans'] = [span for span in caller['spans'] if span['id'] in ('phase', 'model-unlisted')]
+        caller['interpretation']['model_claims'] = [claim for claim in caller['interpretation']['model_claims']
+                                                    if claim['span_id'] == 'model-unlisted']
+        caller['interpretation']['effort_claims'] = []
+        caller['relations'] = {'schema_version': user_request_targets.RELATIONS_SCHEMA,
+            'origin': 'caller_supplied_interpretation', 'review_status': 'unreviewed',
+            'items': [{'model_span_id': 'span-2'}]}
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        output = json.loads(envelope['train_records'][0]['messages'][2]['content'])
+        input_value = json.loads(envelope['train_records'][0]['messages'][1]['content'])
+        self.assertEqual(output['requested'], [])
+        self.assertEqual(output['unknown'], [{'field': 'model', 'mention': 'Unlisted Model R', 'status': 'unmatched'}])
+        self.assertEqual(input_value['provider_candidates'], [])
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', config)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(coverage['selected'], 1)
+
     def test_config_and_caller_extensions_are_inert_bounded_and_screened(self):
         caller = json.loads(self.caller_input_path.read_bytes())
         caller['safe_note'] = {'owner_comment': 'safe fixture value'}
@@ -237,7 +265,8 @@ class UserRequestSFTTests(unittest.TestCase):
         self._build()
         envelope = json.loads((self.root / 'dataset.json').read_bytes())
         self.assertEqual(envelope['manifest']['caller_extensions'], {'safe_note': {'owner_comment': 'safe fixture value'}})
-        self.assertEqual(envelope['manifest']['sft_config_extensions'], {'safe_config_note': 'safe fixture value'})
+        self.assertEqual(envelope['manifest']['sft_config_extensions'], {
+            'top_level': {'safe_config_note': 'safe fixture value'}, 'framing': {}})
         caller['secret_note'] = 'Bearer abcdefghijklmnop'
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
         with self.assertRaises(ValueError):
