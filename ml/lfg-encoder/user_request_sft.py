@@ -21,6 +21,7 @@ import user_request_targets
 CONFIG_SCHEMA = 'lfg.user-requested-sft-config.v1'
 DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v1'
 CALLER_INPUT_SCHEMA = 'lfg.user-requested-sft-caller-input.v1'
+WINDOWS_PROJECTION_CLAIMS_SCHEMA = 'lfg.windows-origin-projection-claims.v1'
 TASK = 'user_requested_model_effort'
 OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v1'
 CONFIG_FIELDS = {'schema_version', 'revision', 'system_prompt', 'max_config_bytes',
@@ -149,11 +150,26 @@ def _validate_config_text(text: str, policies: list[tuple[dict, list]]) -> None:
             raise ValueError('task prompt or target requires redaction')
 
 
+def _validate_windows_projection_claims(value: object) -> dict:
+    fields = {'schema_version', 'origin_platform', 'origin_verification',
+              'line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'}
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get('schema_version') != WINDOWS_PROJECTION_CLAIMS_SCHEMA
+            or value.get('origin_platform') != 'windows'
+            or value.get('origin_verification') != 'unverified_claim'
+            or any(not isinstance(value.get(key), str) or len(value[key]) != 64
+                   or any(char not in '0123456789abcdef' for char in value[key])
+                   for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))):
+        raise ValueError('invalid unverified Windows-origin projection claims')
+    return value
+
+
 def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dict,
                                    screen_policy_path: Path, max_bytes: int) -> tuple[dict, dict, bytes]:
     caller_input, raw = _read_json(input_path, max_bytes)
+    caller_fields = {'schema_version', 'spans', 'interpretation', 'relations'}
     if (not isinstance(caller_input, dict)
-            or set(caller_input) != {'schema_version', 'spans', 'interpretation', 'relations'}
+            or set(caller_input) not in (caller_fields, caller_fields | {'windows_origin_projection_claims'})
             or caller_input.get('schema_version') != CALLER_INPUT_SCHEMA
             or not isinstance(caller_input.get('spans'), list)
             or not isinstance(caller_input.get('interpretation'), dict)
@@ -175,7 +191,9 @@ def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dic
         snapshot['source']['inventory_identity'], caller_input['spans'], caller_input['interpretation'],
         config, screen_policy_path, reserved=reserved,
         reserved_project_labels=split.get('known_reserved_project_labels', []))
-    return observation, caller_input['relations'], raw
+    claims = (None if 'windows_origin_projection_claims' not in caller_input else
+              _validate_windows_projection_claims(caller_input['windows_origin_projection_claims']))
+    return observation, caller_input['relations'], raw, claims
 
 
 def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, relations_path: Path | None,
@@ -202,8 +220,9 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
     if (caller_input_path is None) == (observation_path is None):
         raise ValueError('supply exactly one observation or caller-input file')
     pinned_observation_raw = pinned_relations_raw = pinned_caller_raw = None
+    windows_origin_claims = None
     if caller_input_path is not None:
-        observation, relations, pinned_caller_raw = _observation_from_caller_input(
+        observation, relations, pinned_caller_raw, windows_origin_claims = _observation_from_caller_input(
             snapshot, caller_input_path, obs_config, screen_policy_path, max_input_bytes)
     else:
         observation, pinned_observation_raw = _read_json(
@@ -232,6 +251,19 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         raise ValueError('caller relations changed during target revalidation')
     screened_request, redaction_counts, policy_sha = _screen(
         raw_request, screen_policy_path, min(config['max_config_bytes'], 1024 * 1024))
+    if windows_origin_claims is not None:
+        # The POSIX file is a deliberately narrow, screened projection: one
+        # metadata line plus the selected user message, with no later records.
+        # Its verified identity is distinct from the unverified Windows claims.
+        projection_path = Path(source_record['source_file'])
+        try:
+            projection_stat = projection_path.stat()
+        except OSError:
+            raise ValueError('screened POSIX projection is unavailable') from None
+        if (source_record.get('source_line') != 2
+                or source_record.get('source_prefix_bytes') != projection_stat.st_size
+                or screened_request != raw_request):
+            raise ValueError('Windows-origin projection must be a complete, already-screened single-message POSIX file')
     baseline, baseline_rules, _ = screen_private_corpus.load_policy(
         source_bound_snapshot._default_screen_policy_path(), min(config['max_config_bytes'], 1024 * 1024))
     policy, policy_rules, loaded_policy_sha = screen_private_corpus.load_policy(
@@ -287,6 +319,11 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
             'user_text_redaction_counts': redaction_counts,
             'target_span_refs': span_refs,
             'redaction_counts': redaction_counts,
+            **({'source_representation': 'verified_posix_single_message_projection',
+                'projection_sha256': _sha(request_bytes), 'byte_exact_to_screened': True,
+                'windows_origin_claims': windows_origin_claims}
+               if windows_origin_claims is not None else
+               {'source_representation': 'verified_posix_source'}),
         },
     }
     record_raw = _canonical(record)
@@ -319,6 +356,11 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         'user_text_redaction_counts': redaction_counts,
         'validation_opened': False, 'test_opened': False,
         'assistant_teacher_claimed': False,
+        'source_representation': record['metadata']['source_representation'],
+        **({'projection_sha256': record['metadata']['projection_sha256'],
+            'byte_exact_to_screened': True,
+            'windows_origin_claims': windows_origin_claims}
+           if windows_origin_claims is not None else {}),
     }
     envelope = {'schema_version': DATASET_SCHEMA, 'manifest': manifest, 'train_records': [record]}
     envelope_raw = _canonical(envelope)

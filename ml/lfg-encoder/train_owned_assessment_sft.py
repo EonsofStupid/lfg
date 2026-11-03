@@ -221,7 +221,10 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
         'promotion_eligible', 'records', 'records_sha256', 'record_id', 'source_evidence',
         'provider_cache_sha256', 'relations_sha256', 'target_record_sha256', 'screen_policy_sha256',
         'screened_request_sha256', 'redaction_counts', 'user_text_redaction_counts', 'validation_opened', 'test_opened',
-        'assistant_teacher_claimed', 'user_text_utf8_bytes'}
+        'assistant_teacher_claimed', 'user_text_utf8_bytes', 'source_representation'}
+    projection_fields = {'projection_sha256', 'byte_exact_to_screened', 'windows_origin_claims'}
+    if manifest.get('source_representation') == 'verified_posix_single_message_projection':
+        manifest_fields |= projection_fields
     sha_fields = ('config_sha256', 'builder_sha256', 'observation_config_sha256', 'system_prompt_sha256',
         'records_sha256', 'provider_cache_sha256', 'relations_sha256', 'target_record_sha256',
         'screen_policy_sha256', 'screened_request_sha256')
@@ -244,12 +247,30 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             or manifest.get('promotion_eligible') is not False
             or manifest.get('validation_opened') is not False or manifest.get('test_opened') is not False
             or manifest.get('assistant_teacher_claimed') is not False
+            or manifest.get('source_representation') not in
+               ('verified_posix_source', 'verified_posix_single_message_projection')
             or type(manifest.get('records')) is not int or not 1 <= manifest['records'] <= config['max_examples']
             or not isinstance(manifest.get('record_id'), str)
             or type(manifest.get('user_text_utf8_bytes')) is not int or manifest['user_text_utf8_bytes'] < 1
             or not isinstance(manifest.get('source_evidence'), dict)
             or not isinstance(manifest.get('redaction_counts'), dict)):
         raise ValueError('user-request SFT manifest violates explicit unknown/task policy')
+    if manifest['source_representation'] == 'verified_posix_single_message_projection':
+        claims = manifest.get('windows_origin_claims')
+        claim_fields = {'schema_version', 'origin_platform', 'origin_verification',
+                        'line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'}
+        if (manifest.get('byte_exact_to_screened') is not True
+                or not isinstance(manifest.get('projection_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', manifest['projection_sha256'])
+                or not isinstance(claims, dict) or set(claims) != claim_fields
+                or claims.get('schema_version') != 'lfg.windows-origin-projection-claims.v1'
+                or claims.get('origin_platform') != 'windows'
+                or claims.get('origin_verification') != 'unverified_claim'
+                or any(not isinstance(claims.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', claims[key])
+                       for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))):
+            raise ValueError('invalid screened POSIX projection provenance')
+    elif manifest.get('source_representation') != 'verified_posix_source':
+        raise ValueError('unknown user-request source representation')
     source_fields = {'source_file_sha256_at_inventory', 'source_prefix_sha256', 'source_line_sha256',
                      'user_text_sha256', 'source_group_sha256'}
     if (set(manifest['source_evidence']) != source_fields
@@ -279,6 +300,9 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             'provider_cache_sha256', 'relations_sha256', 'target_record_sha256', 'screen_policy_sha256',
             'screened_request_sha256', 'target_span_refs', 'redaction_counts', 'user_text_redaction_counts',
             'user_text_utf8_bytes'}
+        metadata_fields.add('source_representation')
+        if manifest['source_representation'] == 'verified_posix_single_message_projection':
+            metadata_fields |= projection_fields
         digest_fields = (*source_fields, 'provider_cache_sha256', 'relations_sha256',
                          'target_record_sha256', 'screen_policy_sha256', 'screened_request_sha256')
         if (set(metadata) != metadata_fields or metadata.get('task') != USER_REQUEST_TASK
@@ -288,6 +312,7 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                 or metadata.get('total_agent_count') is not None or metadata.get('promotion_eligible') is not False
                 or metadata.get('training_assignment') != 'train' or metadata.get('split_policy') != 'exploratory_train'
                 or metadata.get('heldout_separation') != 'unknown'
+                or metadata.get('source_representation') != manifest['source_representation']
                 or type(metadata.get('user_text_utf8_bytes')) is not int
                 or metadata['user_text_utf8_bytes'] != manifest['user_text_utf8_bytes']
                 or any(not isinstance(metadata.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', metadata[key])
@@ -302,6 +327,12 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                 or metadata['screen_policy_sha256'] != manifest['screen_policy_sha256']
                 or metadata['screened_request_sha256'] != manifest['screened_request_sha256']):
             raise ValueError('user-request SFT record contains unsupported claims')
+        if manifest['source_representation'] == 'verified_posix_single_message_projection':
+            if (metadata.get('projection_sha256') != manifest['projection_sha256']
+                    or metadata.get('byte_exact_to_screened') is not True
+                    or metadata.get('windows_origin_claims') != manifest['windows_origin_claims']
+                    or metadata.get('projection_sha256') != metadata.get('user_text_sha256')):
+                raise ValueError('record projection evidence differs from the manifest')
         system, user, assistant = (message['content'] for message in messages)
         if (sha(system.encode('utf-8')) != manifest['system_prompt_sha256']
                 or sha(user.encode('utf-8')) != metadata['screened_request_sha256']):

@@ -166,6 +166,54 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertTrue(records[0]['bytes'].startswith(expected_prefix))
         self.assertEqual(records[0]['response_start'], len(expected_prefix))
 
+    def test_screened_single_message_projection_keeps_windows_origin_claims_unverified(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': '3' * 64,
+        }
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        manifest = envelope['manifest']
+        metadata = envelope['train_records'][0]['metadata']
+        self.assertEqual(manifest['source_representation'], 'verified_posix_single_message_projection')
+        self.assertTrue(manifest['byte_exact_to_screened'])
+        self.assertEqual(manifest['projection_sha256'], metadata['user_text_sha256'])
+        self.assertEqual(manifest['windows_origin_claims']['origin_verification'], 'unverified_claim')
+        self.assertEqual(metadata['windows_origin_claims'], manifest['windows_origin_claims'])
+        import train_owned_assessment_sft as trainer
+        train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        train_config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                            max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', train_config)
+        self.assertEqual(coverage['training_task'], user_request_sft.TASK)
+        self.assertEqual(len(records), 1)
+
+    def test_projection_claims_malformed_or_screened_content_changed_rejected(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['windows_origin_projection_claims'] = {
+            'schema_version': user_request_sft.WINDOWS_PROJECTION_CLAIMS_SCHEMA,
+            'origin_platform': 'windows', 'origin_verification': 'verified',
+            'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
+            'user_text_sha256_claim': '3' * 64,
+        }
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'unverified Windows-origin'):
+            self._build()
+        caller['windows_origin_projection_claims']['origin_verification'] = 'unverified_claim'
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        altered_policy = json.loads(self.policy.read_bytes())
+        altered_policy['rules'] = [{'id': 'fixture-model', 'pattern': 'Model Z', 'replacement': '[redacted]'}]
+        changed_policy = self.root / 'changed-screen.json'
+        changed_policy.write_text(json.dumps(altered_policy), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'already-screened single-message'):
+            user_request_sft.build_dataset(None, self.snapshot_path, None, self.obs_config_path,
+                self.sft_config_path, changed_policy, self.root / 'dataset.json',
+                caller_input_path=self.caller_input_path)
+
     @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors')),
                          'torch and safetensors required for one-step fixture training')
     def test_user_request_task_runs_one_private_fixture_step(self):

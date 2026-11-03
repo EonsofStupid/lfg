@@ -78,3 +78,13 @@ input, and separate task evaluation are future work. The example config and
 fixtures demonstrate the data path only; a passing fixture test is not evidence
 of useful generalization. The adapter currently accepts one source request per
 dataset file. It does not automatically assemble a representative corpus.
+
+For a Windows-origin request that cannot be safely verified on its source
+host, the caller may add `windows_origin_projection_claims` to the caller input.
+The adapter accepts it only with a separately verified POSIX file containing
+one selected user message, no later bytes, and text unchanged by the configured
+screening policy. The POSIX projection digest is verified source evidence; the
+Windows line, prefix, and text digests remain separate `unverified_claim`
+fields. The dataset calls the source a projection, never the Windows original.
+Split assignment and heldout independence remain unknown. Do not transfer a
+full session to create this projection.
