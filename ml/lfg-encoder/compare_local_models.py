@@ -71,6 +71,7 @@ def load_config(path: Path) -> dict:
             or type(value.get('startup_timeout_seconds')) not in (int, float) or value['startup_timeout_seconds'] <= 0
             or not isinstance(value.get('collection'), dict)
             or not isinstance(value.get('instruction_suffix', ''), str)
+            or ('instruction' in value and (not isinstance(value['instruction'], str) or not value['instruction'].strip()))
             or not isinstance(value.get('complexity_levels'), dict) or not value['complexity_levels']
             or any(type(k) is not int for k in value['complexity_levels'].values())
             or not isinstance(models, list) or not models):
@@ -127,7 +128,7 @@ def write_selection(reference: list[dict], directory: Path, reference_sha256: st
 def write_collection_config(config: dict, model: dict, identity: str, system: str, path: Path) -> None:
     atomic_json(path, {**config['collection'], 'endpoint': f"http://127.0.0.1:{config['port']}/v1/chat/completions",
                        'model': model['id'], 'teacher_identity': identity,
-                       'system_prompt': system + config.get('instruction_suffix', ''),
+                       'system_prompt': config.get('instruction', system) + config.get('instruction_suffix', ''),
                        'api_key_env': API_KEY_ENV, 'request_extensions': model.get('request_extensions', {})})
 
 

@@ -109,7 +109,9 @@ but no teacher responses have been collected for it.
 `compare_local_models.py` starts each configured model on loopback with a per-run key,
 sends it the same requests and instruction as a completed teacher dataset through this
 collector, and writes aggregate results with no request text. A configured suffix can name
-the teacher's answer labels so answers can be compared. The server command is configurable,
+the teacher's answer labels so answers can be compared, and a configured `instruction`
+replaces the teacher's instruction to try new wording, in which case agreement no longer
+compares like with like. The server command is configurable,
 so vLLM or `llama-server` can be used. It reports agreement with
 the teacher on complexity and agent count, the score from always choosing the teacher's
 most common answer, and speed. The reference is unreviewed, so agreement is not accuracy.

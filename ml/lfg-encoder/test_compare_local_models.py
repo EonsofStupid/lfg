@@ -203,6 +203,23 @@ class ComparisonJobTests(unittest.TestCase):
         written = json.loads((self.root / 'output/models/small-model/collection.json').read_text(encoding='utf-8'))
         self.assertEqual(written['system_prompt'], SYSTEM + ' Use low, medium or high.')
 
+    def test_configured_instruction_replaces_the_teacher_instruction(self):
+        self.config_value['instruction'] = 'Assess this request using the listed models.'
+        self.config.write_text(json.dumps(self.config_value), encoding='utf-8')
+        answers = json.loads(self.answers.read_text(encoding='utf-8'))
+        answers['system'] = 'Assess this request using the listed models.'
+        self.answers.write_text(json.dumps(answers), encoding='utf-8')
+        report = subject.experiment(self.config)
+        self.assertEqual(report['models']['small-model']['answered'], 3)
+        written = json.loads((self.root / 'output/models/small-model/collection.json').read_text(encoding='utf-8'))
+        self.assertEqual(written['system_prompt'], 'Assess this request using the listed models.')
+
+    def test_blank_instruction_is_rejected(self):
+        self.config_value['instruction'] = '  '
+        self.config.write_text(json.dumps(self.config_value), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            subject.load_config(self.config)
+
     def test_finished_model_is_not_started_again(self):
         subject.experiment(self.config)
         first = (self.root / 'output/models/small-model/segments.json').read_text(encoding='utf-8')
