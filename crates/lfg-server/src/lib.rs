@@ -32,6 +32,9 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 mod boundary_questions;
 mod dev_stats;
 mod devpulse_context;
+mod feedback;
+#[cfg(windows)]
+mod feedback_windows;
 #[cfg(feature = "embedded-node")]
 mod embedded_node {
     include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
@@ -393,6 +396,26 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Adds the private feedback API only after the actual listener identity is known.
+pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
+    router(state).merge(feedback::FeedbackApi::for_listener(listener).routes())
+}
+
+pub fn router_with_ui_and_listener(
+    state: AppState,
+    ui_directory: impl AsRef<std::path::Path>,
+    listener: std::net::SocketAddr,
+) -> Router {
+    let ui_directory = ui_directory.as_ref().to_path_buf();
+    router_with_listener(state, listener).fallback_service(
+        tower_http::services::ServeDir::new(&ui_directory)
+            .append_index_html_on_directories(true)
+            .fallback(tower_http::services::ServeFile::new(
+                ui_directory.join("index.html"),
+            )),
+    )
+}
+
 async fn lfg_boundary_questions(
     State(state): State<AppState>,
 ) -> (
@@ -688,6 +711,14 @@ pub fn router_with_ui(state: AppState, ui_directory: impl AsRef<std::path::Path>
 #[cfg(feature = "embedded-ui")]
 pub fn router_with_embedded_ui(state: AppState) -> Router {
     router(state).fallback(embedded_ui::serve)
+}
+
+#[cfg(feature = "embedded-ui")]
+pub fn router_with_embedded_ui_and_listener(
+    state: AppState,
+    listener: std::net::SocketAddr,
+) -> Router {
+    router_with_listener(state, listener).fallback(embedded_ui::serve)
 }
 
 async fn health() -> Json<HealthResponse> {
