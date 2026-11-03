@@ -78,7 +78,9 @@ produced 95 additional contextual requests across 11 declared project labels;
 four candidates lacked usable prior context and two failed source verification.
 Eighty-four selected context windows were truncated by the configured bounds.
 The validation and test sources were not opened. The selection remains
-unreviewed and its teacher collection is a separate, resumable local job.
+unreviewed. Its resumable local teacher job produced 94 responses and recorded
+one incomplete response. The resulting 470-record combined dataset was
+delivered to the Spark and accepted for another checkpointed fine-tune.
 
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `

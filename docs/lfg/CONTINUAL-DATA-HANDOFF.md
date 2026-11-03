@@ -59,6 +59,10 @@ The dashboard can also display a separately configured training status via
 `--additional-status`. It exposes only the same bounded, sanitized progress
 fields as the primary status. The lab's teacher panel can point at the
 currently selected collection rather than a completed earlier batch.
+The owner also started an isolated 5,000-step continuation from the completed
+376-record checkpoint and a separate development-format check. This is an
+experiment on the same data; it does not replace the queue's checkpoint or
+automatically promote its results.
 
 ## Local deployment evidence
 

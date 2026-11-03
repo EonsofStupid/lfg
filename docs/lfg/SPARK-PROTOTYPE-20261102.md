@@ -23,6 +23,11 @@ generator, so a person using the UI is not yet seeing the model's assessment.
 The most recent separately evaluated 369-record checkpoint returned required
 fields in four of ten reused development requests; five outputs were invalid
 JSON and one omitted fields. This does not evaluate recommendation accuracy.
+The subsequent 376-record checkpoint produced seven objects with the required
+fields and three invalid JSON responses on the same reused ten cases. These
+numbers are format diagnostics, not a claim that the model's recommendations
+are correct. A further 470-record update is running on new contextualized
+owner requests; its result was not available when this note was written.
 
 A small CPU diagnostic used one actual owner request with the configured
 training framing, one warmup, three measured repetitions, and an eight-byte
