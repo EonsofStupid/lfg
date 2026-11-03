@@ -30,6 +30,28 @@ const CONFIG_ENV: &str = "LFG_OWNED_ASSESSMENT_CONFIG";
 const TOKEN_ENV: &str = "LFG_OWNED_ASSESSMENT_TOKEN";
 const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Backend {
+    LegacyFullPrefix,
+    CachedOnnx,
+}
+
+fn default_backend() -> Backend {
+    Backend::LegacyFullPrefix
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactMode {
+    Directory,
+    Embedded,
+}
+
+fn default_artifact_mode() -> ArtifactMode {
+    ArtifactMode::Directory
+}
+
 #[derive(Clone)]
 struct Api {
     listener: SocketAddr,
@@ -45,7 +67,18 @@ struct Api {
 struct Config {
     schema_version: String,
     enabled: bool,
-    artifact_directory: PathBuf,
+    #[serde(default = "default_backend")]
+    backend: Backend,
+    #[serde(default = "default_artifact_mode")]
+    artifact_mode: ArtifactMode,
+    #[serde(default)]
+    artifact_directory: Option<PathBuf>,
+    #[serde(default)]
+    expected_cached_manifest_sha256: Option<String>,
+    #[serde(default)]
+    max_cached_graph_bytes: Option<u64>,
+    #[serde(default, rename = "maxCacheStateBytesPerRequest")]
+    max_cache_bytes: Option<u64>,
     framing_file: PathBuf,
     training_manifest_file: PathBuf,
     runtime_config_file: PathBuf,
@@ -89,6 +122,7 @@ enum OutputType {
 #[derive(Clone)]
 struct Service {
     config: Config,
+    backend: Backend,
     engine: Value,
     system: String,
     framing: Framing,
@@ -246,9 +280,12 @@ async fn status(
         "status":status,
         "engine":service.map(|s| s.engine.clone()),
         "limits":service.map(|s| json!({
+            "backend":match s.backend { Backend::LegacyFullPrefix => "legacy_full_prefix", Backend::CachedOnnx => "cached_onnx" },
             "maxRequestBytes":s.config.max_request_bytes,
             "maxContextBytes":s.config.max_context_bytes,
             "maxGeneratedBytes":s.config.max_generated_bytes,
+            "maxCachedGraphBytes":s.config.max_cached_graph_bytes,
+            "maxCacheStateBytesPerRequest":s.config.max_cache_bytes,
             "timeoutMs":s.config.timeout_ms,
             "maxConcurrent":s.config.max_concurrent,
             "workerThreads":s.config.worker_threads
@@ -446,18 +483,78 @@ async fn run_inference(
             );
         }
     };
-    let artifact = config.artifact_directory.clone();
     let runtime = config.runtime_config_file.clone();
     let mut command = Command::new(exe);
-    command
-        .args(["owned-byte-generate", "--experimental", "--artifact"])
-        .arg(artifact)
-        .arg("--manifest-sha256")
-        .arg(
-            service.engine["modelManifestSha256"]
+    match service.backend {
+        Backend::LegacyFullPrefix => {
+            let Some(artifact) = config.artifact_directory.as_ref() else {
+                return response(
+                    "unavailable",
+                    Some(service.engine.clone()),
+                    started,
+                    None,
+                    None,
+                    None,
+                );
+            };
+            command
+                .args(["owned-byte-generate", "--experimental", "--artifact"])
+                .arg(artifact)
+                .arg("--manifest-sha256")
+                .arg(
+                    service.engine["modelManifestSha256"]
+                        .as_str()
+                        .unwrap_or_default(),
+                );
+        }
+        Backend::CachedOnnx => {
+            let manifest_sha = service.engine["cachedManifestSha256"]
                 .as_str()
-                .unwrap_or_default(),
-        )
+                .unwrap_or_default();
+            let model_sha = service.engine["modelSha256"].as_str().unwrap_or_default();
+            match config.artifact_mode {
+                ArtifactMode::Directory => {
+                    let Some(artifact) = config.artifact_directory.as_ref() else {
+                        return response(
+                            "unavailable",
+                            Some(service.engine.clone()),
+                            started,
+                            None,
+                            None,
+                            None,
+                        );
+                    };
+                    command
+                        .args(["owned-byte-cached-generate", "--experimental", "--artifact"])
+                        .arg(artifact)
+                        .arg("--manifest-sha256")
+                        .arg(manifest_sha)
+                        .arg("--model-sha256")
+                        .arg(model_sha)
+                        .arg("--max-total-graph-bytes")
+                        .arg(
+                            config
+                                .max_cached_graph_bytes
+                                .unwrap_or_default()
+                                .to_string(),
+                        )
+                        .arg("--max-cache-state-bytes-per-request")
+                        .arg(config.max_cache_bytes.unwrap_or_default().to_string());
+                }
+                ArtifactMode::Embedded => {
+                    command
+                        .args(["embedded-owned-byte-cached-generate", "--experimental"])
+                        .arg("--manifest-sha256")
+                        .arg(manifest_sha)
+                        .arg("--model-sha256")
+                        .arg(model_sha)
+                        .arg("--max-cache-state-bytes-per-request")
+                        .arg(config.max_cache_bytes.unwrap_or_default().to_string());
+                }
+            }
+        }
+    }
+    command
         .arg("--runtime-config")
         .arg(runtime)
         .arg("--runtime-config-sha256")
@@ -684,6 +781,10 @@ fn valid_output_policy(required: &[RequiredField]) -> bool {
         }
     }
     true
+}
+
+fn valid_assistant_stop(stop: &str, max_generated_bytes: usize) -> bool {
+    stop.len() <= max_generated_bytes
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -937,6 +1038,15 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
         || config.max_concurrent == 0
         || config.max_concurrent > Semaphore::MAX_PERMITS
         || config.worker_threads == 0
+        || (config.backend == Backend::CachedOnnx
+            && (config
+                .expected_cached_manifest_sha256
+                .as_deref()
+                .is_none_or(|hash| {
+                    hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                || config.max_cached_graph_bytes.is_none_or(|bytes| bytes == 0)
+                || config.max_cache_bytes.is_none_or(|bytes| bytes == 0)))
     {
         return Err("invalid_configuration");
     }
@@ -951,25 +1061,116 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
     {
         return Err("invalid_runtime_configuration");
     }
-    let manifest_path = config.artifact_directory.join("manifest.json");
-    let model_path = config.artifact_directory.join("model.onnx");
-    let manifest_raw = read_bounded(&manifest_path, runtime.max_manifest_bytes)?;
-    let manifest: Value = serde_json::from_slice(&manifest_raw).map_err(|_| "invalid_artifact")?;
-    let (model_sha, _) = digest_file(&model_path, runtime.max_model_bytes)?;
-    if manifest["schema_version"] != "lfg.owned-byte-onnx.v1"
-        || !is_sha256_value(&manifest["model_sha256"])
-        || !is_sha256_value(&manifest["source_weights_sha256"])
-        || !is_sha256_value(&manifest["source_manifest_sha256"])
-        || config.expected_model_sha256.len() != 64
+    if config.expected_model_sha256.len() != 64
         || !config
             .expected_model_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
-        || manifest["model_sha256"].as_str() != Some(model_sha.as_str())
-        || model_sha != config.expected_model_sha256
     {
         return Err("artifact_identity_mismatch");
     }
+    let (
+        manifest,
+        model_sha,
+        model_manifest_sha,
+        cached_manifest_sha,
+        prefill_sha,
+        decode_sha,
+        context,
+    ) = match config.backend {
+        Backend::LegacyFullPrefix => {
+            if config.artifact_mode != ArtifactMode::Directory {
+                return Err("invalid_configuration");
+            }
+            let artifact = config
+                .artifact_directory
+                .as_ref()
+                .ok_or("invalid_configuration")?;
+            let manifest_path = artifact.join("manifest.json");
+            let model_path = artifact.join("model.onnx");
+            let manifest_raw = read_bounded(&manifest_path, runtime.max_manifest_bytes)?;
+            let manifest: Value =
+                serde_json::from_slice(&manifest_raw).map_err(|_| "invalid_artifact")?;
+            let (model_sha, _) = digest_file(&model_path, runtime.max_model_bytes)?;
+            if manifest["schema_version"] != "lfg.owned-byte-onnx.v1"
+                || !is_sha256_value(&manifest["model_sha256"])
+                || !is_sha256_value(&manifest["source_weights_sha256"])
+                || !is_sha256_value(&manifest["source_manifest_sha256"])
+                || manifest["model_sha256"].as_str() != Some(model_sha.as_str())
+                || model_sha != config.expected_model_sha256
+            {
+                return Err("artifact_identity_mismatch");
+            }
+            let manifest_sha = digest(&manifest_raw);
+            let context = manifest["context"].clone();
+            (
+                manifest,
+                model_sha,
+                manifest_sha,
+                None::<String>,
+                None::<String>,
+                None::<String>,
+                context,
+            )
+        }
+        Backend::CachedOnnx => {
+            #[cfg(not(feature = "owned-byte-onnx"))]
+            {
+                return Err("owned_runtime_not_built");
+            }
+            #[cfg(feature = "owned-byte-onnx")]
+            {
+                let expected_manifest = config
+                    .expected_cached_manifest_sha256
+                    .as_deref()
+                    .unwrap_or_default();
+                let graph_limit = config.max_cached_graph_bytes.unwrap_or_default();
+                let cache_limit = config.max_cache_bytes.unwrap_or_default();
+                let identity = match config.artifact_mode {
+                    ArtifactMode::Directory => {
+                        let artifact = config
+                            .artifact_directory
+                            .as_ref()
+                            .ok_or("invalid_configuration")?;
+                        super::owned_cached::validate_directory(
+                            artifact,
+                            expected_manifest,
+                            &config.expected_model_sha256,
+                            runtime.max_manifest_bytes,
+                            runtime.max_context,
+                            runtime.max_model_bytes,
+                            graph_limit,
+                            cache_limit,
+                        )
+                    }
+                    ArtifactMode::Embedded => super::owned_cached::validate_embedded(
+                        expected_manifest,
+                        &config.expected_model_sha256,
+                        runtime.max_manifest_bytes,
+                        runtime.max_context,
+                        runtime.max_model_bytes,
+                        graph_limit,
+                        cache_limit,
+                    ),
+                }
+                .map_err(|_| "cached_artifact_invalid")?;
+                let manifest = json!({
+                    "source_weights_sha256":identity.model_sha256,
+                    "source_manifest_sha256":identity.source_manifest_sha256,
+                    "context":identity.context
+                });
+                (
+                    manifest,
+                    identity.model_sha256,
+                    identity.manifest_sha256.clone(),
+                    Some(identity.manifest_sha256),
+                    Some(identity.prefill_onnx_sha256),
+                    Some(identity.decode_onnx_sha256),
+                    json!(identity.context),
+                )
+            }
+        }
+    };
     let framing_raw = read_bounded(&config.framing_file, config.max_metadata_bytes)?;
     let framing_sha = digest(&framing_raw);
     if framing_sha != config.expected_framing_sha256 {
@@ -979,6 +1180,12 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
         serde_json::from_slice(&framing_raw).map_err(|_| "invalid_framing")?;
     let framing_envelope: FramingEnvelope =
         serde_json::from_value(framing_json.clone()).map_err(|_| "invalid_framing")?;
+    if !valid_assistant_stop(
+        &framing_envelope.framing.assistant_suffix,
+        config.max_generated_bytes,
+    ) {
+        return Err("runtime_limits_mismatch");
+    }
     let training_raw = read_bounded(&config.training_manifest_file, config.max_metadata_bytes)?;
     let training: Value =
         serde_json::from_slice(&training_raw).map_err(|_| "invalid_training_manifest")?;
@@ -1004,19 +1211,26 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
         return Err("runtime_limits_mismatch");
     }
     let engine = json!({
-        "id":"lfg-owned-byte-onnx-experimental",
+        "id":if config.backend == Backend::CachedOnnx { "lfg-owned-byte-cached-onnx-experimental" } else { "lfg-owned-byte-onnx-experimental" },
+        "inferenceBackend":if config.backend == Backend::CachedOnnx { "cached_onnx" } else { "legacy_full_prefix" },
+        "modelIdentityKind":if config.backend == Backend::CachedOnnx { "source_weights_sha256" } else { "onnx_graph_sha256" },
         "modelSha256":model_sha,
-        "modelManifestSha256":digest(&manifest_raw),
+        "modelManifestSha256":model_manifest_sha,
+        "cachedManifestSha256":cached_manifest_sha,
+        "prefillOnnxSha256":prefill_sha,
+        "decodeOnnxSha256":decode_sha,
+        "sourceWeightsSha256":if config.backend == Backend::CachedOnnx { Some(model_sha.clone()) } else { None },
         "trainingManifestSha256":digest(&training_raw),
         "framingSha256":framing_sha,
         "runtimeConfigSha256":digest(&runtime_raw),
         "serviceConfigSha256":digest(&raw),
-        "contextBytes":manifest["context"]
+        "contextBytes":context
     });
     let runtime_sha256 = digest(&runtime_raw);
     let runtime_max_bytes = config.max_runtime_config_bytes;
     Ok(Some(Service {
         permits: Arc::new(Semaphore::new(config.max_concurrent)),
+        backend: config.backend,
         config,
         engine,
         system: framing_envelope.system,
@@ -1038,6 +1252,13 @@ mod tests {
         assert!(
             serde_json::from_slice::<InferRequest>(br#"{"text":"hello","extension":7}"#).is_ok()
         );
+    }
+
+    #[test]
+    fn assistant_stop_suffix_must_fit_generation_limit() {
+        assert!(valid_assistant_stop("END", 3));
+        assert!(!valid_assistant_stop("END!", 3));
+        assert!(valid_assistant_stop("", 0));
     }
 
     #[test]
@@ -1178,6 +1399,26 @@ mod tests {
         assert_eq!(
             validate_output(non_object, &required),
             Err(OutputProblem::Malformed)
+        );
+    }
+
+    #[test]
+    fn example_policy_accepts_training_shape_without_inventing_recommendations() {
+        let config: Config = serde_json::from_str(include_str!(
+            "../config/owned-assessment-service.example.json"
+        ))
+        .unwrap();
+        let proposal = json!({
+            "intent": "build",
+            "complexity": "unknown",
+            "suggested_models": [],
+            "agent_count": 0,
+            "reasons": ["availability not supplied"],
+            "extension": {"preserved": true}
+        });
+        assert_eq!(
+            validate_output(proposal.clone(), &config.required_output_fields),
+            Ok(proposal)
         );
     }
 

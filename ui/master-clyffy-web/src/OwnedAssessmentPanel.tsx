@@ -92,9 +92,10 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
         {proposal && <dl className="owned-fields">
           <div><dt>Intent</dt><dd>{display(proposal.intent)}</dd></div>
           <div><dt>Complexity</dt><dd>{display(proposal.complexity)}</dd></div>
-          <div><dt>Suggested models</dt><dd>{display(proposal.suggested_models)}</dd></div>
-          <div><dt>Agent count</dt><dd>{display(proposal.agent_count)}</dd></div>
-          <div><dt>Reason</dt><dd>{display(proposal.reason)}</dd></div>
+          <div><dt>Suggested models</dt><dd>{Array.isArray(proposal.suggested_models) && proposal.suggested_models.length === 0 ? 'No models suggested' : display(proposal.suggested_models)}</dd></div>
+          <div><dt>Agent count</dt><dd>{proposal.agent_count === 0 ? 'No agents suggested' : display(proposal.agent_count)}</dd></div>
+          {proposal.reasons !== undefined && <div><dt>Reasons</dt><dd>{Array.isArray(proposal.reasons) ? <ul>{proposal.reasons.map((reason, index) => <li key={index}>{display(reason)}</li>)}</ul> : display(proposal.reasons)}</dd></div>}
+          {proposal.reason !== undefined && <div><dt>Reason</dt><dd>{display(proposal.reason)}</dd></div>}
         </dl>}
         {result.outputText && <details><summary>Show raw model output</summary><pre>{result.outputText}</pre></details>}
       </div>}

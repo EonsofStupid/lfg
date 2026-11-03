@@ -199,6 +199,54 @@ enum Command {
         #[arg(long)]
         experimental: bool,
     },
+    /// Generate bounded bytes with verified cached prefill/decode ONNX graphs.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteCachedGenerate {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        model_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        runtime_config_sha256: String,
+        #[arg(long)]
+        runtime_config_max_bytes: u64,
+        #[arg(long)]
+        max_total_graph_bytes: u64,
+        #[arg(long)]
+        max_cache_state_bytes_per_request: u64,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with embedded cached prefill/decode graphs.
+    #[cfg(feature = "embedded-owned-cached-byte")]
+    EmbeddedOwnedByteCachedGenerate {
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        model_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        runtime_config_sha256: String,
+        #[arg(long)]
+        runtime_config_max_bytes: u64,
+        #[arg(long)]
+        max_cache_state_bytes_per_request: u64,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
     /// Generate bounded bytes with the embedded unqualified owned model.
     #[cfg(feature = "embedded-owned-byte")]
     EmbeddedOwnedByteGenerate {
@@ -480,6 +528,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime_config_sha256.as_deref(),
                 runtime_config_max_bytes,
             )?;
+        }
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteCachedGenerate {
+            artifact,
+            manifest_sha256,
+            model_sha256,
+            runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
+            max_total_graph_bytes,
+            max_cache_state_bytes_per_request,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("cached owned byte generation requires --experimental".into());
+            }
+            lfg_server::owned_cached::generate_directory(
+                &artifact,
+                &manifest_sha256,
+                &model_sha256,
+                &runtime_config,
+                &runtime_config_sha256,
+                runtime_config_max_bytes,
+                max_total_graph_bytes,
+                max_cache_state_bytes_per_request,
+                max_new_bytes,
+                stop.as_deref(),
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(feature = "embedded-owned-cached-byte")]
+        Command::EmbeddedOwnedByteCachedGenerate {
+            manifest_sha256,
+            model_sha256,
+            runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
+            max_cache_state_bytes_per_request,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("embedded cached generation requires --experimental".into());
+            }
+            lfg_server::owned_cached::generate_embedded(
+                &manifest_sha256,
+                &model_sha256,
+                &runtime_config,
+                &runtime_config_sha256,
+                runtime_config_max_bytes,
+                max_cache_state_bytes_per_request,
+                max_new_bytes,
+                stop.as_deref(),
+            )
+            .map_err(std::io::Error::other)?;
         }
         #[cfg(feature = "embedded-owned-byte")]
         Command::EmbeddedOwnedByteGenerate {
