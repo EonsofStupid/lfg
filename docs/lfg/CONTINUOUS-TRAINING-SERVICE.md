@@ -11,6 +11,17 @@ from owning the same state directory. A completed run remains available for
 status inspection; it does not automatically replay its corpus. Use a new
 state directory for a new job or changed service/trainer configuration.
 
+For a new distillation job on an expanded corpus, the service configuration may
+set `initial_checkpoint` to an absolute path containing a completed owned
+distillation result and its weights. The trainer verifies the source manifest,
+weights, model implementation and exact architecture. It starts a fresh
+optimizer and records the source manifest and weights hashes in both the
+resumable checkpoint identity and completed result. Every segment rechecks the
+source; changing it causes the run to fail rather than silently changing the
+lineage. Normal resume restores the new run's optimizer and RNG state. This is
+continued pretraining, not a claim that assessment quality improved; evaluate
+and fine-tune separately before considering any model update.
+
 The [service configuration](../../ml/lfg-encoder/owned-training-service.example.json)
 and [systemd unit](../../ml/lfg-encoder/systemd/owned-training.service.example)
 are examples to configure for the host, not recommended fixed limits. Keep the
@@ -191,3 +202,15 @@ The completed
 earlier assessment services used
 the prior trainer implementation; the final-checkpoint recovery improvement
 applies to new jobs, not migrations of their pinned checkpoints.
+
+Another train-only source selection staged 1,466 screened project files from
+RRFlow, DevPULSE and LFG, including documentation and code in additional
+languages. Combined with the prior source corpus, and excluding three exact
+content duplicates, the Spark verified a 2,082-document, 23,623,599-byte
+training corpus. Screening replaced many possible secrets or opaque values and
+skipped one file; it is not a guarantee of complete redaction or data quality.
+An owned 100,000-step continuation started from the completed earlier
+pretraining weights with a fresh optimizer, and its first checkpoint recorded
+the expected source-weight identity. Separate enabled services wait to
+fine-tune its result on the 470-record assessment dataset and run the reused
+development-format check. This candidate is not automatically promoted.
