@@ -1248,6 +1248,26 @@ mod tests {
     }
 
     #[test]
+    fn example_policy_accepts_training_shape_without_inventing_recommendations() {
+        let config: Config = serde_json::from_str(include_str!(
+            "../config/owned-assessment-service.example.json"
+        ))
+        .unwrap();
+        let proposal = json!({
+            "intent": "build",
+            "complexity": "unknown",
+            "suggested_models": [],
+            "agent_count": 0,
+            "reasons": ["availability not supplied"],
+            "extension": {"preserved": true}
+        });
+        assert_eq!(
+            validate_output(proposal.clone(), &config.required_output_fields),
+            Ok(proposal)
+        );
+    }
+
+    #[test]
     fn provenance_links_reject_missing_null_and_wrong_type_hashes() {
         let weights = "a".repeat(64);
         let config = "b".repeat(64);

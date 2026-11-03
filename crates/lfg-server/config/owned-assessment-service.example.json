@@ -12,9 +12,9 @@
   "requiredOutputFields": [
     { "name": "intent", "valueType": "string", "nonEmpty": true },
     { "name": "complexity", "valueType": "string", "nonEmpty": true },
-      { "name": "suggested_models", "valueType": "array" },
-      { "name": "agent_count", "valueType": "integer", "minInteger": 0 },
-      { "name": "reasons", "valueType": "array", "nonEmpty": true }
+    { "name": "suggested_models", "valueType": "array" },
+    { "name": "agent_count", "valueType": "integer", "minInteger": 0 },
+    { "name": "reasons", "valueType": "array", "nonEmpty": true }
   ],
   "maxHttpBodyBytes": 65536,
   "maxRequestBytes": 8192,
