@@ -20,7 +20,9 @@ test('sends exact context bytes with their digest and preserves response extensi
     status: 'ok', elapsedMs: 2, engine: null, projectContextSha256: digest, extension,
   })))
   vi.stubGlobal('fetch', fetcher)
-  const result = await ownedAssessmentClient.assess('request', 'local-token', { context, contextSha256: digest, requestExtension: extension })
+  const result = await ownedAssessmentClient.assess('request', 'local-token', {
+    context, contextSha256: digest, requestExtension: extension, text: 'extension prompt must not replace request',
+  })
   expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({ text: 'request', context, contextSha256: digest, requestExtension: extension })
   expect(result.projectContextSha256).toBe(digest)
   expect(result.extension).toEqual(extension)

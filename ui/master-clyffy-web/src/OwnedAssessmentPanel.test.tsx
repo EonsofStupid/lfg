@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
-import type { OwnedAssessmentClient, OwnedResult } from './ownedAssessmentApi'
+import type { OwnedAssessmentClient, OwnedResult, OwnedStatus } from './ownedAssessmentApi'
 import type { Assessment } from './types'
 
 const deterministic = { intent: { primary: 'build' }, complexity: { bracket: 'moderate' }, agents: { total: 2 } } as Assessment
@@ -71,6 +71,21 @@ test.each([
   expect(onResult).toHaveBeenLastCalledWith(null)
 })
 
+test('quarantines an unsolicited context digest when no context was submitted', async () => {
+  const api = client()
+  const onResult = vi.fn()
+  vi.mocked(api.assess).mockResolvedValue({ status: 'ok', engine: { id: 'owned-test' }, elapsedMs: 3,
+    projectContextSha256: 'f'.repeat(64), output: { intent: 'research' } })
+  render(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} onResult={onResult} />)
+  await connect()
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  expect(await screen.findByText('research')).toBeInTheDocument()
+  expect(screen.queryByText(/matching project context digest/)).not.toBeInTheDocument()
+  const acceptedResult = onResult.mock.calls.at(-1)?.[0]
+  expect(acceptedResult).not.toHaveProperty('projectContextSha256')
+  expect(api.assess).toHaveBeenCalledWith('request', 'test-token')
+})
+
 test('counts exact JSON UTF-8 bytes and does not send an oversized context request', async () => {
   const api = client()
   vi.mocked(api.status).mockResolvedValue({ enabled: true, status: 'ready', engine: { id: 'owned-test' },
@@ -81,6 +96,15 @@ test('counts exact JSON UTF-8 bytes and does not send an oversized context reque
   expect(screen.getByRole('alert')).toHaveTextContent('including the context digest')
   expect(screen.getByRole('button', { name: 'Run owned model' })).toBeDisabled()
   expect(api.assess).not.toHaveBeenCalled()
+})
+
+test('reports an unknown owned-route body cap instead of borrowing another status limit', async () => {
+  const api = client()
+  vi.mocked(api.status).mockResolvedValue({ enabled: true, status: 'ready', engine: { id: 'owned-test' },
+    limits: { maxRequestBytes: 1000, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } })
+  render(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} />)
+  await connect()
+  expect(screen.getByText(/The owned route HTTP body limit is not advertised/)).toBeInTheDocument()
 })
 
 test('fails visibly without sending when context hashing is unavailable', async () => {
@@ -141,6 +165,33 @@ test('does not persist supplied context in browser storage', async () => {
   await connect()
   fireEvent.change(screen.getByLabelText('Optional project context (owner-supplied, unverified)'), { target: { value: 'private context' } })
   expect(setItem).not.toHaveBeenCalled()
+})
+
+test('ignores an older connection response after a newer token connects', async () => {
+  const api = client()
+  let resolveFirst!: (value: OwnedStatus) => void
+  let resolveSecond!: (value: OwnedStatus) => void
+  vi.mocked(api.status)
+    .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+    .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
+  render(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} />)
+  const token = screen.getByLabelText('Owned model token')
+  fireEvent.change(token, { target: { value: 'first-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  const context = screen.getByLabelText('Optional project context (owner-supplied, unverified)')
+  fireEvent.change(context, { target: { value: 'editing context does not unlock connection' } })
+  expect(screen.getByRole('button', { name: 'Connecting…' })).toBeDisabled()
+  fireEvent.change(token, { target: { value: 'second-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  const ready: OwnedStatus = { enabled: true, status: 'ready', engine: { id: 'second-engine' }, limits: { maxRequestBytes: 1000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } }
+  resolveSecond(ready)
+  expect(await screen.findByText(/Model status: ready/)).toBeInTheDocument()
+  resolveFirst({ enabled: false, status: 'unavailable', engine: null, reason: 'stale-first-token' })
+  await waitFor(() => expect(screen.queryByText(/stale-first-token/)).not.toBeInTheDocument())
+  fireEvent.change(context, { target: { value: '' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  expect(await screen.findByText('research')).toBeInTheDocument()
+  expect(api.assess).toHaveBeenCalledWith('request', 'second-token')
 })
 
 test('reports malformed or truncated output without inventing assessment fields', async () => {

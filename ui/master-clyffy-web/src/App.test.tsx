@@ -47,13 +47,15 @@ const classification = {
   } }]
 }
 let appContext: { schemaVersion: string; status: string; revision: string | null; pollIntervalMs: number | null; providers: unknown[] | null }
+let ownedAssessmentBodyLimit = 3000
 beforeEach(() => {
+  ownedAssessmentBodyLimit = 3000
   appContext = {schemaVersion: 'lfg.app-context.v1', status: 'disabled', revision: null, pollIntervalMs: null, providers: null}
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session' })
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
-    if (path.endsWith('/api/lfg/assess/owned/status')) return new Response(JSON.stringify({ enabled: true, status: 'ready', engine: { id: 'owned-test' }, limits: { maxRequestBytes: 1000, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } }))
+    if (path.endsWith('/api/lfg/assess/owned/status')) return new Response(JSON.stringify({ enabled: true, status: 'ready', engine: { id: 'owned-test' }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: ownedAssessmentBodyLimit, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } }))
     if (path.endsWith('/api/lfg/assess/owned')) {
       const body = JSON.parse(String(init?.body))
       return new Response(JSON.stringify({ status: 'ok', elapsedMs: 3, engine: { id: 'owned-test' }, projectContextSha256: body.contextSha256, output: { intent: 'research' } }))
@@ -167,7 +169,7 @@ test('uses the configured UTF-8 byte limit for multibyte input', async () => {
   expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).not.toBeDisabled()
 })
 
-test('passes the advertised HTTP body limit into owned context and submits it only on explicit run', async () => {
+test('uses the owned route body cap even when it differs from the app operations cap', async () => {
   const contextDigest = '09'.repeat(32)
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session', subtle: { digest: vi.fn(async () => new Uint8Array(32).fill(9).buffer) } })
   render(<App />)
@@ -177,15 +179,30 @@ test('passes the advertised HTTP body limit into owned context and submits it on
   fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'owned-token' } })
   fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
   await screen.findByText(/Model status: ready/)
-  expect(screen.getByText(/Serialized request body:/)).toHaveTextContent('/ 1,000 UTF-8 bytes. Limit from host status.')
-  expect(screen.getByText(/Serialized request body:/)).toHaveTextContent('owned route may enforce a smaller limit')
-  const context = 'owner-reviewed context'
+  expect(screen.getByText(/Serialized request body:/)).toHaveTextContent('/ 3,000 UTF-8 bytes.')
+  const context = 'owner-reviewed context '.repeat(100)
   fireEvent.change(screen.getByLabelText('Optional project context (owner-supplied, unverified)'), { target: { value: context } })
+  expect(screen.getByRole('button', { name: 'Run owned model' })).not.toBeDisabled()
   expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/lfg/assess/owned'))).toBe(false)
   fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
   expect(await screen.findByText(/server echoed the matching project context digest/i)).toBeInTheDocument()
   const ownedCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/lfg/assess/owned'))
   expect(JSON.parse(String(ownedCall?.[1]?.body))).toEqual({ text: 'Implement my feature and run tests', context, contextSha256: contextDigest })
+})
+
+test('rejects an oversized body against the owned route cap even below the app operations cap', async () => {
+  ownedAssessmentBodyLimit = 500
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'owned-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  await screen.findByText(/Model status: ready/)
+  fireEvent.change(screen.getByLabelText('Optional project context (owner-supplied, unverified)'), { target: { value: 'owner-reviewed context '.repeat(40) } })
+  expect(screen.getByRole('button', { name: 'Run owned model' })).toBeDisabled()
+  expect(screen.getByRole('alert')).toHaveTextContent('configured HTTP body limit')
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/lfg/assess/owned'))).toBe(false)
 })
 
 test('schedules analysis using the server-configured debounce', async () => {

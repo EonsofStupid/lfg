@@ -36,7 +36,9 @@ export type OwnedAssessmentClient = {
 }
 
 export function ownedAssessmentBody(text: string, context?: OwnedProjectContext): Record<string, unknown> {
-  return context === undefined ? { text } : { text, ...context }
+  if (context === undefined) return { text }
+  const { context: suppliedContext, contextSha256, ...extensions } = context
+  return { ...extensions, context: suppliedContext, contextSha256, text }
 }
 
 export async function sha256Utf8(text: string): Promise<string> {
