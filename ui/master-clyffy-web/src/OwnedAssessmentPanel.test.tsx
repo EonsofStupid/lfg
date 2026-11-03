@@ -194,6 +194,34 @@ test('ignores an older connection response after a newer token connects', async 
   expect(api.assess).toHaveBeenCalledWith('request', 'second-token')
 })
 
+test('prompt edits do not strand a deferred connection in the connecting state', async () => {
+  const api = client()
+  let resolveStatus!: (value: OwnedStatus) => void
+  vi.mocked(api.status).mockImplementation(() => new Promise((resolve) => { resolveStatus = resolve }))
+  const view = render(<OwnedAssessmentPanel prompt="first request" assessment={deterministic} client={api} />)
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'current-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  view.rerender(<OwnedAssessmentPanel prompt="edited request" assessment={deterministic} client={api} />)
+  expect(screen.getByRole('button', { name: 'Connecting…' })).toBeDisabled()
+  resolveStatus({ enabled: true, status: 'ready', engine: { id: 'current-engine' }, limits: { maxRequestBytes: 1000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } })
+  expect(await screen.findByText(/Model status: ready/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Run owned model' })).not.toBeDisabled()
+})
+
+test('unmount invalidates a deferred connection response', async () => {
+  const api = client()
+  let resolveStatus!: (value: OwnedStatus) => void
+  vi.mocked(api.status).mockImplementation(() => new Promise((resolve) => { resolveStatus = resolve }))
+  const onResult = vi.fn()
+  const view = render(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} onResult={onResult} />)
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'late-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  view.unmount()
+  resolveStatus({ enabled: true, status: 'ready', engine: { id: 'late-engine' }, limits: { maxRequestBytes: 1000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } })
+  await waitFor(() => expect(api.status).toHaveBeenCalledTimes(1))
+  expect(onResult).not.toHaveBeenCalledWith(expect.objectContaining({ engine: { id: 'late-engine' } }))
+})
+
 test('reports malformed or truncated output without inventing assessment fields', async () => {
   const api = client()
   vi.mocked(api.assess).mockResolvedValue({ status: 'truncated', engine: { id: 'owned-test' }, elapsedMs: 50, outputText: '{partial', stopReason: 'byte_limit' })

@@ -72,15 +72,14 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     onResultRef.current?.(null)
   }
 
-  useEffect(() => {
-    invalidate()
-    return () => {
-      requestGeneration.current += 1
-      busyGeneration.current += 1
-      connectionGeneration.current += 1
-      onResultRef.current?.(null)
-    }
-  }, [prompt])
+  useEffect(() => { invalidate() }, [prompt])
+
+  useEffect(() => () => {
+    requestGeneration.current += 1
+    busyGeneration.current += 1
+    connectionGeneration.current += 1
+    onResultRef.current?.(null)
+  }, [])
 
   async function run(action: () => Promise<void>, request?: number) {
     const current = ++busyGeneration.current
