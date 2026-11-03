@@ -1,0 +1,14 @@
+# Local routing policy. Change these values when the owner selects other models.
+event_log = "~/.codex/clyffy-workflow/events.jsonl"
+
+[planner]
+model = "gpt-6.1-terra"
+effort = "xhigh"
+
+[executor]
+model = "gpt-6-luna"
+effort = "high"
+
+[escalation]
+model = "gpt-6.1-terra"
+effort = "xhigh"
