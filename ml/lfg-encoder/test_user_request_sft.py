@@ -593,6 +593,11 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertEqual(trainer.validate_completed_sft_checkpoint(
             unlinked, weights, code, allow_unlinked_legacy=True),
             {'system_sha256': 'unknown_unlinked', 'framing_sha256': 'unknown_unlinked'})
+        partial_link = json.loads(json.dumps(unlinked))
+        partial_link['framing_sha256'] = framing_sha
+        partial_link['coverage']['framing_sha256'] = framing_sha
+        with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):
+            trainer.validate_completed_sft_checkpoint(partial_link, weights, code, allow_unlinked_legacy=True)
         null_link = json.loads(json.dumps(unlinked))
         null_link['system_sha256'] = None
         with self.assertRaisesRegex(ValueError, 'provenance is incomplete'):

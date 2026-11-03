@@ -574,6 +574,8 @@ def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_
                 or not coverage_present or manifest['coverage'][name] != value):
             raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
         links[name] = 'verified_linked'
+    if len(set(links.values())) != 1:
+        raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
     expected_code_names = {'train_owned_assessment_sft.py', 'train_owned_student.py',
                            'owned_student.py', 'owned_sft_checkpoint.py'}
     code = manifest['code_sha256']
