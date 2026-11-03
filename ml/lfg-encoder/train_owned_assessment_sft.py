@@ -19,7 +19,7 @@ FRAMING_FIELDS = ('system_prefix', 'system_suffix', 'user_prefix', 'user_suffix'
 USER_REQUEST_DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v1'
 USER_REQUEST_CONFIG_SCHEMA = 'lfg.owned-user-request-sft-config.v1'
 USER_REQUEST_TASK = 'user_requested_model_effort'
-USER_REQUEST_OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v1'
+USER_REQUEST_OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v2'
 
 # Keep the existing public helper available when training extras are installed;
 # request-dataset validation itself remains importable without those extras.
@@ -51,6 +51,39 @@ def read_bounded(path: Path, limit: int) -> bytes:
 def canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
             + '\n').encode('utf-8')
+
+
+def validate_bounded_inert_extensions(value: object, max_bytes: int) -> None:
+    nodes = 0
+
+    def visit(item: object, depth: int) -> None:
+        nonlocal nodes
+        nodes += 1
+        if nodes > 4096 or depth > 16:
+            raise ValueError('inert extension bounds exceeded')
+        if isinstance(item, str):
+            if len(item.encode('utf-8')) > 4096:
+                raise ValueError('inert extension string exceeds limit')
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str) or not key or len(key.encode('utf-8')) > 4096:
+                    raise ValueError('invalid inert extension key')
+                visit(key, depth + 1)
+                visit(child, depth + 1)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, depth + 1)
+        elif item is None or type(item) in (bool, int):
+            return
+        else:
+            raise ValueError('unsupported inert extension value')
+
+    if not isinstance(value, dict):
+        raise ValueError('inert extensions must be objects')
+    visit(value, 0)
+    raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(raw) > max_bytes:
+        raise ValueError('inert extensions exceed configured byte limit')
 
 
 def strict_json(raw: bytes | str):
@@ -221,7 +254,8 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
         'promotion_eligible', 'records', 'records_sha256', 'record_id', 'source_evidence',
         'provider_cache_sha256', 'relations_sha256', 'target_record_sha256', 'screen_policy_sha256',
         'screened_request_sha256', 'redaction_counts', 'user_text_redaction_counts', 'validation_opened', 'test_opened',
-        'assistant_teacher_claimed', 'user_text_utf8_bytes', 'source_representation'}
+        'assistant_teacher_claimed', 'user_text_utf8_bytes', 'source_representation',
+        'caller_extensions', 'sft_config_extensions'}
     projection_fields = {'projection_sha256', 'byte_exact_to_screened', 'windows_origin_claims'}
     if manifest.get('source_representation') == 'verified_posix_single_message_projection':
         manifest_fields |= projection_fields
@@ -253,8 +287,12 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             or not isinstance(manifest.get('record_id'), str)
             or type(manifest.get('user_text_utf8_bytes')) is not int or manifest['user_text_utf8_bytes'] < 1
             or not isinstance(manifest.get('source_evidence'), dict)
-            or not isinstance(manifest.get('redaction_counts'), dict)):
+            or not isinstance(manifest.get('redaction_counts'), dict)
+            or not isinstance(manifest.get('caller_extensions'), dict)
+            or not isinstance(manifest.get('sft_config_extensions'), dict)):
         raise ValueError('user-request SFT manifest violates explicit unknown/task policy')
+    validate_bounded_inert_extensions(manifest['caller_extensions'], config['max_dataset_bytes'])
+    validate_bounded_inert_extensions(manifest['sft_config_extensions'], config['max_dataset_bytes'])
     if manifest['source_representation'] == 'verified_posix_single_message_projection':
         claims = manifest.get('windows_origin_claims')
         claim_fields = {'schema_version', 'origin_platform', 'origin_verification',
@@ -262,7 +300,7 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
         if (manifest.get('byte_exact_to_screened') is not True
                 or not isinstance(manifest.get('projection_sha256'), str)
                 or not re.fullmatch(r'[0-9a-f]{64}', manifest['projection_sha256'])
-                or not isinstance(claims, dict) or set(claims) != claim_fields
+                or not isinstance(claims, dict) or not claim_fields <= set(claims)
                 or claims.get('schema_version') != 'lfg.windows-origin-projection-claims.v1'
                 or claims.get('origin_platform') != 'windows'
                 or claims.get('origin_verification') != 'unverified_claim'
@@ -270,6 +308,16 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                        for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))
                 or claims.get('user_text_sha256_claim') != manifest.get('projection_sha256')):
             raise ValueError('invalid screened POSIX projection provenance')
+        optional_origin = {'origin_locator_sha256_claim', 'origin_line_number_claim', 'origin_prefix_bytes_claim'}
+        optional_present = optional_origin & set(claims)
+        if (set(claims) not in (claim_fields, claim_fields | optional_origin)
+                or (optional_present and optional_present != optional_origin)
+                or (optional_present and (not re.fullmatch(r'[0-9a-f]{64}', claims['origin_locator_sha256_claim'])
+                    or type(claims['origin_line_number_claim']) is not int
+                    or not 1 <= claims['origin_line_number_claim'] <= 10_000_000
+                    or type(claims['origin_prefix_bytes_claim']) is not int
+                    or not 1 <= claims['origin_prefix_bytes_claim'] <= 512 * 1024 * 1024))):
+            raise ValueError('invalid optional Windows-origin locator claims')
     elif manifest.get('source_representation') != 'verified_posix_source':
         raise ValueError('unknown user-request source representation')
     source_fields = {'source_file_sha256_at_inventory', 'source_prefix_sha256', 'source_line_sha256',
@@ -299,8 +347,8 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             'provider_entitlement', 'execution', 'total_agent_count', 'promotion_eligible',
             'training_assignment', 'split_policy', 'heldout_separation', *source_fields,
             'provider_cache_sha256', 'relations_sha256', 'target_record_sha256', 'screen_policy_sha256',
-            'screened_request_sha256', 'target_span_refs', 'redaction_counts', 'user_text_redaction_counts',
-            'user_text_utf8_bytes'}
+            'screened_request_sha256', 'target_span_refs', 'unknown_span_refs', 'redaction_counts', 'user_text_redaction_counts',
+            'user_text_utf8_bytes', 'caller_extensions'}
         metadata_fields.add('source_representation')
         if manifest['source_representation'] == 'verified_posix_single_message_projection':
             metadata_fields |= projection_fields
@@ -319,6 +367,9 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                 or any(not isinstance(metadata.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', metadata[key])
                        for key in digest_fields)
                 or not isinstance(metadata.get('target_span_refs'), list)
+                or not isinstance(metadata.get('unknown_span_refs'), list)
+                or not isinstance(metadata.get('caller_extensions'), dict)
+                or metadata.get('caller_extensions') != manifest['caller_extensions']
                 or metadata.get('redaction_counts') != manifest['redaction_counts']
                 or metadata.get('user_text_redaction_counts') != manifest['redaction_counts']
                 or any(metadata[key] != manifest['source_evidence'][key] for key in source_fields)
@@ -328,6 +379,7 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                 or metadata['screen_policy_sha256'] != manifest['screen_policy_sha256']
                 or metadata['screened_request_sha256'] != manifest['screened_request_sha256']):
             raise ValueError('user-request SFT record contains unsupported claims')
+        validate_bounded_inert_extensions(metadata['caller_extensions'], config['max_record_bytes'])
         if manifest['source_representation'] == 'verified_posix_single_message_projection':
             if (metadata.get('projection_sha256') != manifest['projection_sha256']
                     or metadata.get('byte_exact_to_screened') is not True
@@ -344,8 +396,14 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
         if (not isinstance(user_input, dict) or set(user_input) != {'user_request', 'provider_candidates'}
                 or not isinstance(user_input.get('user_request'), str) or not user_input['user_request'].strip()
                 or not isinstance(user_input.get('provider_candidates'), list)
-                or not user_input['provider_candidates']):
-            raise ValueError('user-request SFT input must carry the screened request and current candidates')
+                ):
+            raise ValueError('user-request SFT input must carry the screened request and current candidate projection')
+        request_bytes = user_input['user_request'].encode('utf-8')
+        if (len(request_bytes) != metadata['user_text_utf8_bytes']
+                or sha(request_bytes) != metadata['user_text_sha256']
+                or (manifest['source_representation'] == 'verified_posix_single_message_projection'
+                    and sha(request_bytes) != manifest['projection_sha256'])):
+            raise ValueError('request text does not match byte-exact source evidence')
         candidate_by_id = {}
         for candidate in user_input['provider_candidates']:
             if (not isinstance(candidate, dict) or set(candidate) != {'model_id', 'display_name', 'supported_efforts'}
@@ -360,10 +418,13 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             target = strict_json(assistant)
         except (json.JSONDecodeError, ValueError):
             raise ValueError('invalid sparse user-request target JSON') from None
-        if (not isinstance(target, dict) or set(target) != {'schema_version', 'task', 'requested'}
+        if (not isinstance(target, dict) or set(target) != {'schema_version', 'task', 'requested', 'unknown'}
                 or target.get('schema_version') != USER_REQUEST_OUTPUT_SCHEMA
                 or target.get('task') != USER_REQUEST_TASK or not isinstance(target.get('requested'), list)
-                or not target['requested'] or len(target['requested']) != len(metadata['target_span_refs'])):
+                or not isinstance(target.get('unknown'), list)
+                or (not target['requested'] and not target['unknown'])
+                or len(target['requested']) != len(metadata['target_span_refs'])
+                or len(target['unknown']) != len(metadata['unknown_span_refs'])):
             raise ValueError('invalid sparse user-request target output')
         refs = metadata['target_span_refs']
         for requested, ref in zip(target['requested'], refs, strict=True):
@@ -393,6 +454,13 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or ref['model_span_id'] in seen_spans):
                 raise ValueError('sparse user-request target is not bound to a unique explicit source span')
             seen_spans.add(ref['model_span_id'])
+            model_slice = request_bytes[ref['model_span_start_byte']:ref['model_span_end_byte']]
+            try:
+                model_slice.decode('utf-8')
+            except UnicodeDecodeError:
+                raise ValueError('model span splits a UTF-8 request character') from None
+            if sha(model_slice) != ref['model_span_sha256']:
+                raise ValueError('model target span digest does not match actual request bytes')
             if ref['effort_span_id'] is not None and (not isinstance(ref['effort_span_id'], str)
                     or not ref['effort_span_id'] or not isinstance(ref['effort_span_sha256'], str)
                     or not re.fullmatch(r'[0-9a-f]{64}', ref['effort_span_sha256'])
@@ -402,6 +470,14 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or ref['effort_span_end_byte'] > metadata['user_text_utf8_bytes']
                     or ref['effort_polarity'] not in ('affirmed', 'negated', 'quoted', 'uncertain')):
                 raise ValueError('invalid effort span reference')
+            if ref['effort_span_id'] is not None:
+                effort_slice = request_bytes[ref['effort_span_start_byte']:ref['effort_span_end_byte']]
+                try:
+                    effort_slice.decode('utf-8')
+                except UnicodeDecodeError:
+                    raise ValueError('effort span splits a UTF-8 request character') from None
+                if sha(effort_slice) != ref['effort_span_sha256']:
+                    raise ValueError('effort target span digest does not match actual request bytes')
             if (ref['effort_span_id'] is None
                     and any(ref[key] is not None for key in ('effort_span_sha256', 'effort_polarity',
                         'effort_span_start_byte', 'effort_span_end_byte'))):
@@ -411,6 +487,28 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             if ('effort' in requested
                     and requested['effort'] not in candidate_by_id[requested['model_id']]['supported_efforts']):
                 raise ValueError('effort output is absent from the pinned provider candidate projection')
+        allowed_unknown_statuses = {'unmatched', 'ambiguous', 'requires_redaction', 'quoted', 'uncertain', 'model_unresolved'}
+        for item, ref in zip(target['unknown'], metadata['unknown_span_refs'], strict=True):
+            if (not isinstance(item, dict) or set(item) != {'field', 'mention', 'status'}
+                    or item.get('field') not in ('model', 'effort')
+                    or item.get('status') not in allowed_unknown_statuses
+                    or not isinstance(item.get('mention'), str)
+                    or not isinstance(ref, dict) or set(ref) != {'field', 'span_id', 'sha256', 'start_byte', 'end_byte', 'status'}
+                    or ref.get('field') != item['field'] or ref.get('status') != item['status']
+                    or not isinstance(ref.get('span_id'), str) or not ref['span_id']
+                    or not isinstance(ref.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', ref['sha256'])
+                    or type(ref.get('start_byte')) is not int or type(ref.get('end_byte')) is not int
+                    or ref['start_byte'] < 0 or ref['end_byte'] <= ref['start_byte']
+                    or ref['end_byte'] > len(request_bytes) or ref['span_id'] in seen_spans):
+                raise ValueError('unknown request output is not bound to a unique source span')
+            seen_spans.add(ref['span_id'])
+            unknown_slice = request_bytes[ref['start_byte']:ref['end_byte']]
+            try:
+                mention = unknown_slice.decode('utf-8')
+            except UnicodeDecodeError:
+                raise ValueError('unknown span splits a UTF-8 request character') from None
+            if sha(unknown_slice) != ref['sha256'] or mention != item['mention']:
+                raise ValueError('unknown request span does not match actual request bytes')
         fmt = config['framing']
         prefix = (fmt['system_prefix'] + system + fmt['system_suffix'] + fmt['user_prefix'] + user
                   + fmt['user_suffix'] + fmt['assistant_prefix']).encode('utf-8')

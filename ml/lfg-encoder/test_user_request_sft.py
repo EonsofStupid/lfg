@@ -173,8 +173,14 @@ class UserRequestSFTTests(unittest.TestCase):
             'origin_platform': 'windows', 'origin_verification': 'unverified_claim',
             'line_sha256_claim': '1' * 64, 'prefix_sha256_claim': '2' * 64,
             'user_text_sha256_claim': hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
+            'origin_locator_sha256_claim': '4' * 64, 'origin_line_number_claim': 17,
+            'origin_prefix_bytes_claim': 8192,
         }
+        caller['harmless_extension'] = {'note': 'fixture-only-safe', 'enabled': False}
         self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        sft_config = json.loads(self.sft_config_path.read_bytes())
+        sft_config['inert_extension_note'] = 'fixture-only-safe'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
         self._build()
         envelope = json.loads((self.root / 'dataset.json').read_bytes())
         manifest = envelope['manifest']
@@ -183,6 +189,9 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertTrue(manifest['byte_exact_to_screened'])
         self.assertEqual(manifest['projection_sha256'], metadata['user_text_sha256'])
         self.assertEqual(manifest['windows_origin_claims']['origin_verification'], 'unverified_claim')
+        self.assertEqual(manifest['windows_origin_claims']['origin_line_number_claim'], 17)
+        self.assertEqual(manifest['caller_extensions'], {'harmless_extension': {'note': 'fixture-only-safe', 'enabled': False}})
+        self.assertEqual(manifest['sft_config_extensions'], {'inert_extension_note': 'fixture-only-safe'})
         self.assertEqual(metadata['windows_origin_claims'], manifest['windows_origin_claims'])
         import train_owned_assessment_sft as trainer
         train_config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
@@ -201,6 +210,53 @@ class UserRequestSFTTests(unittest.TestCase):
         forged_path.write_text(json.dumps(forged), encoding='utf-8')
         with self.assertRaisesRegex(ValueError, 'screened POSIX projection provenance'):
             trainer.read_training(forged_path, train_config)
+
+    def test_trainer_hashes_actual_utf8_request_slices(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        row['metadata']['target_span_refs'][0]['model_span_sha256'] = 'f' * 64
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'mutated-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'span digest does not match actual request bytes'):
+            trainer.read_training(mutated, config)
+
+    def test_config_and_caller_extensions_are_inert_bounded_and_screened(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['safe_note'] = {'owner_comment': 'safe fixture value'}
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        sft_config = json.loads(self.sft_config_path.read_bytes())
+        sft_config['safe_config_note'] = 'safe fixture value'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        self.assertEqual(envelope['manifest']['caller_extensions'], {'safe_note': {'owner_comment': 'safe fixture value'}})
+        self.assertEqual(envelope['manifest']['sft_config_extensions'], {'safe_config_note': 'safe fixture value'})
+        caller['secret_note'] = 'Bearer abcdefghijklmnop'
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'extension requires screening'):
+            self._build(self.root / 'rejected-caller-extension.json')
+        sft_config['secret_config_note'] = 'password=supersecretvalue'
+        self.sft_config_path.write_text(json.dumps(sft_config), encoding='utf-8')
+        caller.pop('secret_note')
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'inert extension requires screening'):
+            self._build(self.root / 'rejected-config-extension.json')
+
+    def test_sequential_screens_reject_cross_policy_reintroduction(self):
+        policy = json.loads(self.policy.read_bytes())
+        policy['rules'] = [{'id': 'introduce-bearer', 'pattern': 'TRIGGER_VALUE',
+                            'replacement': 'Bearer abcdefghijklmnop'}]
+        path = self.root / 'reintroducing-screen.json'
+        path.write_text(json.dumps(policy), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'reintroduced content'):
+            user_request_sft._screen('TRIGGER_VALUE', path, 65536)
 
     def test_projection_claims_malformed_or_screened_content_changed_rejected(self):
         caller = json.loads(self.caller_input_path.read_bytes())
@@ -278,6 +334,7 @@ class UserRequestSFTTests(unittest.TestCase):
         envelope = json.loads((self.root / 'dataset.json').read_bytes())
         target = json.loads(envelope['train_records'][0]['messages'][2]['content'])
         self.assertEqual(target['requested'], [{'model_id': 'provider/model-q', 'polarity': 'negated'}])
+        self.assertEqual(target['unknown'], [{'field': 'model', 'mention': 'Model Z', 'status': 'ambiguous'}])
         self.assertNotIn('provider/model-z', json.dumps(target))
         self.assertEqual(result['heldout_separation'], 'unknown')
 

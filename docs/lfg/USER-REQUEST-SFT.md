@@ -20,13 +20,17 @@ selected source, snapshot and provider cache, checks the reservation evidence,
 and revalidates the caller/config inputs before writing. It stores no source
 path in the dataset. A separate observation file is not needed.
 
-The assistant target contains only caller-linked model claims that uniquely
-match the pinned provider listing and have explicit `affirmed` or `negated`
-polarity. Explicitly related effort is included only when it uniquely matches
-the same model's observed supported efforts. Ambiguous, unmatched, quoted,
-uncertain, redaction-requiring and unmentioned models are omitted from the
-sparse target; they do not become negative labels. The user prompt and the
-small provider candidate projection are screened before they are stored.
+The assistant target has separate `requested` and `unknown` arrays. The
+`requested` array contains caller-linked model claims that uniquely match the
+pinned provider listing and have explicit `affirmed` or `negated` polarity.
+Explicitly related effort is included only when it uniquely matches the same
+model's observed supported efforts. Ambiguous, unmatched, quoted, uncertain,
+and unresolved annotated spans appear in `unknown` with their mention and a
+categorical abstention status. These entries are not positive or negative model
+targets. Unmentioned candidates stay absent by task definition; they are not
+materialized as negative candidate labels. If screening would alter source
+text, this span-bound builder refuses the record rather than risk offset drift.
+The provider candidate projection is screened before storage.
 
 The dataset records the original source, line, prompt, provider-cache, relation,
 target, screening-policy, adapter and framing digests. It explicitly retains
@@ -35,6 +39,12 @@ count, exploratory train assignment, unknown heldout separation, and disabled
 promotion. A caller interpretation remains an unreviewed claim. The target is
 mechanically serialized from those claims; it is not a teacher response or a
 verified preference.
+
+The trainer hashes each actual UTF-8 request slice referenced by the sparse
+target and unknown entries. Projection records also require the full request
+bytes to match the verified POSIX projection digest and the unverified Windows
+text-digest claim. Caller and SFT config extension fields are bounded, inert,
+screened, and preserved; they do not override known configuration behavior.
 
 The user-request dataset uses a distinct schema and is read only with the
 `lfg.owned-user-request-sft-config.v1` task config. The trainer requires a

@@ -23,7 +23,7 @@ DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v1'
 CALLER_INPUT_SCHEMA = 'lfg.user-requested-sft-caller-input.v1'
 WINDOWS_PROJECTION_CLAIMS_SCHEMA = 'lfg.windows-origin-projection-claims.v1'
 TASK = 'user_requested_model_effort'
-OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v1'
+OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v2'
 CONFIG_FIELDS = {'schema_version', 'revision', 'system_prompt', 'max_config_bytes',
                  'max_dataset_bytes', 'max_record_bytes', 'max_request_bytes',
                  'max_target_bytes', 'max_examples', 'framing'}
@@ -73,7 +73,7 @@ def load_config(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
     if type(max_bytes) is not int or max_bytes < 1:
         raise ValueError('max config bytes must be positive')
     value, raw = _read_json(path, max_bytes)
-    if (not isinstance(value, dict) or set(value) != CONFIG_FIELDS
+    if (not isinstance(value, dict) or not CONFIG_FIELDS <= set(value)
             or value.get('schema_version') != CONFIG_SCHEMA
             or not isinstance(value.get('revision'), str) or not value['revision'].strip()
             or not isinstance(value.get('system_prompt'), str) or not value['system_prompt'].strip()
@@ -98,17 +98,64 @@ def _screen(text: str, screen_policy_path: Path, max_policy_bytes: int) -> tuple
         text, found = screen_private_corpus._screen(text, compiled, current['limits'])
         for name, count in found.items():
             counts[name] = counts.get(name, 0) + count
+    # A replacement from the second policy must not reintroduce text caught by
+    # the first policy (or vice versa).
+    for current, compiled in ((baseline, baseline_rules), (policy, rules)):
+        rechecked, found = screen_private_corpus._screen(text, compiled, current['limits'])
+        if rechecked != text:
+            raise ValueError('sequential screening reintroduced content caught by an earlier policy')
+        for name, count in found.items():
+            counts[name] = counts.get(name, 0) + count
     return text, dict(sorted(counts.items())), policy_sha
 
 
-def _sparse_target(target: dict, provider_models: list[dict], observation: dict) -> tuple[dict, list[dict], list[dict]]:
-    """Keep only explicit resolved model polarity and explicitly related effort."""
-    requests, refs, candidates = [], [], []
+def _span_ref(span: dict, text: bytes, field: str, status: str) -> dict:
+    start, end = span['start_byte'], span['end_byte']
+    raw = text[start:end]
+    if len(raw) != end - start:
+        raise ValueError('caller span falls outside UTF-8 request bytes')
+    try:
+        raw.decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('caller span is not aligned to UTF-8 boundaries') from None
+    return {'field': field, 'span_id': span['id'], 'sha256': _sha(raw),
+            'start_byte': start, 'end_byte': end, 'status': status}
+
+
+def _sparse_target(target: dict, provider_models: list[dict], observation: dict,
+                   raw_request: str) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Emit explicit requests plus labeled abstentions for annotated unknowns."""
+    requests, refs, candidates, unknown, unknown_refs = [], [], [], [], []
     provider_by_id = {row['model_id']: row for row in provider_models}
     span_by_id = {span['id']: span for span in observation['source']['spans']}
+    request_bytes = raw_request.encode('utf-8')
     for row in target['targets']:
         if (row['model_match_status'] != 'matched'
                 or row['requested_model_target'] not in (0, 1)):
+            status = (row['model_span']['polarity'] if row['model_span']['polarity'] in ('quoted', 'uncertain')
+                      else row['model_match_status'])
+            span = span_by_id[row['model_span']['id']]
+            ref = _span_ref(span, request_bytes, 'model', status)
+            raw = request_bytes[ref['start_byte']:ref['end_byte']].decode('utf-8')
+            unknown.append({'field': 'model', 'mention': raw, 'status': status})
+            unknown_refs.append(ref)
+            normalized = user_request_targets._normal(raw)
+            for candidate in provider_models:
+                if normalized in {user_request_targets._normal(candidate['model_id']),
+                                  user_request_targets._normal(candidate.get('display_name', ''))}:
+                    if candidate['model_id'] not in {item['model_id'] for item in candidates}:
+                        candidates.append({'model_id': candidate['model_id'],
+                            'display_name': candidate.get('display_name') or candidate['model_id'],
+                            'supported_efforts': candidate['provider_supported_efforts']})
+            if row['effort_span'] is not None:
+                effort = span_by_id[row['effort_span']['id']]
+                effort_status = (row['effort_span']['polarity'] if row['effort_span']['polarity'] in ('quoted', 'uncertain')
+                                 else row['effort_match_status'])
+                effort_ref = _span_ref(effort, request_bytes, 'effort', effort_status)
+                unknown.append({'field': 'effort', 'mention': request_bytes[
+                    effort_ref['start_byte']:effort_ref['end_byte']].decode('utf-8'),
+                    'status': effort_status})
+                unknown_refs.append(effort_ref)
             continue
         polarity = 'affirmed' if row['requested_model_target'] == 1 else 'negated'
         request = {'model_id': row['model_id'], 'polarity': polarity}
@@ -138,9 +185,19 @@ def _sparse_target(target: dict, provider_models: list[dict], observation: dict)
                      'effort_span_start_byte': None if effort_source_span is None else effort_source_span['start_byte'],
                      'effort_span_end_byte': None if effort_source_span is None else effort_source_span['end_byte'],
                      'effort_polarity': None if row['effort_span'] is None else row['effort_span']['polarity']})
-    if not requests:
-        return {}, [], []
-    return {'schema_version': OUTPUT_SCHEMA, 'task': TASK, 'requested': requests}, refs, candidates
+        if row['effort_span'] is not None and 'effort' not in request:
+            effort = span_by_id[row['effort_span']['id']]
+            effort_status = (row['effort_span']['polarity'] if row['effort_span']['polarity'] in ('quoted', 'uncertain')
+                             else row['effort_match_status'])
+            effort_ref = _span_ref(effort, request_bytes, 'effort', effort_status)
+            unknown.append({'field': 'effort', 'mention': request_bytes[
+                effort_ref['start_byte']:effort_ref['end_byte']].decode('utf-8'),
+                'status': effort_status})
+            unknown_refs.append(effort_ref)
+    if not requests and not unknown:
+        return {}, [], [], []
+    return {'schema_version': OUTPUT_SCHEMA, 'task': TASK, 'requested': requests,
+            'unknown': unknown}, refs, candidates, unknown_refs
 
 
 def _validate_config_text(text: str, policies: list[tuple[dict, list]]) -> None:
@@ -153,7 +210,8 @@ def _validate_config_text(text: str, policies: list[tuple[dict, list]]) -> None:
 def _validate_windows_projection_claims(value: object) -> dict:
     fields = {'schema_version', 'origin_platform', 'origin_verification',
               'line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'}
-    if (not isinstance(value, dict) or set(value) != fields
+    optional = {'origin_locator_sha256_claim', 'origin_line_number_claim', 'origin_prefix_bytes_claim'}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | optional)
             or value.get('schema_version') != WINDOWS_PROJECTION_CLAIMS_SCHEMA
             or value.get('origin_platform') != 'windows'
             or value.get('origin_verification') != 'unverified_claim'
@@ -161,15 +219,73 @@ def _validate_windows_projection_claims(value: object) -> dict:
                    or any(char not in '0123456789abcdef' for char in value[key])
                    for key in ('line_sha256_claim', 'prefix_sha256_claim', 'user_text_sha256_claim'))):
         raise ValueError('invalid unverified Windows-origin projection claims')
+    optional_present = optional & set(value)
+    if optional_present and optional_present != optional:
+        raise ValueError('optional Windows origin locator claims must be supplied together')
+    if optional_present and (
+            not isinstance(value['origin_locator_sha256_claim'], str)
+            or len(value['origin_locator_sha256_claim']) != 64
+            or any(char not in '0123456789abcdef' for char in value['origin_locator_sha256_claim'])
+            or type(value['origin_line_number_claim']) is not int
+            or not 1 <= value['origin_line_number_claim'] <= 10_000_000
+            or type(value['origin_prefix_bytes_claim']) is not int
+            or not 1 <= value['origin_prefix_bytes_claim'] <= 512 * 1024 * 1024):
+        raise ValueError('invalid optional unverified Windows origin locator claims')
     return value
 
 
+def _screen_inert_extensions(value: object, screen_policy_path: Path, max_bytes: int) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError('inert extensions must be an object')
+    baseline, baseline_rules, _ = screen_private_corpus.load_policy(
+        source_bound_snapshot._default_screen_policy_path(), max_bytes)
+    policy, policy_rules, _ = screen_private_corpus.load_policy(screen_policy_path, max_bytes)
+    nodes = 0
+
+    def visit(item: object, depth: int):
+        nonlocal nodes
+        nodes += 1
+        if nodes > 4096 or depth > 16:
+            raise ValueError('inert extension depth or node limit exceeded')
+        if isinstance(item, str):
+            if len(item.encode('utf-8')) > 4096:
+                raise ValueError('inert extension string exceeds limit')
+            text = item
+            for current, rules in ((baseline, baseline_rules), (policy, policy_rules)):
+                text, _ = screen_private_corpus._screen(text, rules, current['limits'])
+            for current, rules in ((baseline, baseline_rules), (policy, policy_rules)):
+                rechecked, _ = screen_private_corpus._screen(text, rules, current['limits'])
+                if rechecked != text:
+                    raise ValueError('inert extension requires screening')
+            if text != item:
+                raise ValueError('inert extension requires screening')
+            return item
+        if item is None or type(item) in (bool, int):
+            return item
+        if isinstance(item, list):
+            return [visit(child, depth + 1) for child in item]
+        if isinstance(item, dict):
+            result = {}
+            for key, child in item.items():
+                if not isinstance(key, str) or not key or key in result:
+                    raise ValueError('invalid inert extension key')
+                clean_key = visit(key, depth + 1)
+                result[clean_key] = visit(child, depth + 1)
+            return result
+        raise ValueError('unsupported inert extension value')
+
+    clean = visit(value, 0)
+    if len(_canonical(clean)) > max_bytes:
+        raise ValueError('inert extensions exceed configured byte limit')
+    return clean
+
+
 def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dict,
-                                   screen_policy_path: Path, max_bytes: int) -> tuple[dict, dict, bytes]:
+                                   screen_policy_path: Path, max_bytes: int) -> tuple[dict, dict, bytes, dict, dict]:
     caller_input, raw = _read_json(input_path, max_bytes)
     caller_fields = {'schema_version', 'spans', 'interpretation', 'relations'}
     if (not isinstance(caller_input, dict)
-            or set(caller_input) not in (caller_fields, caller_fields | {'windows_origin_projection_claims'})
+            or not caller_fields <= set(caller_input)
             or caller_input.get('schema_version') != CALLER_INPUT_SCHEMA
             or not isinstance(caller_input.get('spans'), list)
             or not isinstance(caller_input.get('interpretation'), dict)
@@ -187,13 +303,16 @@ def _observation_from_caller_input(snapshot: dict, input_path: Path, config: dic
                     'groups': split.get('known_reserved_group_sha256', []),
                     'identities': split.get('known_reserved_source_identities', []),
                     'coverage': split.get('known_reserved_groups_coverage', 'unknown')}
+    caller_extensions = {key: val for key, val in caller_input.items()
+                         if key not in caller_fields | {'windows_origin_projection_claims'}}
     observation = user_requested_observation.build_observation(
         snapshot['source']['inventory_identity'], caller_input['spans'], caller_input['interpretation'],
         config, screen_policy_path, reserved=reserved,
-        reserved_project_labels=split.get('known_reserved_project_labels', []))
+        reserved_project_labels=split.get('known_reserved_project_labels', []),
+        extensions=caller_extensions)
     claims = (None if 'windows_origin_projection_claims' not in caller_input else
               _validate_windows_projection_claims(caller_input['windows_origin_projection_claims']))
-    return observation, caller_input['relations'], raw, claims
+    return observation, caller_input['relations'], raw, claims, observation['extensions']
 
 
 def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, relations_path: Path | None,
@@ -220,9 +339,10 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
     if (caller_input_path is None) == (observation_path is None):
         raise ValueError('supply exactly one observation or caller-input file')
     pinned_observation_raw = pinned_relations_raw = pinned_caller_raw = None
+    caller_extensions = {}
     windows_origin_claims = None
     if caller_input_path is not None:
-        observation, relations, pinned_caller_raw, windows_origin_claims = _observation_from_caller_input(
+        observation, relations, pinned_caller_raw, windows_origin_claims, caller_extensions = _observation_from_caller_input(
             snapshot, caller_input_path, obs_config, screen_policy_path, max_input_bytes)
     else:
         observation, pinned_observation_raw = _read_json(
@@ -251,6 +371,8 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         raise ValueError('caller relations changed during target revalidation')
     screened_request, redaction_counts, policy_sha = _screen(
         raw_request, screen_policy_path, min(config['max_config_bytes'], 1024 * 1024))
+    if screened_request != raw_request:
+        raise ValueError('screening changes source text; exact span-bound SFT requires a separately screened source projection')
     if windows_origin_claims is not None:
         # The POSIX file is a deliberately narrow, screened projection: one
         # metadata line plus the selected user message, with no later records.
@@ -270,12 +392,15 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         source_bound_snapshot._default_screen_policy_path(), min(config['max_config_bytes'], 1024 * 1024))
     policy, policy_rules, loaded_policy_sha = screen_private_corpus.load_policy(
         screen_policy_path, min(config['max_config_bytes'], 1024 * 1024))
+    sft_config_extensions = _screen_inert_extensions(
+        {key: value for key, value in config.items() if key not in CONFIG_FIELDS},
+        screen_policy_path, config['max_config_bytes'])
     if policy_sha != loaded_policy_sha or policy_sha != target['provider_observation']['screen_policy_sha256']:
         raise ValueError('SFT screening policy does not match source-bound request evidence')
     _validate_config_text(config['system_prompt'], [(baseline, baseline_rules), (policy, policy_rules)])
-    sparse, span_refs, provider_candidates = _sparse_target(
-        target, snapshot['provider_list']['models'], observation)
-    if not sparse:
+    sparse, span_refs, provider_candidates, unknown_span_refs = _sparse_target(
+        target, snapshot['provider_list']['models'], observation, raw_request)
+    if not sparse or not sparse['requested'] and not sparse['unknown']:
         raise ValueError('no uniquely resolved explicit request targets for SFT')
     response = json.dumps(sparse, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
     response_bytes = response.encode('utf-8')
@@ -320,6 +445,8 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
             'screened_request_sha256': _sha(screened_input.encode('utf-8')),
             'user_text_redaction_counts': redaction_counts,
             'target_span_refs': span_refs,
+            'unknown_span_refs': unknown_span_refs,
+            'caller_extensions': caller_extensions,
             'redaction_counts': redaction_counts,
             **({'source_representation': 'verified_posix_single_message_projection',
                 'projection_sha256': _sha(request_bytes), 'byte_exact_to_screened': True,
@@ -358,6 +485,8 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         'user_text_redaction_counts': redaction_counts,
         'validation_opened': False, 'test_opened': False,
         'assistant_teacher_claimed': False,
+        'caller_extensions': caller_extensions,
+        'sft_config_extensions': sft_config_extensions,
         'source_representation': record['metadata']['source_representation'],
         **({'projection_sha256': record['metadata']['projection_sha256'],
             'byte_exact_to_screened': True,
