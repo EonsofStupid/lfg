@@ -12,7 +12,7 @@ import random
 import time
 
 import safetensors
-from safetensors.torch import save
+from safetensors.torch import load, save
 import torch
 from torch.nn import functional as F
 
@@ -44,7 +44,8 @@ def runtime_config(path: Path, limit: int = 65536) -> tuple[dict, bytes]:
 def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan: Path, policy: Path,
                teacher_manifest: Path, teacher_weights: Path, teacher_format: str, teacher_revision: str | None,
                output: Path, *, resume: Path | None = None, resume_state_sha256: str | None = None,
-               max_steps_this_run: int | None = None, max_runtime_config_bytes: int = 65536) -> dict:
+               max_steps_this_run: int | None = None, max_runtime_config_bytes: int = 65536,
+               initial_checkpoint: Path | None = None) -> dict:
     student_config, student_sha = base.load_config(student_path)
     distill_config, distill_sha = distill.load_config(distill_path)
     runtime, runtime_raw = runtime_config(runtime_path, max_runtime_config_bytes)
@@ -61,6 +62,17 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
                   Path(checkpoints.__file__), Path(base.corpus_documents.__file__), Path(base.screen_private_corpus.__file__),
                   Path(training_inputs.__file__), Path(training_inputs.lock_wheelhouse.__file__))
     code = {path.name: base.sha(path.read_bytes()) for path in code_paths}
+    initial_manifest, initial_weights = None, None
+    if initial_checkpoint is not None:
+        initial_manifest = base.read_bounded(initial_checkpoint / 'manifest.json', runtime['max_manifest_bytes'])
+        initial_weights = base.read_bounded(initial_checkpoint / 'weights.safetensors', runtime['max_checkpoint_bytes'])
+        initial = json.loads(initial_manifest)
+        if (not isinstance(initial, dict) or initial.get('schema_version') != 'lfg.owned-distillation-result.v1'
+                or initial.get('completed') is not True or initial.get('architecture') != student_config['architecture']
+                or initial.get('weights_sha256') != base.sha(initial_weights)
+                or not isinstance(initial.get('code_sha256'), dict)
+                or initial.get('code_sha256', {}).get('owned_student.py') != code['owned_student.py']):
+            raise ValueError('initial owned distillation checkpoint identity does not match')
     if runtime['device'] == 'cuda' and not torch.cuda.is_available():
         raise ValueError('requested CUDA device is unavailable')
     if runtime['device'] == 'cuda' and runtime['cuda_device_index'] >= torch.cuda.device_count():
@@ -92,6 +104,10 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
     if parameters > student_config['max_parameters']:
         raise ValueError('student exceeds configured parameter limit')
     model = owned_student.OwnedByteStudent(student_config['architecture']).to(device).train()
+    if initial_weights is not None:
+        model.load_state_dict(load(initial_weights), strict=True)
+        if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):
+            raise ValueError('initial checkpoint contains non-finite weights')
     optimizer = torch.optim.AdamW(model.parameters(), lr=student_config['learning_rate'],
                                   weight_decay=student_config['weight_decay'])
     rng = random.Random(student_config['seed'])
@@ -105,6 +121,8 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
                 'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG') if runtime['device'] == 'cuda' else None,
                 'cuda_devices': ([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
                                  if runtime['device'] == 'cuda' else [])}
+    if initial_manifest is not None and initial_weights is not None:
+        identity.update(initial_manifest_sha256=base.sha(initial_manifest), initial_weights_sha256=base.sha(initial_weights))
     checkpoint_config = {**runtime, 'steps': student_config['steps']}
     initial_step, losses, ce_losses, distill_losses, tokens = 0, [], [], [], 0
     if resume is not None:
@@ -155,6 +173,9 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
                            and base.sha(base.read_bounded(teacher_weights, distill_config['max_teacher_bytes'])) == teacher_id['weights_sha256'])
     if (not teacher_current or base.load_config(student_path)[1] != student_sha or distill.load_config(distill_path)[1] != distill_sha
             or runtime_config(runtime_path, max_runtime_config_bytes)[1] != runtime_raw
+            or (initial_checkpoint is not None and
+                (base.read_bounded(initial_checkpoint / 'manifest.json', runtime['max_manifest_bytes']) != initial_manifest
+                 or base.read_bounded(initial_checkpoint / 'weights.safetensors', runtime['max_checkpoint_bytes']) != initial_weights))
             or any(base.sha(path.read_bytes()) != code[path.name] for path in code_paths)):
         raise ValueError('distillation inputs changed during execution')
     if end_step < student_config['steps']:
@@ -183,6 +204,8 @@ def experiment(student_path: Path, distill_path: Path, runtime_path: Path, plan:
                 'allow_tf32': runtime['allow_tf32'], 'teacher_distillation_performed': True,
                 'validation_performed': False, 'test_opened': False, 'assessment_training_performed': False,
                 'assessment_quality_evaluated': False, 'promotion_eligible': False, 'corpus': source['corpus']['identity']}
+    if initial_manifest is not None and initial_weights is not None:
+        manifest.update(initial_manifest_sha256=base.sha(initial_manifest), initial_weights_sha256=base.sha(initial_weights))
     if runtime['device'] == 'cuda':
         manifest.update(cuda_device=torch.cuda.get_device_name(device), cuda_device_index=runtime['cuda_device_index'],
                         cuda_memory_fraction=runtime['cuda_memory_fraction'], cuda_version=torch.version.cuda,
@@ -204,6 +227,7 @@ if __name__ == '__main__':
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--teacher-format', choices=('owned-byte', 'gpt2-byte'), required=True)
     parser.add_argument('--teacher-revision')
+    parser.add_argument('--initial-checkpoint', type=Path)
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--resume-state-sha256')
     parser.add_argument('--max-steps-this-run', type=int)
@@ -213,7 +237,8 @@ if __name__ == '__main__':
         result = experiment(args.student_config, args.distillation_config, args.runtime_config, args.corpus_plan,
                 args.screen_policy, args.teacher_manifest, args.teacher_weights, args.teacher_format,
                 args.teacher_revision, args.output, resume=args.resume, resume_state_sha256=args.resume_state_sha256,
-                max_steps_this_run=args.max_steps_this_run, max_runtime_config_bytes=args.max_runtime_config_bytes)
+                max_steps_this_run=args.max_steps_this_run, max_runtime_config_bytes=args.max_runtime_config_bytes,
+                initial_checkpoint=args.initial_checkpoint)
         print(json.dumps({key: result.get(key) for key in ('completed', 'steps', 'tokens_processed', 'weights_sha256',
              'latest_checkpoint', 'latest_checkpoint_state_sha256', 'elapsed_seconds', 'device', 'cuda_device',
              'cuda_memory_fraction', 'cuda_peak_allocated_bytes', 'cuda_peak_reserved_bytes',
