@@ -32,7 +32,8 @@ materialized as negative candidate labels. If screening would alter source
 text, this span-bound builder refuses the record rather than risk offset drift.
 The provider candidate projection is screened before storage.
 
-The dataset records the original source, line, prompt, provider-cache, relation,
+The dataset records the selected verified source identity (or a separately
+verified POSIX projection identity), line, prompt, provider-cache, relation,
 target, screening-policy, adapter and framing digests. It explicitly retains
 `review_status: unreviewed`, unknown outcome, entitlement, execution and agent
 count, exploratory train assignment, unknown heldout separation, and disabled
@@ -91,6 +92,12 @@ dataset file. It does not automatically assemble a representative corpus.
 
 For a Windows-origin request that cannot be safely verified on its source
 host, the caller may add `windows_origin_projection_claims` to the caller input.
+It contains `schema_version: lfg.windows-origin-projection-claims.v1`,
+`origin_platform: windows`, `origin_verification: unverified_claim`, and
+SHA-256 claims named `line_sha256_claim`, `prefix_sha256_claim`, and
+`user_text_sha256_claim`. The text digest must match the verified POSIX
+projection bytes. An origin locator digest, source line number, and source
+prefix byte count may be included together as further unverified claims.
 The adapter accepts it only with a separately verified POSIX file containing
 one selected user message, no later bytes, and text unchanged by the configured
 screening policy. The POSIX projection digest is verified source evidence; the
