@@ -540,6 +540,8 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertFalse(result['deployment_ready'])
         self.assertFalse(result['promotion_eligible'])
 
+    @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors')),
+                         'torch and safetensors required for end-to-end trainer CLI')
     def test_user_request_cli_os_error_does_not_print_private_path(self):
         self._build()
         import train_owned_assessment_sft as trainer
@@ -557,12 +559,29 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertIn('filesystem operation failed', run.stderr)
         self.assertNotIn(marker, run.stderr)
 
-    def test_completed_sft_checkpoint_provenance_validator_rejects_tampering(self):
-        import owned_student
+    def test_user_request_error_formatter_redacts_os_error_without_ml_dependencies(self):
+        import argparse
         import train_owned_assessment_sft as trainer
-        code_paths = [Path(trainer.__file__), Path(trainer.checkpoints.__file__), Path(owned_student.__file__)]
-        import train_owned_student as base
-        code_paths.append(Path(base.__file__))
+
+        config_path = self.root / 'user-request-config.json'
+        config_path.write_text(json.dumps({'schema_version': trainer.USER_REQUEST_CONFIG_SCHEMA}), encoding='utf-8')
+        marker = 'PRIVATE_PATH_MARKER_DO_NOT_LOG'
+        try:
+            (self.root / marker / 'missing-checkpoint').read_bytes()
+        except OSError as error:
+            args = argparse.Namespace(config=config_path, max_config_bytes=65536, dataset=self.root / 'missing')
+            message = trainer._format_cli_error(error, args)
+        else:
+            self.fail('fixture missing checkpoint unexpectedly exists')
+        self.assertIn('FileNotFoundError', message)
+        self.assertIn('filesystem operation failed', message)
+        self.assertNotIn(marker, message)
+
+    def test_completed_sft_checkpoint_provenance_validator_rejects_tampering(self):
+        import train_owned_assessment_sft as trainer
+        code_dir = Path(trainer.__file__).parent
+        code_paths = [code_dir / name for name in ('train_owned_assessment_sft.py',
+                      'owned_sft_checkpoint.py', 'owned_student.py', 'train_owned_student.py')]
         code = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in code_paths}
         weights = b'fixture-weights'
         system_sha = hashlib.sha256(b'fixture system').hexdigest()

@@ -604,6 +604,14 @@ def _cli_is_user_request_mode(args: argparse.Namespace) -> bool:
         return False
 
 
+def _format_cli_error(error: Exception, args: argparse.Namespace) -> str:
+    """Hide filesystem paths in user-request errors without requiring ML dependencies."""
+    detail = str(error)
+    if isinstance(error, OSError) and _cli_is_user_request_mode(args):
+        detail = f'filesystem operation failed (errno={error.errno})'
+    return f'Owned assessment SFT failed ({type(error).__name__}): {detail}'
+
+
 def sample_batch(records: list[dict], rng: random.Random, batch_size: int, context: int):
     inputs, labels, corrections = [], [], []
     for item in rng.choices(records, weights=[entry['weight'] for entry in records], k=batch_size):
@@ -862,7 +870,4 @@ if __name__ == '__main__':
                                'heldout_separation', 'runtime_compatible', 'user_request_quality_evaluated')
         print(json.dumps({key: result.get(key) for key in summary_fields}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError) as error:
-        detail = str(error)
-        if isinstance(error, OSError) and _cli_is_user_request_mode(args):
-            detail = f'filesystem operation failed (errno={error.errno})'
-        raise SystemExit(f'Owned assessment SFT failed ({type(error).__name__}): {detail}') from None
+        raise SystemExit(_format_cli_error(error, args)) from None
