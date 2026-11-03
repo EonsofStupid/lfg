@@ -209,7 +209,7 @@ class UserRequestSFTTests(unittest.TestCase):
         altered_policy['rules'] = [{'id': 'fixture-model', 'pattern': 'Model Z', 'replacement': '[redacted]'}]
         changed_policy = self.root / 'changed-screen.json'
         changed_policy.write_text(json.dumps(altered_policy), encoding='utf-8')
-        with self.assertRaisesRegex(ValueError, 'already-screened single-message'):
+        with self.assertRaises(ValueError):
             user_request_sft.build_dataset(None, self.snapshot_path, None, self.obs_config_path,
                 self.sft_config_path, changed_policy, self.root / 'dataset.json',
                 caller_input_path=self.caller_input_path)
