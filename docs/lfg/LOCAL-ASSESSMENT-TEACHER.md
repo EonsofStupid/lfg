@@ -53,6 +53,35 @@ For subsequent batches the selector can exclude prior request IDs and
 SHA-256 digests of normalized, rescreened request text. Exact normalized
 deduplication does not prove semantic or conversation independence.
 
+For short follow-ups, `contextual_teacher_selection.py` can instead verify the
+original source prefix and combine the current user message with a bounded
+number of preceding user messages from the same source. It reads only declared
+training source files, checks the screened candidate and source digests, screens
+the combined text with the configured policy, and emits the same private
+selection format accepted by the collector. Selection limits, framing and
+exclusions are configurable in
+[the example](../../ml/lfg-encoder/contextual-teacher-selection.example.json).
+Codex context contains user messages only; Claude context follows available
+same-session parent links. Either can omit important assistant responses, and
+an authentic conversation is not proof that a teacher's assessment is correct
+or that the project outcome was successful. Pattern screening remains
+incomplete, so the selection, source paths, outputs and weights stay private.
+
+```powershell
+python ml/lfg-encoder/contextual_teacher_selection.py --plan PRIVATE_TRAIN_PLAN.json `
+  --dataset PRIVATE_SCREENED_DATASET --policy PRIVATE_SCREEN_POLICY.json `
+  --config PRIVATE_CONTEXT_SELECTION_CONFIG.json --output NEW_PRIVATE_SELECTION
+```
+
+On 2026-11-02, a selection from the owner's already screened training split
+produced 95 additional contextual requests across 11 declared project labels;
+four candidates lacked usable prior context and two failed source verification.
+Eighty-four selected context windows were truncated by the configured bounds.
+The validation and test sources were not opened. The selection remains
+unreviewed. Its resumable local teacher job produced 94 responses and recorded
+one incomplete response. The resulting 470-record combined dataset was
+delivered to the Spark and accepted for another checkpointed fine-tune.
+
 ```powershell
 python ml/lfg-encoder/select_teacher_requests.py --dataset PRIVATE_SCREENED_DATASET `
   --policy PRIVATE_SCREEN_POLICY.json --config PRIVATE_SELECTION_CONFIG.json `

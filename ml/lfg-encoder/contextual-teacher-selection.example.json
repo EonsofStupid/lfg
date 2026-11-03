@@ -1,0 +1,23 @@
+{
+  "schema_version": "lfg.contextual-teacher-selection.v1",
+  "seed": "REPLACE_WITH_SELECTION_SEED",
+  "max_manifest_bytes": 2097152,
+  "max_train_bytes": 10485760,
+  "max_source_bytes": 16777216,
+  "max_session_bytes": 536870912,
+  "max_line_bytes": 16777216,
+  "max_prior_messages": 3,
+  "max_prior_bytes": 2400,
+  "max_ancestry_records": 100000,
+  "min_followup_bytes": 32,
+  "max_followup_bytes": 79,
+  "max_request_bytes": 3500,
+  "max_candidates": 10000,
+  "max_selected": 100,
+  "max_per_project": 100,
+  "prior_prefix": "Previous messages from the user, for context:\n",
+  "separator": "\n---\n",
+  "current_prefix": "\n\nCurrent user request:\n",
+  "exclude_ids": [],
+  "exclude_normalized_sha256": []
+}

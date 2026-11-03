@@ -1,13 +1,35 @@
 import json
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
+import urllib.request
 
 import owned_training_dashboard as dashboard
 
 
 class DashboardStatusTests(unittest.TestCase):
+    def test_additional_run_endpoint_exposes_only_sanitized_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'status.json'
+            path.write_text(json.dumps({'schema_version': 'lfg.owned-training-status.v1', 'state': 'training',
+                                        'step': 12, 'total_steps': 100, 'updated_unix': time.time(),
+                                        'private_text': 'must not leave the host'}))
+            server = ThreadingHTTPServer(('127.0.0.1', 0), dashboard.handler(path, additional_status=path))
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/additional-status') as response:
+                    result = json.load(response)
+                self.assertEqual(result['step'], 12)
+                self.assertNotIn('private_text', result)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join()
+
     def test_only_public_progress_fields_are_exposed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'status.json'

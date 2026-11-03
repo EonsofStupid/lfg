@@ -6,6 +6,14 @@ locked and proposed decisions) supersedes the earlier v1, v2 and v2.1 notes.
 later boundary question bank and stack drafts are likewise drafts. Treat these
 as project source material, not proof that the described code already exists.
 
+The owner's current direction is that LFG is also its own fine-tuned
+classification and assessment model for development work, including intent,
+complexity, model and agent recommendations, and CPU-burst efficiency. The
+target is an approximately 650 MB model in a standalone product. The recovered
+deterministic design remains a useful baseline and source of provenance; it
+does not replace that model objective. CPU efficiency requires measurements on
+representative hardware and is not established by a training label.
+
 The v3 notes describe LFG as a deterministic System 1 classification kernel
 and a separate extension. The kernel has Gate, Choice, Score, Extract and
 Compose operations; identical input and snapshot revision must produce

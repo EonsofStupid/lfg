@@ -28,6 +28,7 @@ progress{width:100%;height:1.4rem;accent-color:#38bdf8}small{color:#d1d5db}
 <section id="evaluation" hidden><h2>Development format check</h2><p id="evaluation-result">Waiting</p>
 <small>This checks JSON structure, not assessment accuracy.</small></section>
 <section id="queue" hidden><h2>Continual training queue</h2><p id="queue-result">Waiting</p></section>
+<section id="additional" hidden><h2>Additional training run</h2><p id="additional-result">Waiting</p></section>
 <section><p>This is an experimental owned-model run. A completed training run does not establish assessment quality or release readiness.</p></section>
 </main><script>
 const teacherUrl=__TEACHER_URL__;
@@ -58,6 +59,10 @@ try{const r=await fetch('api/queue',{cache:'no-store'});if(r.ok){const d=await r
 document.getElementById('queue').hidden=false;document.getElementById('queue-result').textContent=
 'Status: '+d.state+'; '+d.records+' records; '+d.completed_updates+' completed updates'+
 (d.total_steps?'; '+d.step+' / '+d.total_steps+' steps':'');}}
+catch(e){}
+try{const r=await fetch('api/additional-status',{cache:'no-store'});if(r.ok){const d=await r.json();
+document.getElementById('additional').hidden=false;document.getElementById('additional-result').textContent=
+'Status: '+d.state+'; '+d.step+' / '+d.total_steps+' steps';}}
 catch(e){} }refresh();setInterval(refresh,5000);
 </script></html>'''
 
@@ -164,7 +169,8 @@ def handler(path: Path, teacher_status_url: str | None = None, next_status: Path
             evaluation_report: Path | None = None, queue_status_path: Path | None = None,
             update_evaluation_status: Path | None = None, metrics_root: Path | None = None,
             next_metrics_root: Path | None = None, metrics_max_bytes: int = 33554432,
-            metrics_window: int = 100, metrics_refresh_seconds: int = 30):
+            metrics_window: int = 100, metrics_refresh_seconds: int = 30,
+            additional_status: Path | None = None):
     page = render_page(teacher_status_url)
     cache, cache_lock = {'time': 0.0, 'value': {'state': 'pending'}}, threading.Lock()
     class Handler(BaseHTTPRequestHandler):
@@ -179,6 +185,9 @@ def handler(path: Path, teacher_status_url: str | None = None, next_status: Path
                 content_type = 'application/json; charset=utf-8'
             elif self.path == '/api/queue' and queue_status_path is not None:
                 content = json.dumps(queue_status(queue_status_path), allow_nan=False).encode('utf-8')
+                content_type = 'application/json; charset=utf-8'
+            elif self.path == '/api/additional-status' and additional_status is not None:
+                content = json.dumps(status(additional_status), allow_nan=False).encode('utf-8')
                 content_type = 'application/json; charset=utf-8'
             elif self.path == '/api/metrics' and metrics_root is not None:
                 with cache_lock:
@@ -213,6 +222,7 @@ def main():
     parser.add_argument('--next-status', type=Path, help='optional follow-on job status, used once present')
     parser.add_argument('--evaluation-report', type=Path, help='optional follow-on development format report')
     parser.add_argument('--queue-status', type=Path, help='optional continual training queue status')
+    parser.add_argument('--additional-status', type=Path, help='optional additional training run status')
     parser.add_argument('--update-evaluation-status', type=Path, help='optional evaluation status for continual updates')
     parser.add_argument('--metrics-root', type=Path, help='optional current job checkpoint directory')
     parser.add_argument('--next-metrics-root', type=Path, help='optional follow-on job checkpoint directory')
@@ -232,7 +242,7 @@ def main():
                                                         args.evaluation_report, args.queue_status,
                                                         args.update_evaluation_status, args.metrics_root,
                                                         args.next_metrics_root, args.metrics_max_bytes, args.metrics_window,
-                                                        args.metrics_refresh_seconds)).serve_forever()
+                                                        args.metrics_refresh_seconds, args.additional_status)).serve_forever()
 
 
 if __name__ == '__main__':

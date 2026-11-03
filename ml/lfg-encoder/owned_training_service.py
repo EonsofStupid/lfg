@@ -53,6 +53,9 @@ def config(path: Path) -> dict:
         raise ValueError('unsupported teacher format')
     if kind == 'distillation' and value['teacher_format'] == 'gpt2-byte' and not value.get('teacher_revision'):
         raise ValueError('a pinned teacher revision is required')
+    if ('initial_checkpoint' in value and (kind != 'distillation' or not isinstance(value['initial_checkpoint'], str)
+                                            or not Path(value['initial_checkpoint']).is_absolute())):
+        raise ValueError('initial checkpoint must be an absolute distillation checkpoint path')
     if type(value.get('segment_steps')) is not int or value['segment_steps'] < 1:
         raise ValueError('segment_steps must be positive')
     if type(value.get('status_poll_seconds')) not in (int, float) or not 1 <= value['status_poll_seconds'] <= 3600:
@@ -149,6 +152,8 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
             command.extend(['--config', value['sft_config']])
         if kind == 'distillation' and value.get('teacher_revision'):
             command.extend(['--teacher-revision', value['teacher_revision']])
+        if kind == 'distillation' and value.get('initial_checkpoint'):
+            command.extend(['--initial-checkpoint', value['initial_checkpoint']])
         command.extend(['--output', str(output), '--max-steps-this-run', str(value['segment_steps'])])
         if checkpoint:
             command.extend(['--resume', str(checkpoint[1]), '--resume-state-sha256', checkpoint[2]])

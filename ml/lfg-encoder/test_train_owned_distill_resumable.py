@@ -60,6 +60,43 @@ class ResumableDistillationTests(unittest.TestCase):
         return self.subject.experiment(self.student_path, self.distill_path, self.runtime_path, self.plan_path,
                self.policy, self.teacher_manifest, self.teacher_weights, 'owned-byte', None, output, **kwargs)
 
+    def test_new_corpus_initialization_resumes_and_preserves_checkpoint_lineage(self):
+        initial = self.run_experiment(self.root / 'initial')
+        self.source.write_text('A distinct fixture corpus for a continued training experiment. ' * 4)
+        self.plan['sources'][0]['sha256'] = self.sha(self.source.read_bytes())
+        self.write_plan()
+        full = self.run_experiment(self.root / 'continued', initial_checkpoint=self.root / 'initial')
+        partial = self.run_experiment(self.root / 'continued-partial', initial_checkpoint=self.root / 'initial',
+                                      max_steps_this_run=1)
+        resumed = self.run_experiment(self.root / 'continued-resumed', initial_checkpoint=self.root / 'initial',
+                                      resume=Path(partial['latest_checkpoint']),
+                                      resume_state_sha256=partial['latest_checkpoint_state_sha256'])
+        self.assertEqual(full['weights_sha256'], resumed['weights_sha256'])
+        self.assertEqual(full['initial_weights_sha256'], initial['weights_sha256'])
+        self.assertNotEqual(full['weights_sha256'], initial['weights_sha256'])
+        self.assertFalse(full['test_opened'])
+
+    def test_initial_checkpoint_tampering_is_rejected(self):
+        self.run_experiment(self.root / 'initial')
+        path = self.root / 'initial' / 'weights.safetensors'
+        raw = bytearray(path.read_bytes())
+        raw[-1] ^= 1
+        path.write_bytes(raw)
+        with self.assertRaisesRegex(ValueError, 'checkpoint identity'):
+            self.run_experiment(self.root / 'continued', initial_checkpoint=self.root / 'initial')
+        self.assertFalse((self.root / 'continued').exists())
+
+    def test_resume_rejects_a_different_valid_initial_checkpoint(self):
+        self.run_experiment(self.root / 'initial')
+        self.run_experiment(self.root / 'different', initial_checkpoint=self.root / 'initial')
+        partial = self.run_experiment(self.root / 'continued-partial', initial_checkpoint=self.root / 'initial',
+                                      max_steps_this_run=1)
+        with self.assertRaisesRegex(ValueError, 'checkpoint identity'):
+            self.run_experiment(self.root / 'bad-resume', initial_checkpoint=self.root / 'different',
+                                resume=Path(partial['latest_checkpoint']),
+                                resume_state_sha256=partial['latest_checkpoint_state_sha256'])
+        self.assertFalse((self.root / 'bad-resume').exists())
+
     def test_resume_matches_uninterrupted_and_never_opens_validation(self):
         full = self.run_experiment(self.root / 'full')
         partial = self.run_experiment(self.root / 'partial', max_steps_this_run=1)

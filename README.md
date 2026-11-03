@@ -9,8 +9,9 @@ run, and trained on its own.
 LFG is a tuned model and a standalone product. For each prompt it reports four
 results: the **intent**, the **complexity**, the **models** suggested, and the
 **total agents** the work needs, with the evidence behind each. It ships as a
-self-contained, CPU-oriented binary with its own UI. It is useful on its own
-and can be combined with SWAG and RRFlow.
+self-contained, CPU-oriented binary with its own UI. CPU burst efficiency is
+measured on representative workloads, not inferred from a model's answer. It
+is useful on its own and can be combined with SWAG and RRFlow.
 
 LFG's model is our own. It is distilled and fine-tuned on the owner's real
 projects and chats, targets about 650 MB, and is bound with the runtime and UI
