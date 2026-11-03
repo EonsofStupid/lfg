@@ -426,7 +426,8 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     # compare all reconstructed source, provider, split, and access fields so a
     # caller cannot edit model rows or claims while retaining the original hash.
     if (current['source'] != source or current['provider_list'] != provider
-            or current['split'] != split or current['access_claims'] != value.get('access_claims')):
+            or current['split'] != split or current['access_claims'] != value.get('access_claims')
+            or current['training_claims'] != value.get('training_claims')):
         raise ValueError('snapshot source or provider cache changed')
 
 
@@ -623,6 +624,10 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or not isinstance(provider.get('cache_sha256'), str)
             or not isinstance(provider.get('screen_policy_sha256'), str)):
         raise ValueError('staged source provenance is incomplete')
+    if source_snapshot.get('training_claims') != {
+            'task_outcome': 'unknown', 'teacher_proposal': 'none',
+            'review_status': 'unreviewed', 'promotion_eligible': False}:
+        raise ValueError('staged training claims must remain unknown and unreviewed')
     if isinstance(materialization, dict) and materialization.get('kind') == 'origin-verified-private-projection':
         if (materialization.get('source_and_cache_verified_on_origin_host') is not True
                 or materialization.get('full_source_paths_transferred') is not False
@@ -744,30 +749,104 @@ def _require_ignored_untracked(path: Path) -> None:
         raise ValueError('snapshot must be ignored and untracked')
 
 
+def _open_private_parent(path: Path) -> tuple[int, str, str]:
+    """Open an existing POSIX parent without following replaceable path components."""
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'supports_dir_fd'):
+        raise ValueError('safe private output requires POSIX no-follow directory handles')
+    absolute = os.path.abspath(os.fspath(path))
+    parent, name = os.path.split(absolute)
+    if not name or name in {'.', '..'}:
+        raise ValueError('invalid private output path')
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    descriptor = os.open(os.path.sep, flags)
+    try:
+        current = os.path.sep
+        for component in parent.split(os.path.sep):
+            if not component:
+                continue
+            child = os.open(component, flags, dir_fd=descriptor)
+            try:
+                info = os.fstat(child)
+                mode = stat.S_IMODE(info.st_mode)
+                trusted_owner = info.st_uid in {0, os.geteuid()}
+                sticky_shared = bool(info.st_mode & stat.S_ISVTX) and info.st_uid == 0
+                if not trusted_owner or (mode & 0o022 and not sticky_shared):
+                    raise ValueError('private output path has an untrusted writable ancestor')
+                os.close(descriptor)
+                descriptor = child
+                current = os.path.join(current, component)
+            except Exception:
+                os.close(child)
+                raise
+        info = os.fstat(descriptor)
+        if info.st_uid not in {0, os.geteuid()} or stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError('private output parent is not protected from other writers')
+        actual_parent = os.readlink(f'/proc/self/fd/{descriptor}')
+        return descriptor, name, actual_parent
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _verify_parent_binding(path: Path, descriptor: int, name: str) -> None:
+    """Reject path swaps after preflight while retaining the opened directory handle."""
+    try:
+        check, check_name, _actual = _open_private_parent(path)
+    except (OSError, ValueError):
+        raise ValueError('private output path changed during write') from None
+    try:
+        if check_name != name:
+            raise ValueError('private output path changed during write')
+        held, current = os.fstat(descriptor), os.fstat(check)
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError('private output path changed during write')
+    finally:
+        os.close(check)
+
+
+def _write_private_posix(path: Path, raw: bytes) -> None:
+    directory_fd = -1
+    file_fd = -1
+    name = ''
+    created = False
+    try:
+        directory_fd, name, actual_parent = _open_private_parent(path)
+        actual_path = Path(actual_parent) / name
+        _require_ignored_untracked(actual_path)
+        _verify_parent_binding(path, directory_fd, name)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        created = True
+        info = os.fstat(file_fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+            raise ValueError('private output file is not owner-only')
+        with os.fdopen(file_fd, 'wb') as stream:
+            file_fd = -1
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _verify_parent_binding(path, directory_fd, name)
+    except Exception:
+        if created and directory_fd >= 0:
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
 def write_private_snapshot(path: Path, snapshot: dict) -> None:
     """Write a new ignored snapshot on POSIX; Windows path safety is not proven."""
     if os.name == 'nt':
         raise ValueError('Windows private snapshot output is disabled until no-follow ACL verification is available')
     raw = json_bytes(snapshot)
-    _require_ignored_untracked(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, 'wb') as stream:
-            descriptor = -1
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            raise ValueError('POSIX snapshot permissions are broader than owner-only')
-    except Exception:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
+    _write_private_posix(path, raw)
 
 
 def write_private_bytes(path: Path, raw: bytes) -> None:
@@ -776,25 +855,7 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
         raise ValueError('private output must be bytes')
     if os.name == 'nt':
         raise ValueError('Windows private snapshot output is disabled until no-follow ACL verification is available')
-    _require_ignored_untracked(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, 'wb') as stream:
-            descriptor = -1
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            raise ValueError('POSIX snapshot permissions are broader than owner-only')
-    except Exception:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
+    _write_private_posix(path, raw)
 
 
 def main() -> None:

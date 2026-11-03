@@ -104,7 +104,10 @@ disabled on Windows because the implementation cannot yet prove no-follow
 handling for junctions and trusted ownership across path components. Use the
 owner-only POSIX writer for private snapshot materialization until a proven
 Windows path/handle guard is available; Windows attempts fail before resolving
-or changing the requested path.
+or changing the requested path. POSIX output requires an existing protected
+parent directory; it walks with no-follow directory handles, rejects untrusted
+writable ancestors, and creates the file relative to the retained parent handle
+after checking the Git ignored/untracked boundary for that opened location.
 
 When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment

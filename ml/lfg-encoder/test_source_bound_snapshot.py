@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -96,11 +97,19 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             ('priority', lambda row: row.__setitem__('priority', 0)),
             ('efforts', lambda row: row.__setitem__('provider_supported_efforts', ['unlisted-effort'])),
             ('access', lambda row: row.__setitem__('subscription_entitlement', 'available')),
+            ('outcome', lambda row: row.__setitem__('task_outcome', 'confirmed')),
+            ('teacher_proposal', lambda row: row.__setitem__('teacher_proposal', 'accepted')),
+            ('review', lambda row: row.__setitem__('review_status', 'reviewed')),
+            ('promotion', lambda row: row.__setitem__('promotion_eligible', True)),
         )
         for name, mutate in mutations:
             changed = copy.deepcopy(value)
-            target = (changed['provider_list']['models'][0] if name != 'access'
-                      else changed['access_claims'])
+            if name == 'access':
+                target = changed['access_claims']
+            elif name in {'outcome', 'teacher_proposal', 'review', 'promotion'}:
+                target = changed['training_claims']
+            else:
+                target = changed['provider_list']['models'][0]
             mutate(target)
             with self.subTest(field=name), self.assertRaisesRegex(ValueError, 'provider cache changed'):
                 snapshot.revalidate_snapshot(changed)
@@ -127,6 +136,14 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         copied = snapshot.validate_staged_artifacts(projection_raw, request_raw, manifest_raw, context_raw, bundle_raw)
         self.assertEqual(copied['snapshot_sha256'], manifest['source_bound_snapshot_sha256'])
         self.assertEqual(copied['heldout_separation'], 'unknown')
+        for field, value in (('task_outcome', 'confirmed'), ('teacher_proposal', 'accepted'),
+                             ('review_status', 'reviewed'), ('promotion_eligible', True)):
+            changed_projection = json.loads(projection_raw)
+            changed_projection['training_claims'][field] = value
+            with self.subTest(staged_claim=field), self.assertRaisesRegex(
+                    ValueError, 'training claims must remain unknown and unreviewed'):
+                snapshot.validate_staged_artifacts(snapshot.json_bytes(changed_projection),
+                                                   request_raw, manifest_raw, context_raw)
         with self.assertRaises(ValueError):
             snapshot.validate_staged_artifacts(projection_raw, request_raw, manifest_raw,
                                                context_raw.replace(b'provider_cache_sha256', b'provider_cache_sha25', 1),
@@ -311,6 +328,34 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertFalse(destination.exists())
         self.assertFalse((self.root / 'bytes.bin').exists())
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory-handle verification is POSIX-specific')
+    def test_posix_private_write_uses_existing_protected_parent(self):
+        destination = self.root / 'private-output.json'
+        snapshot.write_private_snapshot(destination, {'ok': True})
+        self.assertEqual(json.loads(destination.read_bytes()), {'ok': True})
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory-handle verification is POSIX-specific')
+    def test_posix_parent_swap_after_git_preflight_is_rejected(self):
+        parent = self.root / 'swap-parent'
+        original = self.root / 'original-parent'
+        target = self.root / 'attacker-target'
+        parent.mkdir(mode=0o700)
+        target.mkdir(mode=0o700)
+        destination = parent / 'snapshot.json'
+
+        def swap_after_preflight(_path):
+            parent.rename(original)
+            parent.symlink_to(target, target_is_directory=True)
+
+        with mock.patch.object(snapshot, '_require_ignored_untracked', side_effect=swap_after_preflight):
+            with self.assertRaisesRegex(ValueError, 'private output path changed during write'):
+                snapshot.write_private_snapshot(destination, {'ok': True})
+        self.assertFalse((target / 'snapshot.json').exists())
+        self.assertFalse((original / 'snapshot.json').exists())
+        parent.unlink()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows CLI path handling is Windows-specific')
     def test_windows_cli_fails_before_opening_inventory_or_source(self):
         argv = ['source_bound_snapshot.py', '--inventory', str(self.root / 'inventory.jsonl'),
                 '--record', '1', '--provider-cache', str(self.cache),
