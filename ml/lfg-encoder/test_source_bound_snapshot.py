@@ -642,6 +642,50 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertNotIn('CUSTOM_SECRET_VALUE', note)
         self.assertIn('[REDACTED]', note)
 
+    def test_provider_known_fields_use_both_policies_before_persistence(self):
+        policy = json.loads(Path(snapshot.__file__).with_name('private-corpus-screen.example.json').read_bytes())
+        policy['revision'] = 'fixture-custom'
+        policy['rules'] = [{'id': 'fixture', 'pattern': 'CUSTOM_SECRET_[A-Z]+', 'replacement': '[REDACTED]'}]
+        policy_path = self.root / 'custom-policy.json'
+        policy_path.write_bytes(snapshot.json_bytes(policy))
+        self.write_cache({'fetched_at': 'Basic YWxhZGRpbjpvcGVuc2VzYW1l', 'models': [
+            {'slug': 'visible', 'visibility': 'list', 'display_name': 'Cookie: session=fixture-cookie-value',
+             'description': 'Basic YWxhZGRpbjpvcGVuc2VzYW1l CUSTOM_SECRET_VALUE'}]})
+        metadata, _, _ = snapshot.read_provider_cache(self.cache, screen_policy_path=policy_path)
+        encoded = json.dumps(metadata)
+        for secret in ('YWxhZGRpbjpvcGVuc2VzYW1l', 'fixture-cookie-value', 'CUSTOM_SECRET_VALUE'):
+            self.assertNotIn(secret, encoded)
+        for key, item in [('slug', 'Basic YWxhZGRpbjpvcGVuc2VzYW1l'),
+                          ('supported_reasoning_levels', [{'effort': 'CUSTOM_SECRET_VALUE'}])]:
+            with self.subTest(identity=key):
+                model = {'slug': 'visible', 'visibility': 'list', key: item}
+                self.write_cache({'models': [model]})
+                with self.assertRaisesRegex(ValueError, 'requires redaction'):
+                    snapshot.read_provider_cache(self.cache, screen_policy_path=policy_path)
+
+    def test_selected_request_is_screened_by_both_policies_before_staging(self):
+        raw = self.session.read_bytes().replace(
+            b'Review the Terra project plan.',
+            b'Review the Terra project plan. Basic YWxhZGRpbjpvcGVuc2VzYW1l CUSTOM_SECRET_VALUE')
+        self.session.write_bytes(raw)
+        status, records = inventory.scan_file(
+            self.session, {'lfg': inventory.normalize(str(self.root / 'project'))}, 4096, 4096)
+        self.assertEqual(status, 'scanned')
+        policy = json.loads(Path(snapshot.__file__).with_name('private-corpus-screen.example.json').read_bytes())
+        policy['revision'] = 'fixture-custom'
+        policy['rules'] = [{'id': 'fixture', 'pattern': 'CUSTOM_SECRET_[A-Z]+', 'replacement': '[REDACTED]'}]
+        policy_path = self.root / 'custom-policy.json'
+        policy_path.write_bytes(snapshot.json_bytes(policy))
+        value = snapshot.build_snapshot(records[0], self.cache, split_policy='exploratory_train',
+                                        screen_policy_path=policy_path)
+        prepared = snapshot.prepare_single_request(value, policy_path=policy_path,
+                                                   max_request_bytes=4096, max_context_bytes=100_000)
+        request_raw = prepared[3]
+        self.assertNotIn(b'YWxhZGRpbjpvcGVuc2VzYW1l', request_raw)
+        self.assertNotIn(b'CUSTOM_SECRET_VALUE', request_raw)
+        snapshot.validate_staged_artifacts(prepared[6], request_raw, prepared[4], prepared[5],
+                                           prepared[7], policy_path.read_bytes())
+
     def test_provider_metadata_is_screened_before_persistence_and_identity_changes_rejected(self):
         policy = self.root / 'screen-policy.json'
         policy.write_text(json.dumps({
@@ -942,6 +986,54 @@ class StagedBindingTests(unittest.TestCase):
         model['description'] = {'nested': 'CUSTOM_SECRET_VALUE'}
         with self.assertRaisesRegex(ValueError, 'provider model metadata'):
             self.check()
+
+    def test_resealed_known_strings_must_pass_baseline_and_configured_policy(self):
+        model = self.projection['provider_list']['models'][0]
+        entry = self.context['projects']['fixture']
+        for secret in ('Basic YWxhZGRpbjpvcGVuc2VzYW1l', 'Cookie: session=fixture-cookie-value',
+                       'CUSTOM_SECRET_VALUE'):
+            for field in ('model_id', 'display_name', 'description', 'provider_supported_efforts', 'fetched_at',
+                          'request', 'context'):
+                with self.subTest(field=field, policy='baseline-or-configured'):
+                    provider = self.projection['provider_list']
+                    if field == 'fetched_at':
+                        provider[field] = secret
+                    elif field == 'request':
+                        self.request['text'] = secret
+                        self.request['screened_text_sha256'] = snapshot.sha(secret.encode())
+                    elif field == 'context':
+                        entry['text'] = secret
+                        entry['sha256'] = snapshot.sha(secret.encode())
+                    else:
+                        model[field] = [secret] if field == 'provider_supported_efforts' else secret
+                    with self.assertRaises(ValueError):
+                        self.check()
+                    if field == 'fetched_at':
+                        del provider[field]
+                    elif field == 'request':
+                        self.request['text'] = 'fixture request'
+                        self.request['screened_text_sha256'] = snapshot.sha(b'fixture request')
+                    elif field == 'context':
+                        entry['text'] = 'fixture context'
+                        entry['sha256'] = snapshot.sha(b'fixture context')
+                    elif field == 'model_id':
+                        model[field] = 'fixture-model'
+                    elif field == 'provider_supported_efforts':
+                        model[field] = []
+                    else:
+                        del model[field]
+        self.assertEqual(self.check()['project'], 'fixture')
+
+    def test_configured_replacement_cannot_reintroduce_a_baseline_secret(self):
+        policy = json.loads(self.policy_raw)
+        policy['rules'][0]['replacement'] = 'Basic YWxhZGRpbjpvcGVuc2VzYW1l'
+        custom, custom_rules, _ = snapshot.screen_private_corpus.load_policy_bytes(snapshot.json_bytes(policy), 1024 * 1024)
+        baseline, baseline_rules, _ = snapshot.screen_private_corpus.load_policy(snapshot._default_screen_policy_path(), 1024 * 1024)
+        policies = [(baseline, baseline_rules), (custom, custom_rules)]
+        with self.assertRaisesRegex(ValueError, 'requiring further screening'):
+            snapshot._screen_text_policies('CUSTOM_SECRET_VALUE', policies)
+        with self.assertRaisesRegex(ValueError, 'requiring further screening'):
+            snapshot._screen_extension_policies({'note': 'CUSTOM_SECRET_VALUE'}, policies)
 
 
 if __name__ == '__main__':

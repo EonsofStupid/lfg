@@ -7,6 +7,7 @@ subscription entitlement, historical effort, or an evaluation split.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -114,6 +115,35 @@ def _require_screened_extensions(value: dict, known: set[str], policies: list[tu
             raise ValueError('staged extensions require screening')
 
 
+def _screen_extension_policies(value: object, policies: list[tuple[dict, list]]) -> object:
+    result = value
+    for policy, rules in policies:
+        result = _safe_extensions(result, rules, policy['limits'])
+    for policy, rules in policies:
+        if _safe_extensions(result, rules, policy['limits']) != result:
+            raise ValueError('screening policies produced extensions requiring further screening')
+    return result
+
+
+def _screen_text_policies(text: str, policies: list[tuple[dict, list]]) -> tuple[str, Counter]:
+    """Apply both policies and reject replacements that reintroduce a match."""
+    if not text.strip():
+        return text, Counter()
+    result, counts = text, Counter()
+    for policy, rules in policies:
+        result, found = screen_private_corpus._screen(result, rules, policy['limits'])
+        counts.update(found)
+    for policy, rules in policies:
+        if screen_private_corpus._screen(result, rules, policy['limits'])[0] != result:
+            raise ValueError('screening policies produced text requiring further screening')
+    return result, counts
+
+
+def _require_screened_text(text: str, policies: list[tuple[dict, list]]) -> None:
+    if _screen_text_policies(text, policies)[0] != text:
+        raise ValueError('staged known text requires screening')
+
+
 def _check_staged_extensions(snapshot: dict, request: dict, manifest: dict,
                              context: dict, bundle: dict | None,
                              policies: list[tuple[dict, list]]) -> None:
@@ -171,16 +201,16 @@ def _check_staged_extensions(snapshot: dict, request: dict, manifest: dict,
                        'requests_sha256', 'selection_manifest_sha256', 'project_context_sha256', 'screen_policy_sha256'})
 
 
-def _metadata(value: object, name: str, *, required: bool = False, rules=None,
-              limits: dict | None = None, identity: bool = False) -> str | None:
+def _metadata(value: object, name: str, *, required: bool = False,
+              policies: list[tuple[dict, list]], identity: bool = False) -> str | None:
     if value is None and not required:
         return None
     if (not isinstance(value, str) or (required and not value.strip())
             or len(value.encode('utf-8')) > MAX_METADATA_BYTES
             or any(ord(char) < 32 and char not in '\t\r\n' for char in value)):
         raise ValueError(f'invalid provider {name}')
-    if value and rules is not None and limits is not None:
-        screened, _ = screen_private_corpus._screen(value, rules, limits)
+    if value:
+        screened, _ = _screen_text_policies(value, policies)
         if identity and screened != value:
             raise ValueError(f'provider {name} requires redaction')
         return screened
@@ -195,6 +225,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
     screen_policy_path = screen_policy_path or _default_screen_policy_path()
     policy, rules, policy_sha = screen_private_corpus.load_policy(screen_policy_path, 1024 * 1024)
     baseline, baseline_rules, _ = screen_private_corpus.load_policy(_default_screen_policy_path(), 1024 * 1024)
+    policies = [(baseline, baseline_rules), (policy, rules)]
     before = path.stat()
     if not path.is_file() or before.st_size > max_bytes:
         raise ValueError('provider cache unavailable or too large')
@@ -210,7 +241,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
         raise ValueError('invalid provider cache JSON') from None
     if not isinstance(cache, dict) or not isinstance(cache.get('models'), list) or len(cache['models']) > MAX_MODELS:
         raise ValueError('invalid provider cache structure')
-    fetched_at = _metadata(cache.get('fetched_at'), 'fetched_at', rules=rules, limits=policy['limits'])
+    fetched_at = _metadata(cache.get('fetched_at'), 'fetched_at', policies=policies)
     listed = []
     seen = set()
     for model in cache['models']:
@@ -218,13 +249,12 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
             raise ValueError('invalid provider model record')
         if model.get('visibility') != 'list':
             continue
-        slug = _metadata(model.get('slug'), 'model ID', required=True, rules=rules,
-                         limits=policy['limits'], identity=True)
+        slug = _metadata(model.get('slug'), 'model ID', required=True, policies=policies, identity=True)
         if slug in seen:
             raise ValueError('duplicate provider model ID')
         seen.add(slug)
-        label = _metadata(model.get('display_name'), 'display name', rules=rules, limits=policy['limits'])
-        description = _metadata(model.get('description'), 'description', rules=rules, limits=policy['limits'])
+        label = _metadata(model.get('display_name'), 'display name', policies=policies)
+        description = _metadata(model.get('description'), 'description', policies=policies)
         priority = model.get('priority')
         if priority is not None and (type(priority) is not int or priority < 0):
             raise ValueError('invalid provider priority')
@@ -236,19 +266,16 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
         for level in levels or []:
             if not isinstance(level, dict):
                 raise ValueError('invalid provider effort record')
-            effort = _metadata(level.get('effort'), 'effort', rules=rules,
-                               limits=policy['limits'], identity=True)
+            effort = _metadata(level.get('effort'), 'effort', policies=policies, identity=True)
             if effort is not None:
                 efforts.append(effort)
             extra = {key: value for key, value in level.items() if key != 'effort'}
-            extra = _safe_extensions(extra, baseline_rules, baseline['limits'])
-            extra = _safe_extensions(extra, rules, policy['limits'])
+            extra = _screen_extension_policies(extra, policies)
             effort_extensions.append(extra)
         extensions = {key: value for key, value in model.items()
                       if key not in {'slug', 'display_name', 'description', 'priority',
                                      'supported_reasoning_levels', 'visibility'}}
-        extensions = _safe_extensions(extensions, baseline_rules, baseline['limits'])
-        extensions = _safe_extensions(extensions, rules, policy['limits'])
+        extensions = _screen_extension_policies(extensions, policies)
         listed.append({'model_id': slug, 'display_name': label or slug,
                        'description': description or '', 'priority': priority,
                        'provider_supported_efforts': efforts, 'effort_extensions': effort_extensions,
@@ -256,8 +283,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
     if not listed:
         raise ValueError('provider cache contains no listed models')
     root_extensions = {key: value for key, value in cache.items() if key not in {'models', 'fetched_at'}}
-    root_extensions = _safe_extensions(root_extensions, baseline_rules, baseline['limits'])
-    root_extensions = _safe_extensions(root_extensions, rules, policy['limits'])
+    root_extensions = _screen_extension_policies(root_extensions, policies)
     metadata = {'fetched_at': fetched_at, 'models': listed, 'extensions': root_extensions,
                 'cache_sha256': sha(raw), 'cache_bytes': len(raw),
                 'cache_mtime_utc': datetime.fromtimestamp(after.st_mtime, timezone.utc).isoformat(),
@@ -287,12 +313,12 @@ def _validate_reserved_source_identities(value: object, *, screen_policy_path: P
     seen_known = set()
     if screen_policy_path is not None and screen_policy_raw is not None:
         raise ValueError('reserved identity screening policy source is ambiguous')
-    default_policy, default_rules, default_sha = screen_private_corpus.load_policy(
+    default_policy, default_rules, _ = screen_private_corpus.load_policy(
         _default_screen_policy_path(), 1024 * 1024)
     if screen_policy_raw is not None:
-        policy, rules, policy_sha = screen_private_corpus.load_policy_bytes(screen_policy_raw, 1024 * 1024)
+        policy, rules, _ = screen_private_corpus.load_policy_bytes(screen_policy_raw, 1024 * 1024)
     else:
-        policy, rules, policy_sha = screen_private_corpus.load_policy(
+        policy, rules, _ = screen_private_corpus.load_policy(
             screen_policy_path or _default_screen_policy_path(), 1024 * 1024)
     for item in value:
         if (not isinstance(item, dict) or not fields.issubset(item)
@@ -309,9 +335,8 @@ def _validate_reserved_source_identities(value: object, *, screen_policy_path: P
             raise ValueError('duplicate reserved source identity')
         seen_known.add(identity_key)
         extension = {key: child for key, child in item.items() if key not in fields}
-        screened_extension = _safe_extensions(extension, default_rules, default_policy['limits'])
-        if policy_sha != default_sha:
-            screened_extension = _safe_extensions(screened_extension, rules, policy['limits'])
+        screened_extension = _screen_extension_policies(
+            extension, [(default_policy, default_rules), (policy, rules)])
         result.append({**known, **screened_extension})
     if len(json_bytes(result)) > MAX_RESERVED_MANIFEST_BYTES:
         raise ValueError('reserved source identities exceed byte limit')
@@ -712,7 +737,8 @@ def render_bound_context(value: dict, request: str, *, max_context_bytes: int,
             for model in rendered_models]
     rendered = header + '\n' + '\n'.join(rows)
     policy, rules, _policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
-    rendered, _redaction_counts = screen_private_corpus._screen(rendered, rules, policy['limits'])
+    baseline, baseline_rules, _ = screen_private_corpus.load_policy(_default_screen_policy_path(), 1024 * 1024)
+    rendered, _redaction_counts = _screen_text_policies(rendered, [(baseline, baseline_rules), (policy, rules)])
     if type(max_context_bytes) is not int or max_context_bytes < 1 or len(rendered.encode('utf-8')) > max_context_bytes:
         raise ValueError('source-bound context exceeds configured limit')
     return rendered, sha(rendered.encode('utf-8'))
@@ -738,7 +764,8 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
         raise ValueError('snapshot provider extensions use a different screening policy')
     context_text, context_sha = render_bound_context(value, request, max_context_bytes=max_context_bytes,
                                                      policy_path=policy_path)
-    screened_request, redactions = screen_private_corpus._screen(request, rules, policy['limits'])
+    baseline, baseline_rules, _ = screen_private_corpus.load_policy(_default_screen_policy_path(), 1024 * 1024)
+    screened_request, redactions = _screen_text_policies(request, [(baseline, baseline_rules), (policy, rules)])
     if len(screened_request.encode('utf-8')) > max_request_bytes:
         raise ValueError('screened source request exceeds configured limit')
     rendered_teacher_request = project_training_context.render(
@@ -1001,6 +1028,18 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
         raise ValueError('staged project context does not match snapshot')
     _check_staged_extensions(source_snapshot, request, manifest, context_file, bundle,
                              [(baseline_policy, baseline_rules), (configured_policy, configured_rules)])
+    policies = [(baseline_policy, baseline_rules), (configured_policy, configured_rules)]
+    fetched_at = provider.get('fetched_at')
+    if fetched_at is not None and not isinstance(fetched_at, str):
+        raise ValueError('invalid staged provider timestamp')
+    texts = [request['text'], entry['text']]
+    if fetched_at is not None:
+        texts.append(fetched_at)
+    for model in provider['models']:
+        texts.extend(model[key] for key in ('model_id', 'display_name', 'description') if key in model)
+        texts.extend(model.get('provider_supported_efforts', []))
+    for text in texts:
+        _require_screened_text(text, policies)
     return {'snapshot_sha256': snapshot_sha, 'staged_snapshot_sha256': snapshot_copy_sha,
             'provider_cache_sha256': provider['cache_sha256'],
             'request_sha256': request['screened_text_sha256'], 'context_sha256': entry['sha256'],

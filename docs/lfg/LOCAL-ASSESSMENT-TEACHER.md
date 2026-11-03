@@ -156,7 +156,11 @@ claims. It also binds the selected request's project, group, family and ID,
 selection project counts, and context project key to the source identity.
 Unknown extension fields remain preserved and inert; their keys and values
 must already pass both the baseline and the configured screening policy.
-Provider extensions are screened under both policies before origin persistence.
+Known provider strings and provider extensions are screened under both policies
+before origin persistence. Request and context text are screened under both
+policies before staging; the staged validator also rejects known provider,
+request, or context strings that would require either policy to change them.
+Resealed digests remain consistency checks, not proof of source authenticity.
 The baseline includes common Basic authorization credentials and cookie headers, but no policy
 is proof that all credentials are detected. The changed baseline has a new
 digest: older staged copies may need their original configured policy bytes
