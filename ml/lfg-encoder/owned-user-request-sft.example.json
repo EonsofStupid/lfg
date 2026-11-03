@@ -1,7 +1,7 @@
 {
   "schema_version": "lfg.owned-user-request-sft-config.v1",
   "task": "user_requested_model_effort",
-  "revision": "user-requested-routing-v1",
+  "revision": "user-requested-routing-v2",
   "device": "cpu",
   "cuda_device_index": 0,
   "cuda_memory_fraction": 0.01,
@@ -24,8 +24,15 @@
   "deterministic_algorithms": true,
   "allow_tf32": false,
   "allow_truncated_prompt": false,
-  "review_status_weights": {"reviewed": 0.0, "unreviewed": 1.0},
-  "outcome_weights": {"success": 0.0, "unknown": 1.0, "failure": 0.0},
+  "review_status_weights": {
+    "reviewed": 0.0,
+    "unreviewed": 1.0
+  },
+  "outcome_weights": {
+    "success": 0.0,
+    "unknown": 1.0,
+    "failure": 0.0
+  },
   "framing": {
     "system_prefix": "[system]\n",
     "system_suffix": "\n",

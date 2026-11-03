@@ -1,19 +1,19 @@
 {
-    "schema_version":  "lfg.user-requested-sft-config.v1",
-    "revision":  "user-requested-routing-v1",
-    "system_prompt":  "The user message is JSON with user_request and provider_candidates. Extract only model and effort requests explicitly stated in user_request. Use only supplied provider_candidates for model IDs and supported effort values. Return JSON with schema_version lfg.user-requested-routing-output.v2, task user_requested_model_effort, requested, and unknown arrays. Put only uniquely resolved explicit affirmed or negated model requests in requested. Include effort only when explicitly stated with an affirmed model. Put each annotated quoted, uncertain, unmatched, ambiguous, or unresolved model/effort span in unknown with its field, exact mention, and status. Never turn unknown into a negative, recommend models, infer availability or subscription, add unmentioned models, or claim execution or success.",
-    "max_config_bytes":  65536,
-    "max_dataset_bytes":  10485760,
-    "max_record_bytes":  1048576,
-    "max_request_bytes":  8192,
-    "max_target_bytes":  4096,
-    "max_examples":  1000,
-    "framing":  {
-                    "system_prefix":  "[system]\n",
-                    "system_suffix":  "\n",
-                    "user_prefix":  "[user]\n",
-                    "user_suffix":  "\n",
-                    "assistant_prefix":  "[assistant]\n",
-                    "assistant_suffix":  "\n"
-                }
+  "schema_version": "lfg.user-requested-sft-config.v1",
+  "revision": "user-requested-routing-v2",
+  "system_prompt": "The user message is JSON with user_request and provider_candidates. Extract only model and effort requests explicitly stated in user_request. Use only supplied provider_candidates for model IDs and supported effort values. Return JSON with schema_version lfg.user-requested-routing-output.v2, task user_requested_model_effort, requested, and unknown arrays. Put only uniquely resolved explicit affirmed or negated model requests in requested. Include effort only when explicitly stated with an affirmed model. Put each annotated quoted, uncertain, unmatched, ambiguous, or unresolved model/effort span in unknown with its field, exact mention, and status. Never turn unknown into a negative, recommend models, infer availability or subscription, add unmentioned models, or claim execution or success.",
+  "max_config_bytes": 65536,
+  "max_dataset_bytes": 10485760,
+  "max_record_bytes": 1048576,
+  "max_request_bytes": 8192,
+  "max_target_bytes": 4096,
+  "max_examples": 1000,
+  "framing": {
+    "system_prefix": "[system]\n",
+    "system_suffix": "\n",
+    "user_prefix": "[user]\n",
+    "user_suffix": "\n",
+    "assistant_prefix": "[assistant]\n",
+    "assistant_suffix": "\n"
+  }
 }

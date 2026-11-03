@@ -19,7 +19,7 @@ import user_request_targets
 
 
 CONFIG_SCHEMA = 'lfg.user-requested-sft-config.v1'
-DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v1'
+DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v2'
 CALLER_INPUT_SCHEMA = 'lfg.user-requested-sft-caller-input.v1'
 WINDOWS_PROJECTION_CLAIMS_SCHEMA = 'lfg.windows-origin-projection-claims.v1'
 TASK = 'user_requested_model_effort'
@@ -520,7 +520,7 @@ def build_dataset(observation_path: Path | None, provider_snapshot_path: Path, r
         raise ValueError('observation or relation input changed during preparation')
     source_bound_snapshot.revalidate_snapshot(snapshot)
     source_bound_snapshot.write_private_bytes(output_path, envelope_raw)
-    return {'schema_version': 'lfg.user-requested-sft-build-result.v1', 'records': 1,
+    return {'schema_version': 'lfg.user-requested-sft-build-result.v2', 'records': 1,
             'dataset_sha256': _sha(envelope_raw), 'promotion_eligible': False,
             'heldout_separation': 'unknown'}
 

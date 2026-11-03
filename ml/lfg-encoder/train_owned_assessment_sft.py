@@ -16,7 +16,7 @@ import time
 
 FRAMING_FIELDS = ('system_prefix', 'system_suffix', 'user_prefix', 'user_suffix',
                  'assistant_prefix', 'assistant_suffix')
-USER_REQUEST_DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v1'
+USER_REQUEST_DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v2'
 USER_REQUEST_CONFIG_SCHEMA = 'lfg.owned-user-request-sft-config.v1'
 USER_REQUEST_TASK = 'user_requested_model_effort'
 USER_REQUEST_OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v2'
