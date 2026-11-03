@@ -252,7 +252,59 @@ class UserRequestSFTTests(unittest.TestCase):
         config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
         config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
                       max_parameters=100_000, max_attention_elements=100_000)
-        with self.assertRaisesRegex(ValueError, 'unique source span'):
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
+            trainer.read_training(mutated, config)
+
+    def test_trainer_rejects_renamed_identical_span_interval(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        ref = row['metadata']['target_span_refs'][0]
+        request = json.loads(row['messages'][1]['content'])['user_request'].encode('utf-8')
+        mention = request[ref['model_span_start_byte']:ref['model_span_end_byte']].decode('utf-8')
+        target['unknown'].append({'field': 'model', 'mention': mention, 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'model', 'span_id': 'renamed-identical-span',
+            'sha256': hashlib.sha256(mention.encode('utf-8')).hexdigest(),
+            'start_byte': ref['model_span_start_byte'], 'end_byte': ref['model_span_end_byte'],
+            'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'renamed-identical-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
+            trainer.read_training(mutated, config)
+
+    def test_trainer_rejects_partial_overlapping_span_interval(self):
+        self._build()
+        import train_owned_assessment_sft as trainer
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        row = envelope['train_records'][0]
+        target = json.loads(row['messages'][2]['content'])
+        ref = row['metadata']['target_span_refs'][0]
+        request = json.loads(row['messages'][1]['content'])['user_request'].encode('utf-8')
+        start, end = ref['model_span_start_byte'] + 1, ref['model_span_end_byte'] - 1
+        mention = request[start:end].decode('utf-8')
+        target['unknown'].append({'field': 'model', 'mention': mention, 'status': 'ambiguous'})
+        row['metadata']['unknown_span_refs'].append({
+            'field': 'model', 'span_id': 'partial-overlap-span',
+            'sha256': hashlib.sha256(mention.encode('utf-8')).hexdigest(),
+            'start_byte': start, 'end_byte': end, 'status': 'ambiguous'})
+        row['messages'][2]['content'] = json.dumps(target, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        envelope['manifest']['records_sha256'] = hashlib.sha256(
+            b''.join(trainer.canonical(record) for record in envelope['train_records'])).hexdigest()
+        mutated = self.root / 'partial-overlap-span.json'
+        mutated.write_text(json.dumps(envelope), encoding='utf-8')
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        with self.assertRaisesRegex(ValueError, 'duplicate or overlapping request span interval'):
             trainer.read_training(mutated, config)
 
     def test_unknown_only_example_remains_trainable_without_negative_candidates(self):

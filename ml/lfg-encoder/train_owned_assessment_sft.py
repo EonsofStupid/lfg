@@ -330,8 +330,17 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
     if (len(rows) != manifest['records']
             or sha(b''.join(canonical(row) for row in rows)) != manifest['records_sha256']):
         raise ValueError('user-request SFT record digest mismatch')
-    result, identifiers, seen_spans, counts = [], set(), set(), Counter()
+    result, identifiers, counts = [], set(), Counter()
     for row in rows:
+        seen_spans, seen_intervals = set(), []
+
+        def register_span(span_id: str, start: int, end: int) -> None:
+            if span_id in seen_spans or any(start < prior_end and prior_start < end
+                                            for prior_start, prior_end in seen_intervals):
+                raise ValueError('duplicate or overlapping request span interval')
+            seen_spans.add(span_id)
+            seen_intervals.append((start, end))
+
         messages = row.get('messages') if isinstance(row, dict) else None
         metadata = row.get('metadata') if isinstance(row, dict) else None
         if (not isinstance(row, dict) or set(row) != {'id', 'messages', 'metadata'}
@@ -450,10 +459,9 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or type(ref.get('model_span_start_byte')) is not int or ref['model_span_start_byte'] < 0
                     or type(ref.get('model_span_end_byte')) is not int
                     or ref['model_span_end_byte'] <= ref['model_span_start_byte']
-                    or ref['model_span_end_byte'] > metadata['user_text_utf8_bytes']
-                    or ref['model_span_id'] in seen_spans):
+                    or ref['model_span_end_byte'] > metadata['user_text_utf8_bytes']):
                 raise ValueError('sparse user-request target is not bound to a unique explicit source span')
-            seen_spans.add(ref['model_span_id'])
+            register_span(ref['model_span_id'], ref['model_span_start_byte'], ref['model_span_end_byte'])
             model_slice = request_bytes[ref['model_span_start_byte']:ref['model_span_end_byte']]
             try:
                 model_slice.decode('utf-8')
@@ -471,8 +479,7 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or ref['effort_polarity'] not in ('affirmed', 'negated', 'quoted', 'uncertain')):
                 raise ValueError('invalid effort span reference')
             if ref['effort_span_id'] is not None:
-                if ref['effort_span_id'] in seen_spans:
-                    raise ValueError('duplicate source span reference')
+                register_span(ref['effort_span_id'], ref['effort_span_start_byte'], ref['effort_span_end_byte'])
                 effort_slice = request_bytes[ref['effort_span_start_byte']:ref['effort_span_end_byte']]
                 try:
                     effort_slice.decode('utf-8')
@@ -480,7 +487,6 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     raise ValueError('effort span splits a UTF-8 request character') from None
                 if sha(effort_slice) != ref['effort_span_sha256']:
                     raise ValueError('effort target span digest does not match actual request bytes')
-                seen_spans.add(ref['effort_span_id'])
             if (ref['effort_span_id'] is None
                     and any(ref[key] is not None for key in ('effort_span_sha256', 'effort_polarity',
                         'effort_span_start_byte', 'effort_span_end_byte'))):
@@ -503,9 +509,9 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
                     or not isinstance(ref.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', ref['sha256'])
                     or type(ref.get('start_byte')) is not int or type(ref.get('end_byte')) is not int
                     or ref['start_byte'] < 0 or ref['end_byte'] <= ref['start_byte']
-                    or ref['end_byte'] > len(request_bytes) or ref['span_id'] in seen_spans):
+                    or ref['end_byte'] > len(request_bytes)):
                 raise ValueError('unknown request output is not bound to a unique source span')
-            seen_spans.add(ref['span_id'])
+            register_span(ref['span_id'], ref['start_byte'], ref['end_byte'])
             unknown_slice = request_bytes[ref['start_byte']:ref['end_byte']]
             try:
                 mention = unknown_slice.decode('utf-8')
