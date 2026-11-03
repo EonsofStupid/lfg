@@ -5,9 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 from pathlib import Path
+import threading
 import time
 from urllib.parse import urlsplit
 
+import owned_training_metrics
 
 PAGE = b'''<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -19,6 +21,8 @@ progress{width:100%;height:1.4rem;accent-color:#38bdf8}small{color:#d1d5db}
 </style><main><h1>LFG training</h1><p>Private developer view</p><section>
 <p>Status: <strong id="state">Connecting</strong></p><progress id="progress" max="1" value="0"></progress>
 <p id="steps">Waiting for the trainer</p><small id="updated"></small></section>
+<section id="metrics" hidden><h2>Initial training metrics</h2><p id="metrics-result">Waiting</p>
+<small>Training loss is not assessment accuracy.</small></section>
 <section id="teacher" hidden><h2>Local teacher collection</h2><p id="teacher-state">Connecting</p>
 <progress id="teacher-progress" max="1" value="0"></progress><p id="teacher-count"></p></section>
 <section id="evaluation" hidden><h2>Development format check</h2><p id="evaluation-result">Waiting</p>
@@ -44,6 +48,11 @@ document.getElementById('evaluation').hidden=false;document.getElementById('eval
 d.state==='complete'?(d.required_fields_present+' / '+d.total+' outputs contain the required fields'):
 (d.state==='pending'?'Waiting for the follow-on evaluation':
 (d.state==='evaluating'?'Evaluating the latest update':'Evaluation status unavailable'));}}
+catch(e){}
+try{const r=await fetch('api/metrics',{cache:'no-store'});if(r.ok){const d=await r.json();
+document.getElementById('metrics').hidden=false;document.getElementById('metrics-result').textContent=
+d.state==='available'?'Mean loss over '+d.loss_steps+' steps: '+d.mean_training_loss.toFixed(4)+'; '+
+d.byte_positions.toLocaleString()+' byte positions':'Waiting for a completed checkpoint';}}
 catch(e){}
 try{const r=await fetch('api/queue',{cache:'no-store'});if(r.ok){const d=await r.json();
 document.getElementById('queue').hidden=false;document.getElementById('queue-result').textContent=
@@ -153,8 +162,11 @@ def current_evaluation(path: Path, update_status: Path | None) -> dict:
 
 def handler(path: Path, teacher_status_url: str | None = None, next_status: Path | None = None,
             evaluation_report: Path | None = None, queue_status_path: Path | None = None,
-            update_evaluation_status: Path | None = None):
+            update_evaluation_status: Path | None = None, metrics_root: Path | None = None,
+            next_metrics_root: Path | None = None, metrics_max_bytes: int = 33554432,
+            metrics_window: int = 100, metrics_refresh_seconds: int = 30):
     page = render_page(teacher_status_url)
+    cache, cache_lock = {'time': 0.0, 'value': {'state': 'pending'}}, threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/':
@@ -167,6 +179,14 @@ def handler(path: Path, teacher_status_url: str | None = None, next_status: Path
                 content_type = 'application/json; charset=utf-8'
             elif self.path == '/api/queue' and queue_status_path is not None:
                 content = json.dumps(queue_status(queue_status_path), allow_nan=False).encode('utf-8')
+                content_type = 'application/json; charset=utf-8'
+            elif self.path == '/api/metrics' and metrics_root is not None:
+                with cache_lock:
+                    if time.monotonic() - cache['time'] >= metrics_refresh_seconds:
+                        selected = next_metrics_root if next_metrics_root is not None and next_metrics_root.exists() else metrics_root
+                        cache['value'] = owned_training_metrics.metrics(selected, metrics_max_bytes, metrics_window)
+                        cache['time'] = time.monotonic()
+                    content = json.dumps(cache['value'], allow_nan=False).encode('utf-8')
                 content_type = 'application/json; charset=utf-8'
             else:
                 self.send_error(404)
@@ -194,16 +214,25 @@ def main():
     parser.add_argument('--evaluation-report', type=Path, help='optional follow-on development format report')
     parser.add_argument('--queue-status', type=Path, help='optional continual training queue status')
     parser.add_argument('--update-evaluation-status', type=Path, help='optional evaluation status for continual updates')
+    parser.add_argument('--metrics-root', type=Path, help='optional current job checkpoint directory')
+    parser.add_argument('--next-metrics-root', type=Path, help='optional follow-on job checkpoint directory')
+    parser.add_argument('--metrics-max-bytes', type=int, default=33554432)
+    parser.add_argument('--metrics-window', type=int, default=100)
+    parser.add_argument('--metrics-refresh-seconds', type=int, default=30)
     parser.add_argument('--teacher-status-url', help='optional relative URL for an aggregate teacher status endpoint')
     args = parser.parse_args()
     if not ipaddress.ip_address(args.listen).is_loopback:
         parser.error('dashboard must bind to a loopback address')
+    if min(args.metrics_max_bytes, args.metrics_window, args.metrics_refresh_seconds) < 1:
+        parser.error('metrics limits must be positive')
     if args.teacher_status_url and (urlsplit(args.teacher_status_url).scheme or urlsplit(args.teacher_status_url).netloc
                                     or '\\' in args.teacher_status_url):
         parser.error('teacher status URL must be relative')
     ThreadingHTTPServer((args.listen, args.port), handler(args.status, args.teacher_status_url, args.next_status,
                                                         args.evaluation_report, args.queue_status,
-                                                        args.update_evaluation_status)).serve_forever()
+                                                        args.update_evaluation_status, args.metrics_root,
+                                                        args.next_metrics_root, args.metrics_max_bytes, args.metrics_window,
+                                                        args.metrics_refresh_seconds)).serve_forever()
 
 
 if __name__ == '__main__':
