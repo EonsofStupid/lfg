@@ -290,7 +290,7 @@ class UserRequestedObservationTests(unittest.TestCase):
         for section, field, replacement in (
                 ('state', 'outcome', 'success'), ('state', 'promotion_eligible', True),
                 ('state', 'total_agent_count', 3), ('interpretation', 'teacher_proposal', 'accepted'),
-                ('interpretation', 'claim_review_status', 'reviewed')):
+                ('interpretation', 'claim_review_status', 'reviewed'), ('reservation', 'groups_checked', 1)):
             changed = copy.deepcopy(valid)
             changed[section][field] = replacement
             with self.subTest(section=section, field=field), self.assertRaises(ValueError):
@@ -301,7 +301,7 @@ class UserRequestedObservationTests(unittest.TestCase):
         manifest = self.root / 'reserved.json'
         manifest.write_bytes(subject.canonical({
             'schema_version': subject.MANIFEST_SCHEMA, 'coverage': 'partial',
-            'groups': [source_bound_snapshot.source_group_id(self.record)], 'identities': []}))
+            'groups': [], 'identities': [source_bound_snapshot._source_identity_claim(self.record)]}))
         manifest.chmod(0o600)
         reserved = subject.pin_reserved_manifest(manifest, self.config)
         with mock.patch.object(source_bound_snapshot, 'verify_selected_source',
@@ -316,22 +316,36 @@ class UserRequestedObservationTests(unittest.TestCase):
         opened.assert_not_called()
 
     @unittest.skipUnless(os.name == 'posix', 'reserved and source no-follow checks are POSIX-specific')
-    def test_hardlink_alias_cannot_bypass_reserved_path_group_exclusion(self):
+    def test_moved_hardlink_rejects_unsupported_group_only_reservation_before_source_open(self):
         reserved_path = self.root / 'reserved-hardlink.json'
         original_group = source_bound_snapshot.source_group_id(self.record)
         reserved_path.write_bytes(subject.canonical({
             'schema_version': subject.MANIFEST_SCHEMA, 'coverage': 'partial',
             'groups': [original_group], 'identities': []}))
         reserved_path.chmod(0o600)
-        reserved = subject.pin_reserved_manifest(reserved_path, self.config)
         alias = self.root / 'session-alias.jsonl'
         os.link(self.source, alias)
+        self.source.unlink()
+        self.assertEqual(alias.stat().st_nlink, 1)
         changed_record = dict(self.record, source_file=str(alias))
         self.assertNotEqual(source_bound_snapshot.source_group_id(changed_record), original_group)
-        with mock.patch('source_bound_snapshot.os.fdopen', side_effect=AssertionError('read source bytes')) as opened:
-            with self.assertRaisesRegex(ValueError, 'single-link regular file'):
-                subject.build_observation(changed_record, self.spans, self.interpretation,
-                                          self.config, self.policy, reserved=reserved)
+        with mock.patch.object(source_bound_snapshot, 'verify_selected_source', side_effect=AssertionError('read source bytes')) as opened:
+            with self.assertRaisesRegex(ValueError, 'reserved group mode requires'):
+                subject.pin_reserved_manifest(reserved_path, self.config)
+        opened.assert_not_called()
+
+    def test_multiple_reserved_groups_are_rejected_even_with_an_unrelated_identity(self):
+        identity = source_bound_snapshot._source_identity_claim(self.record)
+        for key in ('source_file_sha256', 'source_prefix_sha256', 'source_line_sha256', 'text_sha256'):
+            identity[key] = 'f' * 64
+        manifest = self.root / 'unsupported-multiple-groups.json'
+        manifest.write_bytes(subject.canonical({'schema_version': subject.MANIFEST_SCHEMA,
+            'coverage': 'partial', 'groups': ['a' * 64, 'b' * 64], 'identities': [identity],
+            'safe_extra': {'retained': True}}))
+        manifest.chmod(0o600)
+        with mock.patch.object(source_bound_snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            with self.assertRaisesRegex(ValueError, 'reserved group mode requires'):
+                subject.pin_reserved_manifest(manifest, self.config)
         opened.assert_not_called()
 
     @unittest.skipUnless(os.name == 'posix', 'reserved identity source checks are POSIX-specific')
@@ -369,9 +383,12 @@ class UserRequestedObservationTests(unittest.TestCase):
                                                 'coverage': 'partial', 'groups': [], 'identities': []}))
         manifest.chmod(0o600)
         reserved = subject.pin_reserved_manifest(manifest, self.config)
+        identity = source_bound_snapshot._source_identity_claim(self.record)
+        for key in ('source_file_sha256', 'source_prefix_sha256', 'source_line_sha256', 'text_sha256'):
+            identity[key] = 'a' * 64
         manifest.write_bytes(subject.canonical({'schema_version': subject.MANIFEST_SCHEMA,
                                                 'coverage': 'partial',
-                                                'groups': ['a' * 64], 'identities': []}))
+                                                'groups': [], 'identities': [identity]}))
         with mock.patch.object(source_bound_snapshot, 'verify_selected_source',
                                side_effect=AssertionError('selected source opened')) as opened:
             with self.assertRaisesRegex(ValueError, 'manifest changed'):

@@ -97,17 +97,22 @@ only.
 
 On POSIX, selected-source verification opens through no-follow directory and
 file handles and rejects multiply-linked session files before reading bytes.
-Reserved manifests may also declare pre-open inventory identities: selected
+Reserved manifests must have an empty `groups` list: path-derived groups cannot
+prove coverage for an append-growing session after relocation. Nonempty group
+reservations are rejected before selected-source access, even when identities
+are also supplied. With no known reservations, exploratory use remains possible.
+Identity-only manifests may declare pre-open inventory identities: selected
 text digest, selected line number and digest, and prefix byte count and digest.
 Any one matching selected-text digest, selected-line identity, or prefix
 identity excludes the candidate before opening it, even if the inventory's
 whole-file digest or path changes; an exact whole-file digest is also an
-independent match. Coverage remains `unknown` or `partial`.
+independent match. These cover only declared identities, not every message in a
+session. Coverage remains `unknown` or `partial`.
 This pre-open comparison relies on a trusted, protected inventory manifest and
 candidate inventory record; these hashes do not authenticate their source. A forged identity cannot be
 validated against source bytes without opening those bytes; this is not an
 absolute no-heldout-access guarantee against malicious metadata. Only these
-declared digests/coordinates and path-derived group IDs are compared.
+declared digests and coordinates are compared.
 
 The Windows source-bound builder, verifier, observation builder, and reserved
 manifest readers now fail closed before path access because no proven

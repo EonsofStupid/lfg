@@ -158,6 +158,7 @@ def read_reserved_manifest(path: Path, config: dict, *, screen_policy_path: Path
             or any(not _valid_sha(group) for group in manifest['groups'])
             or len(set(manifest['groups'])) != len(manifest['groups'])):
         raise ValueError('invalid reserved manifest')
+    source_bound_snapshot._require_supported_reserved_groups(manifest['groups'])
     identities = source_bound_snapshot._validate_reserved_source_identities(
         manifest['identities'], screen_policy_path=screen_policy_path)
     if len(canonical(identities)) > config['max_reserved_manifest_bytes']:
@@ -490,8 +491,7 @@ def validate_observation(value: object, config: dict, screen_policy_path: Path) 
             or reservation.get('exclusion_checked') is not True
             or reservation.get('coverage') not in ('unknown', 'partial')
             or reservation.get('heldout_separation') != 'unknown'
-            or type(reservation.get('groups_checked')) is not int or reservation['groups_checked'] < 0
-            or reservation['groups_checked'] > config['max_reserved_manifest_bytes'] // 64
+            or type(reservation.get('groups_checked')) is not int or reservation['groups_checked'] != 0
             or type(reservation.get('source_identities_checked')) is not int
             or reservation['source_identities_checked'] < 0
             or reservation['source_identities_checked'] > config['max_reserved_manifest_bytes'] // 200
@@ -500,7 +500,7 @@ def validate_observation(value: object, config: dict, screen_policy_path: Path) 
             or (reservation.get('manifest_sha256') is not None
                 and not _valid_sha(reservation['manifest_sha256']))
             or (reservation.get('manifest_sha256') is None
-                and (reservation['coverage'] != 'unknown' or reservation['groups_checked'] != 0))):
+                and (reservation['coverage'] != 'unknown' or reservation['source_identities_checked'] != 0))):
         raise ValueError('invalid reserved-set claims')
     interpretation_fields = {'origin', 'phase_label', 'phase_evidence_span_id',
                              'model_claims', 'effort_claims', 'claim_review_status'}
