@@ -140,6 +140,13 @@ verifiable evidence. Reserved-manifest reads are disabled for direct Windows
 library callers because this code does not verify effective ACLs or reparse
 points there.
 
+Staged validation reconstructs the required access claims as unknown and checks
+that the selected source is not listed in its own reserved session/project
+claims. Unknown extension fields remain preserved and inert. Bundle hashes
+detect content changes only when compared with a trusted expected digest;
+hashes recomputed by the same party that edits staged files are not an
+independent signature or attestation of the origin host's checks.
+
 Provider metadata screening is a defense-in-depth heuristic, not proof that all
 secrets are absent. Common credential key names (including session and ID
 tokens) are rejected, and string values are screened with the configured

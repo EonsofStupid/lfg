@@ -162,6 +162,89 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                                                    changed_manifest_raw, context_raw,
                                                    changed_bundle_raw)
 
+    def test_staged_access_and_provenance_claims_reject_rehashed_tampering(self):
+        value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train')
+        policy = Path(__file__).with_name('private-corpus-screen.example.json')
+        prepared = snapshot.prepare_single_request(
+            value, policy_path=policy, max_request_bytes=4096, max_context_bytes=100_000)
+        _, _, _, request_raw, manifest_raw, context_raw, projection_raw, bundle_raw = prepared
+
+        def reseal_projection(mutate):
+            projection = json.loads(projection_raw)
+            mutate(projection)
+            changed_raw = snapshot.json_bytes(projection)
+            bundle = json.loads(bundle_raw)
+            bundle['staged_snapshot_sha256'] = snapshot.sha(changed_raw)
+            return changed_raw, snapshot.json_bytes(bundle)
+
+        access_mutations = {
+            'provider_listing_is_entitlement': True,
+            'subscription_entitlement': 'available',
+            'historical_session_effort': 'xhigh',
+            'historical_model_access': 'available',
+        }
+        for key, changed_value in access_mutations.items():
+            changed_raw, changed_bundle = reseal_projection(
+                lambda projection, k=key, v=changed_value:
+                    projection['access_claims'].__setitem__(k, v))
+            with self.subTest(access_claim=key), self.assertRaisesRegex(
+                    ValueError, 'access claims must remain unknown'):
+                snapshot.validate_staged_artifacts(changed_raw, request_raw, manifest_raw,
+                                                   context_raw, changed_bundle)
+
+        # Unknown extension fields survive as inert claims; their presence does
+        # not authorize or alter entitlement/access behavior.
+        changed_raw, changed_bundle = reseal_projection(
+            lambda projection: projection['access_claims'].__setitem__('owner_note_extension', 'kept'))
+        self.assertEqual(
+            snapshot.validate_staged_artifacts(changed_raw, request_raw, manifest_raw,
+                                               context_raw, changed_bundle)['requests'], 1)
+
+        provenance_mutations = {
+            'kind': 'unverified-projection',
+            'source_and_cache_verified_on_origin_host': False,
+            'full_source_paths_transferred': True,
+            'provider_extension_payloads_transferred': True,
+        }
+        for key, changed_value in provenance_mutations.items():
+            changed_raw, changed_bundle = reseal_projection(
+                lambda projection, k=key, v=changed_value:
+                    projection['materialization'].__setitem__(k, v))
+            with self.subTest(materialization_claim=key), self.assertRaisesRegex(
+                    ValueError, 'projection provenance is invalid'):
+                snapshot.validate_staged_artifacts(changed_raw, request_raw, manifest_raw,
+                                                   context_raw, changed_bundle)
+
+        bundle_mutations = {
+            'projection_kind': 'unverified-projection',
+            'full_source_paths_transferred': True,
+            'provider_extension_payloads_transferred': True,
+        }
+        for key, changed_value in bundle_mutations.items():
+            changed_bundle = json.loads(bundle_raw)
+            changed_bundle[key] = changed_value
+            with self.subTest(bundle_claim=key), self.assertRaisesRegex(
+                    ValueError, 'staged bundle digest mismatch'):
+                snapshot.validate_staged_artifacts(projection_raw, request_raw, manifest_raw,
+                                                   context_raw, snapshot.json_bytes(changed_bundle))
+
+        selected_group = json.loads(projection_raw)['source']['source_group_sha256']
+        reserved_mutations = {
+            'known_reserved_group_sha256': [selected_group],
+            'known_reserved_groups_checked': 1,
+            'known_reserved_groups_coverage': 'complete',
+            'known_reserved_manifest_sha256': 'bad-digest',
+            'known_reserved_project_labels': ['L.F.G'],
+        }
+        for key, changed_value in reserved_mutations.items():
+            changed_raw, changed_bundle = reseal_projection(
+                lambda projection, k=key, v=changed_value:
+                    projection['split'].__setitem__(k, v))
+            with self.subTest(reserved_claim=key), self.assertRaisesRegex(
+                    ValueError, 'reserved-group claims'):
+                snapshot.validate_staged_artifacts(changed_raw, request_raw, manifest_raw,
+                                                   context_raw, changed_bundle)
+
     def test_changed_selected_line_fails_closed(self):
         self.session.write_bytes(self.session.read_bytes().replace(b'Review the Terra project plan.', b'Changed the Terra project plan.'))
         with self.assertRaisesRegex(ValueError, 'source identity'):

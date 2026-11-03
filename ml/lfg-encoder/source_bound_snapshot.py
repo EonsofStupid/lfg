@@ -651,7 +651,10 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
                 or bundle.get('staged_snapshot_sha256') != snapshot_copy_sha
                 or bundle.get('requests_sha256') != sha(request_raw)
                 or bundle.get('selection_manifest_sha256') != sha(manifest_raw)
-                or bundle.get('project_context_sha256') != sha(context_raw)):
+                or bundle.get('project_context_sha256') != sha(context_raw)
+                or bundle.get('projection_kind') != 'origin-verified-private-projection'
+                or bundle.get('full_source_paths_transferred') is not False
+                or bundle.get('provider_extension_payloads_transferred') is not False):
             raise ValueError('staged bundle digest mismatch')
         if policy_raw is not None and bundle.get('screen_policy_sha256') != sha(policy_raw):
             raise ValueError('staged screening policy digest mismatch')
@@ -661,21 +664,63 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or split.get('assignment') != 'train' or split.get('policy') != 'exploratory_train'
             or split.get('heldout_separation') != 'unknown' or source.get('verified') is not True
             or source.get('project_association') != 'inventory_label_unverified'
+            or not isinstance(source.get('project'), str)
             or not isinstance(source.get('source_prefix_sha256'), str)
             or not isinstance(source.get('source_line_sha256'), str)
             or not isinstance(source.get('user_text_sha256'), str)
             or not isinstance(provider.get('cache_sha256'), str)
             or not isinstance(provider.get('screen_policy_sha256'), str)):
         raise ValueError('staged source provenance is incomplete')
+    source_group = source.get('source_group_sha256')
+    reserved_groups = split.get('known_reserved_group_sha256')
+    reserved_projects = split.get('known_reserved_project_labels')
+    reserved_manifest_sha = split.get('known_reserved_manifest_sha256')
+    reserved_coverage = split.get('known_reserved_groups_coverage')
+    valid_sha = lambda item: (isinstance(item, str) and len(item) == 64
+                              and all(char in '0123456789abcdef' for char in item))
+    if (not valid_sha(source_group) or not isinstance(reserved_groups, list)
+            or not valid_sha(snapshot_sha)
+            or len(reserved_groups) > 100_000 or any(not valid_sha(item) for item in reserved_groups)
+            or len(set(reserved_groups)) != len(reserved_groups)
+            or type(split.get('known_reserved_groups_checked')) is not int
+            or split.get('known_reserved_groups_checked') != len(reserved_groups)
+            or split.get('known_reserved_group_exclusion') != 'checked'
+            or reserved_coverage not in ('unknown', 'partial')
+            or (reserved_manifest_sha is not None and not valid_sha(reserved_manifest_sha))
+            or (reserved_manifest_sha is None and reserved_coverage != 'unknown')
+            or source_group in reserved_groups
+            or not isinstance(reserved_projects, list)
+            or any(not isinstance(label, str) or not label.strip() for label in reserved_projects)
+            or _project_key(source.get('project', '')) in {_project_key(label) for label in reserved_projects}):
+        raise ValueError('staged reserved-group claims are inconsistent or exclude the selected source')
     if source_snapshot.get('training_claims') != {
             'task_outcome': 'unknown', 'teacher_proposal': 'none',
             'review_status': 'unreviewed', 'promotion_eligible': False}:
         raise ValueError('staged training claims must remain unknown and unreviewed')
-    if isinstance(materialization, dict) and materialization.get('kind') == 'origin-verified-private-projection':
-        if (materialization.get('source_and_cache_verified_on_origin_host') is not True
-                or materialization.get('full_source_paths_transferred') is not False
-                or materialization.get('provider_extension_payloads_transferred') is not False):
-            raise ValueError('staged projection provenance is invalid')
+    expected_materialization = {
+        'kind': 'origin-verified-private-projection',
+        'origin_snapshot_sha256': snapshot_sha,
+    }
+    if (not isinstance(materialization, dict)
+            or any(materialization.get(key) != expected for key, expected in expected_materialization.items())):
+        raise ValueError('staged projection provenance is invalid')
+    if (materialization.get('source_and_cache_verified_on_origin_host') is not True
+            or materialization.get('full_source_paths_transferred') is not False
+            or materialization.get('provider_extension_payloads_transferred') is not False):
+        raise ValueError('staged projection provenance is invalid')
+    expected_access_claims = {
+        'provider_listing_is_entitlement': False,
+        'subscription_entitlement': 'unknown',
+        'historical_session_effort': 'unknown',
+        'historical_model_access': 'unknown',
+    }
+    access_claims = source_snapshot.get('access_claims')
+    if (not isinstance(access_claims, dict)
+            or type(access_claims.get('provider_listing_is_entitlement')) is not bool
+            or access_claims.get('provider_listing_is_entitlement') is not False
+            or any(access_claims.get(key) != expected for key, expected in expected_access_claims.items()
+                   if key != 'provider_listing_is_entitlement')):
+        raise ValueError('staged access claims must remain unknown')
     if policy_raw is not None and provider.get('screen_policy_sha256') != sha(policy_raw):
         raise ValueError('staged provider screening policy digest mismatch')
     if (manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
