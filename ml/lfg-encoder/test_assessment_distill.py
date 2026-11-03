@@ -74,6 +74,22 @@ class DistillationPreparationTests(unittest.TestCase):
         self.assertFalse((self.output / 'validation.jsonl').exists())
         self.assertNotIn('fixture-secret-marker', json.dumps(manifest))
 
+    def test_user_requested_observation_is_not_accepted_as_a_teacher_trace(self):
+        observation = {
+            'schema_version': 'lfg.user-requested-routing-observation.v1',
+            'kind': 'user_requested',
+            'source': {'role': 'user', 'user_text_sha256': 'a' * 64},
+            'state': {'outcome': 'unknown', 'promotion_eligible': False},
+        }
+        for candidate in (observation, {**self.row, **observation, 'outcome': 'success'}):
+            with self.subTest(has_teacher_fields='response' in candidate):
+                self.write_source([candidate])
+                self.plan['sources'][0] = self.source_entry(self.source, 'train', 'project-one')
+                self.write_plan()
+                with self.assertRaisesRegex(ValueError, 'invalid teacher trace'):
+                    subject.build(self.plan_path, self.output)
+                self.assertFalse(self.output.exists())
+
     def test_context_extension_digest_is_verified_before_output(self):
         project_context = 'project facts'
         self.row.update(request=project_context + '\n\nfixture request',
