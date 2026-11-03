@@ -29,8 +29,10 @@ This target schema is not consumed by `assessment_train.py` and is not a
 `review-assessment-targets.v1` record. Those targets mean recommendation
 suitability and treat omitted available models as negatives. The new records
 mean only that a caller interpreted an explicit user request in this prompt.
-They are also not `assessment_distill.py` SFT examples: that builder requires a
-complete assistant response, while this observation has no generated or
-verified assistant target. A separate request-target training adapter is
-required before these targets can train either the assessment heads or the
-owned generative model. No quality claim follows from target import.
+They are not `assessment_distill.py` teacher traces and do not include a teacher
+or outcome. The separate teacherless path in
+[`USER-REQUEST-SFT.md`](USER-REQUEST-SFT.md) can encode only the explicit,
+source-linked model and effort requests into a task-specific SFT target. It
+does not create recommendation-quality or success labels and is not accepted by
+the current assessment service. No quality claim follows from target import or
+SFT preparation.
