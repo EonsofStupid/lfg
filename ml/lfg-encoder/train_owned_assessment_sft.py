@@ -569,6 +569,20 @@ def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_
             raise ValueError('completed SFT checkpoint training provenance is invalid')
 
 
+def _cli_is_user_request_mode(args: argparse.Namespace) -> bool:
+    try:
+        value = strict_json(read_bounded(args.config, args.max_config_bytes))
+        if isinstance(value, dict) and value.get('schema_version') == USER_REQUEST_CONFIG_SCHEMA:
+            return True
+    except (OSError, ValueError, TypeError, UnicodeError):
+        pass
+    try:
+        value = strict_json(read_bounded(args.dataset, 1024 * 1024))
+        return isinstance(value, dict) and value.get('schema_version') == USER_REQUEST_DATASET_SCHEMA
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return False
+
+
 def sample_batch(records: list[dict], rng: random.Random, batch_size: int, context: int):
     inputs, labels, corrections = [], [], []
     for item in rng.choices(records, weights=[entry['weight'] for entry in records], k=batch_size):
@@ -816,4 +830,7 @@ if __name__ == '__main__':
                                'heldout_separation', 'runtime_compatible', 'user_request_quality_evaluated')
         print(json.dumps({key: result.get(key) for key in summary_fields}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError) as error:
-        raise SystemExit(f'Owned assessment SFT failed ({type(error).__name__}): {error}') from None
+        detail = str(error)
+        if isinstance(error, OSError) and _cli_is_user_request_mode(args):
+            detail = f'filesystem operation failed (errno={error.errno})'
+        raise SystemExit(f'Owned assessment SFT failed ({type(error).__name__}): {detail}') from None
