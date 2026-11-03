@@ -108,6 +108,10 @@ or changing the requested path. POSIX output requires an existing protected
 parent directory; it walks with no-follow directory handles, rejects untrusted
 writable ancestors, and creates the file relative to the retained parent handle
 after checking the Git ignored/untracked boundary for that opened location.
+The CLI also refuses Windows before opening inventory, provider-cache, or
+reserved-manifest inputs. This guarantee is scoped to the CLI: most Python
+library helpers are not a Windows path/ACL sandbox and callers must not treat
+direct library reads as private Windows materialization.
 
 When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment
@@ -124,15 +128,31 @@ The CLI accepts `--reserved-session-ids` with a private
 `lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs and an
 `unknown` or `partial` coverage marker. It binds the manifest digest into the
 snapshot, retains its private locator, and rereads the bounded manifest during
-revalidation. A changed digest, ID list or coverage marker fails before the
-selected session prompt is opened; matching IDs are rejected before source
-opening. It will not accept a completeness claim without separate verifiable
-evidence.
+revalidation and immediately before returning staged bytes. On POSIX the
+reader opens through no-follow directory/file handles and requires an owner-only
+regular file owned by the current account with no hard links. A changed digest,
+ID list or coverage marker fails before the selected session prompt is opened;
+matching IDs are rejected before source opening. This narrows the concurrent
+edit window but does not lock the manifest after the final check; callers must
+keep the manifest in a protected directory and avoid concurrent edits during
+materialization. It will not accept a completeness claim without separate
+verifiable evidence. Reserved-manifest reads are disabled for direct Windows
+library callers because this code does not verify effective ACLs or reparse
+points there.
+
+Provider metadata screening is a defense-in-depth heuristic, not proof that all
+secrets are absent. Common credential key names (including session and ID
+tokens) are rejected, and string values are screened with the configured
+private-corpus policy, but an unknown field or unrecognized secret format can
+still evade screening. Review and version the policy for the local corpus;
+extension fields remain inert and do not change model or access behavior.
 
 The collector's `--source-bound-snapshot` and `--source-bound-bundle` options
 recheck the staged snapshot, request, context, bundle, and screening-policy
 digests after train-row preflight, immediately before collection, and before
-finalizing the run. Traces retain the snapshot and bundle digests with the
+finalizing the run. Staged validation also requires the selection manifest to
+keep `human_reviewed` and `promotion_eligible` false, in addition to the
+snapshot's unknown/unreviewed training claims. Traces retain the snapshot and bundle digests with the
 context provenance. The originating Windows session is verified before
 materialization; the staged projection is not a live lock on that source, so
 the trace describes the verified copy, not an immutable source file. Screening

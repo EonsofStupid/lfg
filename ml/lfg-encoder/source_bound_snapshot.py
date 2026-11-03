@@ -29,7 +29,8 @@ MAX_METADATA_BYTES = 64 * 1024
 MAX_RESERVED_MANIFEST_BYTES = 1024 * 1024
 SENSITIVE_KEY = re.compile(
     r'(?:^|[_-])(?:secret|password|credential|access[_-]?token|refresh[_-]?token|'
-    r'auth[_-]?token|api[_-]?key|access[_-]?key)(?:$|[_-])', re.I)
+    r'auth[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|jwt|'
+    r'api[_-]?key|access[_-]?key)(?:$|[_-])', re.I)
 
 
 def _project_key(value: str) -> str:
@@ -201,17 +202,52 @@ def source_group_id(record: dict) -> str:
 
 
 def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
-    """Read known project-independent session IDs; completeness remains unknown."""
-    before = path.stat()
-    if not path.is_file() or before.st_size > MAX_RESERVED_MANIFEST_BYTES:
-        raise ValueError('reserved-session manifest unavailable or too large')
-    with path.open('rb') as stream:
-        raw = stream.read(MAX_RESERVED_MANIFEST_BYTES + 1)
-    after = path.stat()
-    if (len(raw) > MAX_RESERVED_MANIFEST_BYTES or len(raw) != after.st_size
-            or (before.st_size, before.st_mtime_ns, before.st_ino)
-            != (after.st_size, after.st_mtime_ns, after.st_ino)):
-        raise ValueError('reserved-session manifest changed during read')
+    """Read an owner-only POSIX manifest; completeness remains unknown.
+
+    Windows direct reads are disabled because this module does not verify
+    Windows reparse points or effective ACLs. The CLI refuses Windows before
+    opening any inputs; this guard gives direct callers the same boundary for
+    this private manifest.
+    """
+    if os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW'):
+        raise ValueError('reserved-session manifest reads require POSIX no-follow file handles')
+    directory_fd = -1
+    file_fd = -1
+    name = ''
+    try:
+        directory_fd, name, _actual_parent = _open_private_parent(path)
+        _verify_parent_binding(path, directory_fd, name)
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        before = os.fstat(file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o077
+                or before.st_size > MAX_RESERVED_MANIFEST_BYTES):
+            raise ValueError('reserved-session manifest unavailable or not owner-only')
+        chunks = []
+        remaining = MAX_RESERVED_MANIFEST_BYTES + 1
+        while remaining:
+            chunk = os.read(file_fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b''.join(chunks)
+        after = os.fstat(file_fd)
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (len(raw) > MAX_RESERVED_MANIFEST_BYTES or len(raw) != after.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+                or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1):
+            raise ValueError('reserved-session manifest changed during read')
+        _verify_parent_binding(path, directory_fd, name)
+    except OSError:
+        raise ValueError('reserved-session manifest unavailable or changed during read') from None
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
     try:
         value = _strict_json(raw)
     except (ValueError, UnicodeError, RecursionError):
@@ -573,6 +609,13 @@ def prepare_single_request(value: dict, *, policy_path: Path, max_request_bytes:
                    'selection_manifest_sha256': sha(manifest_raw),
                    'project_context_sha256': sha(context_raw),
                    'screen_policy_sha256': policy_sha})
+    # Re-read after all rendering and serialization, immediately before
+    # returning the staged bytes. This narrows (but cannot eliminate) a race
+    # with a concurrent manifest edit after this final check.
+    _recheck_reserved_manifest(value.get('reserved_session_manifest_locator'),
+                               value['split'].get('known_reserved_manifest_sha256'),
+                               value['split'].get('known_reserved_group_sha256', []),
+                               value['split'].get('known_reserved_groups_coverage', 'unknown'))
     return (manifest, row, context_file_value, request_raw, manifest_raw, context_raw,
             json_bytes(projection), json_bytes(bundle))
 
@@ -638,9 +681,11 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
     if (manifest.get('schema_version') != 'lfg.teacher-request-selection-result.v1'
             or manifest.get('requests') != 1 or manifest.get('test_opened') is not False
             or manifest.get('validation_opened') is not False or manifest.get('heldout_separation') != 'unknown'
+            or manifest.get('human_reviewed') is not False
+            or manifest.get('promotion_eligible') is not False
             or manifest.get('source_bound_snapshot_sha256') != snapshot_sha
             or manifest.get('requests_sha256') != sha(request_raw)):
-        raise ValueError('staged selection does not match snapshot')
+        raise ValueError('staged selection claims or digests do not match snapshot')
     if (request.get('split') != 'train' or request.get('split_policy') != 'exploratory_train'
             or request.get('heldout_separation') != 'unknown' or request.get('review_status') != 'unreviewed'
             or request.get('outcome') != 'unknown' or request.get('source_bound_snapshot_sha256') != snapshot_sha

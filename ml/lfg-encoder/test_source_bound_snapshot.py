@@ -149,6 +149,19 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                                                context_raw.replace(b'provider_cache_sha256', b'provider_cache_sha25', 1),
                                                bundle_raw)
 
+        for field in ('human_reviewed', 'promotion_eligible'):
+            changed_manifest = json.loads(manifest_raw)
+            changed_manifest[field] = True
+            changed_manifest_raw = snapshot.json_bytes(changed_manifest)
+            changed_bundle = json.loads(bundle_raw)
+            changed_bundle['selection_manifest_sha256'] = snapshot.sha(changed_manifest_raw)
+            changed_bundle_raw = snapshot.json_bytes(changed_bundle)
+            with self.subTest(selection_claim=field), self.assertRaisesRegex(
+                    ValueError, 'staged selection claims or digests'):
+                snapshot.validate_staged_artifacts(projection_raw, request_raw,
+                                                   changed_manifest_raw, context_raw,
+                                                   changed_bundle_raw)
+
     def test_changed_selected_line_fails_closed(self):
         self.session.write_bytes(self.session.read_bytes().replace(b'Review the Terra project plan.', b'Changed the Terra project plan.'))
         with self.assertRaisesRegex(ValueError, 'source identity'):
@@ -195,6 +208,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         known_reserved_project_labels=['L.F.G'])
 
+    @unittest.skipUnless(os.name == 'posix', 'reserved manifest reads require POSIX no-follow handles')
     def test_cli_reserved_session_manifest_rejects_renamed_label_before_source_open(self):
         inventory_path = self.root / 'inventory.jsonl'
         inventory_path.write_bytes(snapshot.json_bytes(self.record))
@@ -204,6 +218,8 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                           'groups': [snapshot.source_group_id(self.record)],
                           'extension': {'kept_in_digest': True}}
         manifest_path.write_bytes(snapshot.json_bytes(manifest_value))
+        if os.name == 'posix':
+            manifest_path.chmod(0o600)
         groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest_path)
         self.assertEqual(groups, manifest_value['groups'])
         self.assertEqual(digest, snapshot.sha(manifest_path.read_bytes()))
@@ -222,16 +238,84 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertFalse(output_path.exists())
 
     def test_reserved_session_manifest_cannot_claim_complete_coverage(self):
+        if os.name != 'posix':
+            self.skipTest('reserved manifest reads require POSIX no-follow handles')
         path = self.root / 'complete-reserved.json'
         path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
                                               'coverage': 'complete', 'groups': []}))
+        path.chmod(0o600)
         with self.assertRaisesRegex(ValueError, 'invalid reserved-session manifest'):
             snapshot.read_reserved_session_manifest(path)
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX private-file checks are platform-specific')
+    def test_reserved_manifest_rejects_symlink_hardlink_and_permissive_file(self):
+        raw = snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                   'coverage': 'partial', 'groups': []})
+        original = self.root / 'reserved-private.json'
+        original.write_bytes(raw)
+        original.chmod(0o600)
+        self.assertEqual(snapshot.read_reserved_session_manifest(original)[0], [])
+
+        permissive = self.root / 'reserved-permissive.json'
+        permissive.write_bytes(raw)
+        permissive.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, 'owner-only'):
+            snapshot.read_reserved_session_manifest(permissive)
+
+        hardlink = self.root / 'reserved-hardlink.json'
+        os.link(original, hardlink)
+        with self.assertRaisesRegex(ValueError, 'owner-only'):
+            snapshot.read_reserved_session_manifest(original)
+
+        symlink = self.root / 'reserved-symlink.json'
+        symlink.symlink_to(original)
+        with self.assertRaises(ValueError):
+            snapshot.read_reserved_session_manifest(symlink)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows library boundary is platform-specific')
+    def test_reserved_manifest_library_read_fails_before_path_access_on_windows(self):
+        with mock.patch.object(Path, 'stat', side_effect=AssertionError('path stat')), \
+                mock.patch.object(Path, 'open', side_effect=AssertionError('path open')), \
+                mock.patch.object(Path, 'resolve', side_effect=AssertionError('path resolve')):
+            with self.assertRaisesRegex(ValueError, 'require POSIX no-follow'):
+                snapshot.read_reserved_session_manifest(self.root / 'reserved.json')
+
+    @unittest.skipUnless(os.name == 'posix', 'reserved-manifest no-follow checks are POSIX-specific')
+    def test_materialization_rechecks_reserved_manifest_after_staging(self):
+        manifest = self.root / 'reserved-final-check.json'
+        initial = {'schema_version': 'lfg.reserved-session-groups.v1',
+                   'coverage': 'partial', 'groups': []}
+        manifest.write_bytes(snapshot.json_bytes(initial))
+        manifest.chmod(0o600)
+        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest)
+        value = snapshot.build_snapshot(
+            self.record, self.cache, split_policy='exploratory_train',
+            known_reserved_group_sha256=groups, known_reserved_manifest_sha256=digest,
+            known_reserved_manifest_locator=str(manifest.resolve()),
+            known_reserved_groups_coverage=coverage)
+        original_stage = snapshot.stage_snapshot_projection
+
+        def mutate_after_staging(snapshot_value, context_text):
+            result = original_stage(snapshot_value, context_text)
+            manifest.write_bytes(snapshot.json_bytes({
+                'schema_version': 'lfg.reserved-session-groups.v1',
+                'coverage': 'partial', 'groups': [snapshot.source_group_id(self.record)]}))
+            manifest.chmod(0o600)
+            return result
+
+        with mock.patch.object(snapshot, 'stage_snapshot_projection', side_effect=mutate_after_staging):
+            with self.assertRaisesRegex(ValueError, 'reserved-session manifest changed'):
+                snapshot.prepare_single_request(
+                    value, policy_path=Path(__file__).with_name('private-corpus-screen.example.json'),
+                    max_request_bytes=4096, max_context_bytes=100_000)
+
     def test_snapshot_revalidation_detects_newly_reserved_session_before_source_open(self):
+        if os.name != 'posix':
+            self.skipTest('reserved manifest reads require POSIX no-follow handles')
         manifest = self.root / 'mutable-reserved.json'
         manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
                                                   'coverage': 'partial', 'groups': []}))
+        manifest.chmod(0o600)
         groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest)
         value = snapshot.build_snapshot(
             self.record, self.cache, split_policy='exploratory_train',
@@ -261,9 +345,11 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.write_cache({'models': rows})
         with self.assertRaisesRegex(ValueError, 'duplicate provider model'):
             snapshot.read_provider_cache(self.cache)
-        self.write_cache({'models': [{'slug': 'visible', 'visibility': 'list', 'auth_token': 'private'}]})
-        with self.assertRaisesRegex(ValueError, 'sensitive provider extension'):
-            snapshot.read_provider_cache(self.cache)
+        for key in ('auth_token', 'session_token', 'id_token', 'jwt'):
+            with self.subTest(sensitive_key=key):
+                self.write_cache({'models': [{'slug': 'visible', 'visibility': 'list', key: 'private'}]})
+                with self.assertRaisesRegex(ValueError, 'sensitive provider extension'):
+                    snapshot.read_provider_cache(self.cache)
 
     def test_provider_metadata_is_screened_before_persistence_and_identity_changes_rejected(self):
         policy = self.root / 'screen-policy.json'
