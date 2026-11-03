@@ -89,18 +89,23 @@ prefix or selected line fails validation.
 
 Source-bound snapshots preserve current listed model metadata as provider
 claims. A provider listing does not establish entitlement; subscription
-entitlement and historical session effort remain `unknown`. Unrecognized cache
-extensions are recursively screened by the configured policy before they can
-be retained in the private origin snapshot; safe extension values remain
-inert, and source digests continue to bind the original cache bytes. The staged
+entitlement and historical session effort remain `unknown`. Every persisted
+provider string, including IDs, labels, descriptions, effort names, timestamps
+and extension strings, is screened by the configured policy. If screening
+would change an ID or effort identity, collection fails; other provider text
+is stored only in screened form. Safe extension values remain inert, and
+source digests continue to bind the original cache bytes. The staged
 projection carries the original cache digest and selected provider fields,
 omits raw source paths and provider extension payloads, and records that it is
 a copy of an origin-verified snapshot. Project association comes from an
 inventory label and is explicitly marked unverified. Session group identity
 does not include that mutable label. Windows writes fail closed unless the
-protected ACL is verified across the parent chain and the original open file
-handle still has the same identity as the named path; writes use that handle
-without reopening the path.
+dedicated output directory has a protected current-user, SYSTEM, and
+Administrators ACL, untrusted ancestors cannot delete child paths or change
+ACLs/take ownership, and the original open file handle still has the same
+identity as the named path. Ancestors may grant read/traverse or create-only
+rights that cannot replace an already existing path component. Writes use the
+original handle without reopening the path.
 
 When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment
@@ -113,6 +118,11 @@ are unverified and do not prove project identity. Reserved-set coverage is
 therefore incomplete. The Makers Impulse candidate external-project group
 remains excluded from this selection. A separate, independently reserved
 evaluation group is still needed before any quality claim or promotion.
+The CLI accepts `--reserved-session-ids` with a private
+`lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs and an
+`unknown` or `partial` coverage marker. It binds the manifest digest into the
+snapshot and rejects matching IDs before opening the session source. It will
+not accept a completeness claim without separate verifiable evidence.
 
 The collector's `--source-bound-snapshot` and `--source-bound-bundle` options
 recheck the staged snapshot, request, context, bundle, and screening-policy

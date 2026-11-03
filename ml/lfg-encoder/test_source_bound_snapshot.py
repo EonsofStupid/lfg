@@ -177,6 +177,39 @@ class SourceBoundSnapshotTests(unittest.TestCase):
                 snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         known_reserved_project_labels=['L.F.G'])
 
+    def test_cli_reserved_session_manifest_rejects_renamed_label_before_source_open(self):
+        inventory_path = self.root / 'inventory.jsonl'
+        inventory_path.write_bytes(snapshot.json_bytes(self.record))
+        manifest_path = self.root / 'reserved-groups.json'
+        manifest_value = {'schema_version': 'lfg.reserved-session-groups.v1',
+                          'coverage': 'partial',
+                          'groups': [snapshot.source_group_id(self.record)],
+                          'extension': {'kept_in_digest': True}}
+        manifest_path.write_bytes(snapshot.json_bytes(manifest_value))
+        groups, digest, coverage = snapshot.read_reserved_session_manifest(manifest_path)
+        self.assertEqual(groups, manifest_value['groups'])
+        self.assertEqual(digest, snapshot.sha(manifest_path.read_bytes()))
+        self.assertEqual(coverage, 'partial')
+        changed = dict(self.record, project='renamed-project-label')
+        inventory_path.write_bytes(snapshot.json_bytes(changed))
+        output_path = self.root / 'snapshot.json'
+        argv = ['source_bound_snapshot.py', '--inventory', str(inventory_path), '--record', '1',
+                '--provider-cache', str(self.cache), '--split-policy', 'exploratory_train',
+                '--reserved-session-ids', str(manifest_path), '--output', str(output_path)]
+        with mock.patch('sys.argv', argv), \
+                mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            with self.assertRaises(SystemExit):
+                snapshot.main()
+        opened.assert_not_called()
+        self.assertFalse(output_path.exists())
+
+    def test_reserved_session_manifest_cannot_claim_complete_coverage(self):
+        path = self.root / 'complete-reserved.json'
+        path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                              'coverage': 'complete', 'groups': []}))
+        with self.assertRaisesRegex(ValueError, 'invalid reserved-session manifest'):
+            snapshot.read_reserved_session_manifest(path)
+
     def test_reserved_train_requires_split_evidence(self):
         with self.assertRaisesRegex(ValueError, 'split evidence'):
             snapshot.build_snapshot(self.record, self.cache, split_policy='reserved_train')
@@ -189,6 +222,27 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.write_cache({'models': [{'slug': 'visible', 'visibility': 'list', 'auth_token': 'private'}]})
         with self.assertRaisesRegex(ValueError, 'sensitive provider extension'):
             snapshot.read_provider_cache(self.cache)
+
+    def test_provider_metadata_is_screened_before_persistence_and_identity_changes_rejected(self):
+        policy = self.root / 'screen-policy.json'
+        policy.write_text(json.dumps({
+            'schema_version': 'lfg.private-corpus-screen.v1', 'revision': 'metadata-test',
+            'limits': {'max_policy_bytes': 65536, 'max_plan_bytes': 65536,
+                       'max_source_bytes': 100000, 'max_total_source_bytes': 100000,
+                       'max_total_output_bytes': 100000, 'max_records': 100,
+                       'max_text_bytes': 10000, 'max_matches_per_record': 100},
+            'rules': [{'id': 'private-value', 'pattern': 'owner-private-[A-Za-z0-9]+',
+                       'replacement': '[REDACTED]'}]}))
+        self.write_cache({'models': [{'slug': 'safe-model', 'display_name': 'owner-private-label9',
+                                      'description': 'owner-private-description8', 'visibility': 'list',
+                                      'supported_reasoning_levels': [{'effort': 'low'}]}]})
+        parsed, _raw, _stat = snapshot.read_provider_cache(self.cache, screen_policy_path=policy)
+        self.assertEqual(parsed['models'][0]['display_name'], '[REDACTED]')
+        self.assertEqual(parsed['models'][0]['description'], '[REDACTED]')
+        self.assertNotIn('owner-private', json.dumps(parsed))
+        self.write_cache({'models': [{'slug': 'owner-private-id6', 'visibility': 'list'}]})
+        with self.assertRaisesRegex(ValueError, 'model ID requires redaction'):
+            snapshot.read_provider_cache(self.cache, screen_policy_path=policy)
 
     def test_context_screens_provider_metadata_before_returning_it(self):
         self.write_cache({'models': [{'slug': 'terra-visible', 'display_name': 'Visible Terra',
@@ -223,29 +277,65 @@ class SourceBoundSnapshotTests(unittest.TestCase):
 
     def test_windows_private_write_fails_closed(self):
         with mock.patch.object(snapshot.os, 'name', 'nt'), \
+                mock.patch.object(snapshot, '_secure_windows_directory', side_effect=ValueError('ACL unavailable')), \
                 mock.patch.object(snapshot, '_secure_windows_file', side_effect=ValueError('ACL unavailable')):
             with self.assertRaisesRegex(ValueError, 'ACL unavailable'):
                 snapshot.write_private_snapshot(self.root / 'snapshot.json', {'ok': True})
         self.assertFalse((self.root / 'snapshot.json').exists())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification is Windows-specific')
-    def test_windows_private_write_fails_closed_without_verified_parent_chain(self):
-        destination = self.root / 'snapshot.json'
-        with mock.patch.object(snapshot, '_secure_windows_file', side_effect=ValueError('parent chain unverified')):
-            with self.assertRaisesRegex(ValueError, 'parent chain unverified'):
-                snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
-        self.assertFalse(destination.exists())
+    def test_windows_private_write_succeeds_under_normal_readable_ancestor_chain(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PROGRAMDATA']) as private_directory:
+            destination = Path(private_directory) / 'snapshot.json'
+            snapshot.write_private_snapshot(destination, {'schema_version': snapshot.SCHEMA})
+            self.assertEqual(json.loads(destination.read_text(encoding='utf-8'))['schema_version'], snapshot.SCHEMA)
 
     def test_windows_writer_rejects_replaced_path_identity(self):
         destination = self.root / 'replacement.json'
         destination.write_bytes(b'')
         descriptor = os.open(destination, os.O_WRONLY)
-        self.addCleanup(lambda: os.close(descriptor) if descriptor >= 0 else None)
         original_stat = destination.stat()
         replaced = mock.Mock(st_dev=original_stat.st_dev, st_ino=original_stat.st_ino + 1)
-        with mock.patch.object(Path, 'stat', return_value=replaced):
+        real_stat = Path.stat
+        with mock.patch.object(Path, 'stat', autospec=True,
+                               side_effect=lambda path, *args, **kwargs:
+                                   replaced if path == destination else real_stat(path, *args, **kwargs)):
             with self.assertRaisesRegex(ValueError, 'file identity changed'):
                 snapshot._write_verified_windows_handle(descriptor, destination, b'private')
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+
+    def test_windows_writers_remove_empty_file_and_close_handle_on_identity_mismatch(self):
+        for name, writer, value in (
+            ('snapshot', snapshot.write_private_snapshot, {'schema_version': snapshot.SCHEMA}),
+            ('bytes', snapshot.write_private_bytes, b'private'),
+        ):
+            with self.subTest(writer=name):
+                destination = self.root / f'{name}.json'
+                mismatch = mock.Mock(st_dev=os.stat(destination.parent).st_dev, st_ino=-1)
+                real_stat = Path.stat
+                real_open = os.open
+                opened_descriptors = []
+
+                def tracked_open(*args, **kwargs):
+                    descriptor = real_open(*args, **kwargs)
+                    opened_descriptors.append(descriptor)
+                    return descriptor
+
+                with mock.patch.object(snapshot.os, 'name', 'nt'), \
+                        mock.patch.object(snapshot.os, 'open', side_effect=tracked_open), \
+                        mock.patch.object(snapshot, '_require_ignored_untracked'), \
+                        mock.patch.object(snapshot, '_secure_windows_directory'), \
+                        mock.patch.object(snapshot, '_secure_windows_file'), \
+                        mock.patch.object(Path, 'stat', autospec=True,
+                                          side_effect=lambda path, *args, **kwargs:
+                                              mismatch if path == destination else real_stat(path, *args, **kwargs)):
+                    with self.assertRaisesRegex(ValueError, 'file identity changed'):
+                        writer(destination, value)
+                self.assertFalse(destination.exists())
+                self.assertEqual(len(opened_descriptors), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(opened_descriptors[0])
 
 
 if __name__ == '__main__':

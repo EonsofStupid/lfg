@@ -26,6 +26,7 @@ MAX_MODELS = 2048
 MAX_EXTENSION_NODES = 20_000
 MAX_EXTENSION_DEPTH = 48
 MAX_METADATA_BYTES = 64 * 1024
+MAX_RESERVED_MANIFEST_BYTES = 1024 * 1024
 SENSITIVE_KEY = re.compile(
     r'(?:^|[_-])(?:secret|password|credential|access[_-]?token|refresh[_-]?token|'
     r'auth[_-]?token|api[_-]?key|access[_-]?key)(?:$|[_-])', re.I)
@@ -102,13 +103,19 @@ def _safe_extensions(value: object, rules, limits: dict) -> object:
     return visit(value, 0)
 
 
-def _metadata(value: object, name: str, *, required: bool = False) -> str | None:
+def _metadata(value: object, name: str, *, required: bool = False, rules=None,
+              limits: dict | None = None, identity: bool = False) -> str | None:
     if value is None and not required:
         return None
     if (not isinstance(value, str) or (required and not value.strip())
             or len(value.encode('utf-8')) > MAX_METADATA_BYTES
             or any(ord(char) < 32 and char not in '\t\r\n' for char in value)):
         raise ValueError(f'invalid provider {name}')
+    if value and rules is not None and limits is not None:
+        screened, _ = screen_private_corpus._screen(value, rules, limits)
+        if identity and screened != value:
+            raise ValueError(f'provider {name} requires redaction')
+        return screened
     return value
 
 
@@ -134,7 +141,7 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
         raise ValueError('invalid provider cache JSON') from None
     if not isinstance(cache, dict) or not isinstance(cache.get('models'), list) or len(cache['models']) > MAX_MODELS:
         raise ValueError('invalid provider cache structure')
-    fetched_at = _metadata(cache.get('fetched_at'), 'fetched_at')
+    fetched_at = _metadata(cache.get('fetched_at'), 'fetched_at', rules=rules, limits=policy['limits'])
     listed = []
     seen = set()
     for model in cache['models']:
@@ -142,12 +149,13 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
             raise ValueError('invalid provider model record')
         if model.get('visibility') != 'list':
             continue
-        slug = _metadata(model.get('slug'), 'model ID', required=True)
+        slug = _metadata(model.get('slug'), 'model ID', required=True, rules=rules,
+                         limits=policy['limits'], identity=True)
         if slug in seen:
             raise ValueError('duplicate provider model ID')
         seen.add(slug)
-        label = _metadata(model.get('display_name'), 'display name')
-        description = _metadata(model.get('description'), 'description')
+        label = _metadata(model.get('display_name'), 'display name', rules=rules, limits=policy['limits'])
+        description = _metadata(model.get('description'), 'description', rules=rules, limits=policy['limits'])
         priority = model.get('priority')
         if priority is not None and (type(priority) is not int or priority < 0):
             raise ValueError('invalid provider priority')
@@ -159,7 +167,8 @@ def read_provider_cache(path: Path, *, max_bytes: int = MAX_CACHE_BYTES,
         for level in levels or []:
             if not isinstance(level, dict):
                 raise ValueError('invalid provider effort record')
-            effort = _metadata(level.get('effort'), 'effort')
+            effort = _metadata(level.get('effort'), 'effort', rules=rules,
+                               limits=policy['limits'], identity=True)
             if effort is not None:
                 efforts.append(effort)
             extra = {key: value for key, value in level.items() if key != 'effort'}
@@ -189,6 +198,34 @@ def source_group_id(record: dict) -> str:
     """Project-label-independent session key without exposing the source path."""
     path = os.path.normcase(os.path.realpath(os.path.abspath(record['source_file'])))
     return sha(('codex-session-path-v1\0' + path).encode('utf-8'))
+
+
+def read_reserved_session_manifest(path: Path) -> tuple[list[str], str, str]:
+    """Read known project-independent session IDs; completeness remains unknown."""
+    before = path.stat()
+    if not path.is_file() or before.st_size > MAX_RESERVED_MANIFEST_BYTES:
+        raise ValueError('reserved-session manifest unavailable or too large')
+    with path.open('rb') as stream:
+        raw = stream.read(MAX_RESERVED_MANIFEST_BYTES + 1)
+    after = path.stat()
+    if (len(raw) > MAX_RESERVED_MANIFEST_BYTES or len(raw) != after.st_size
+            or (before.st_size, before.st_mtime_ns, before.st_ino)
+            != (after.st_size, after.st_mtime_ns, after.st_ino)):
+        raise ValueError('reserved-session manifest changed during read')
+    try:
+        value = _strict_json(raw)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError('invalid reserved-session manifest') from None
+    if (not isinstance(value, dict) or value.get('schema_version') != 'lfg.reserved-session-groups.v1'
+            or not isinstance(value.get('groups'), list)
+            or value.get('coverage') not in ('unknown', 'partial')):
+        raise ValueError('invalid reserved-session manifest')
+    groups = value['groups']
+    if (len(groups) > 100_000 or any(not isinstance(item, str) or len(item) != 64
+            or any(char not in '0123456789abcdef' for char in item) for item in groups)
+            or len(set(groups)) != len(groups)):
+        raise ValueError('invalid reserved-session identity')
+    return groups, sha(raw), value['coverage']
 
 
 def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_bytes: int) -> str:
@@ -236,6 +273,8 @@ def verify_selected_source(record: dict, *, max_session_bytes: int, max_line_byt
 
 def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                    known_reserved_group_sha256: tuple[str, ...] | list[str] = (),
+                   known_reserved_manifest_sha256: str | None = None,
+                   known_reserved_groups_coverage: str = 'unknown',
                    known_reserved_project_labels: tuple[str, ...] | list[str] = (),
                    screen_policy_path: Path | None = None,
                    max_session_bytes: int = 512 * 1024 * 1024,
@@ -258,6 +297,13 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
            or any(char not in '0123456789abcdef' for char in item)
            for item in known_reserved_group_sha256):
         raise ValueError('invalid reserved-group identity')
+    if (known_reserved_manifest_sha256 is not None and
+            (not isinstance(known_reserved_manifest_sha256, str)
+             or len(known_reserved_manifest_sha256) != 64
+             or any(char not in '0123456789abcdef' for char in known_reserved_manifest_sha256))):
+        raise ValueError('invalid reserved-session manifest digest')
+    if known_reserved_groups_coverage not in ('unknown', 'partial'):
+        raise ValueError('reserved-session coverage cannot be asserted complete')
     if (not isinstance(known_reserved_project_labels, (tuple, list))
             or any(not isinstance(item, str) or not item.strip() for item in known_reserved_project_labels)):
         raise ValueError('invalid reserved-project list')
@@ -313,6 +359,8 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
                   'known_reserved_group_exclusion': 'checked',
                   'known_reserved_groups_checked': len(known_reserved_group_sha256),
                   'known_reserved_group_sha256': list(known_reserved_group_sha256),
+                  'known_reserved_manifest_sha256': known_reserved_manifest_sha256,
+                  'known_reserved_groups_coverage': known_reserved_groups_coverage,
                   'known_reserved_project_labels': list(known_reserved_project_labels)},
         'provider_list': {**cache, 'source_locator': str(cache_path.resolve())},
         'access_claims': {
@@ -344,6 +392,8 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     policy_path = Path(provider.get('screen_policy_locator') or _default_screen_policy_path())
     current = build_snapshot(record, Path(cache_path), split_policy='exploratory_train',
                              known_reserved_group_sha256=split.get('known_reserved_group_sha256', []),
+                             known_reserved_manifest_sha256=split.get('known_reserved_manifest_sha256'),
+                             known_reserved_groups_coverage=split.get('known_reserved_groups_coverage', 'unknown'),
                              known_reserved_project_labels=split.get('known_reserved_project_labels', []),
                              screen_policy_path=policy_path,
                              max_session_bytes=max_session_bytes, max_line_bytes=max_line_bytes,
@@ -666,18 +716,122 @@ def _require_ignored_untracked(path: Path) -> None:
         raise ValueError('snapshot must be ignored and untracked')
 
 
-def _secure_windows_file(path: Path) -> None:
-    env = dict(os.environ, LFG_PRIVATE_SNAPSHOT_PATH=str(path.resolve()))
+def _current_windows_sid() -> str:
     get_sid = subprocess.run(
         ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
          '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, env=env)
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
     sid = get_sid.stdout.strip()
     if get_sid.returncode or not re.fullmatch(r'S-1-(?:\d+-)+\d+', sid):
         raise ValueError('cannot establish current Windows identity')
-    acl = subprocess.run(['icacls.exe', str(path), '/inheritance:r', '/grant:r',
-                          f'*{sid}:(F)', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return sid
+
+
+def _verify_windows_ancestor_chain(path: Path) -> None:
+    env = dict(os.environ, LFG_PRIVATE_DIRECTORY_PATH=str(path.resolve()))
+    script = r'''
+$private = Get-Item -LiteralPath $env:LFG_PRIVATE_DIRECTORY_PATH
+$trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                    [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                    [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
+$directory = $private.Parent
+while ($null -ne $directory) {
+  if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
+  $parentAcl = Get-Acl -LiteralPath $directory.FullName
+  $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+  foreach ($r in $parentRules) {
+    if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $r.IdentityReference.Value -notin $trusted -and
+        (([long]$r.FileSystemRights -band $replaceMask) -ne 0)) { exit 11 }
+  }
+  $directory = $directory.Parent
+}
+exit 0
+'''
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
+    if result.returncode:
+        raise ValueError(f'Windows private ancestor ACL verification failed ({result.returncode})')
+
+
+def _secure_windows_directory(path: Path) -> None:
+    """Protect a dedicated output directory and reject writable untrusted ancestors."""
+    env = dict(os.environ, LFG_PRIVATE_DIRECTORY_PATH=str(path.resolve()))
+    _verify_windows_ancestor_chain(path)
+    try:
+        empty = next(path.iterdir(), None) is None
+    except OSError:
+        raise ValueError('cannot inspect Windows private output directory') from None
+    if empty:
+        sid = _current_windows_sid()
+        acl = subprocess.run(['icacls.exe', str(path), '/inheritance:r', '/grant:r',
+                              f'*{sid}:(F)', '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
+        if acl.returncode:
+            raise ValueError('cannot secure Windows private directory ACL')
+    verify_script = r'''
+$p = $env:LFG_PRIVATE_DIRECTORY_PATH
+$private = Get-Item -LiteralPath $p
+if (-not $private.PSIsContainer -or ($private.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 6 }
+$expected = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+$a = Get-Acl -LiteralPath $p
+$rules = @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+if (-not $a.AreAccessRulesProtected -or $rules.Count -ne 3) { exit 7 }
+foreach ($r in $rules) {
+  if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+      $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+      $r.IdentityReference.Value -notin $expected) { exit 8 }
+}
+if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
+$trusted = @($expected | Sort-Object -Unique)
+$replaceMask = [long]([int][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                    [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                    [int][Security.AccessControl.FileSystemRights]::TakeOwnership)
+$directory = $private.Parent
+while ($null -ne $directory) {
+  if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 10 }
+  $parentAcl = Get-Acl -LiteralPath $directory.FullName
+  $parentRules = @($parentAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+  foreach ($r in $parentRules) {
+    if ($r.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $r.IdentityReference.Value -notin $trusted -and
+        (([long]$r.FileSystemRights -band $replaceMask) -ne 0)) { exit 11 }
+  }
+  $directory = $directory.Parent
+}
+exit 0
+'''
+    verified = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', verify_script],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
+    if verified.returncode:
+        raise ValueError(f'Windows private directory or ancestor ACL verification failed ({verified.returncode})')
+
+
+def _secure_windows_file(path: Path) -> None:
+    env = dict(os.environ, LFG_PRIVATE_SNAPSHOT_PATH=str(path.resolve()),
+               LFG_PRIVATE_DIRECTORY_PATH=str(path.parent.resolve()))
+    _verify_windows_ancestor_chain(path.parent)
+    sid = _current_windows_sid()
+    env['LFG_PRIVATE_CURRENT_SID'] = sid
+    set_acl_script = r'''
+$p = $env:LFG_PRIVATE_SNAPSHOT_PATH
+$a = Get-Acl -LiteralPath $p
+$a.SetAccessRuleProtection($true, $false)
+foreach ($r in @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+  [void]$a.RemoveAccessRuleSpecific($r)
+}
+foreach ($id in @($env:LFG_PRIVATE_CURRENT_SID, 'S-1-5-18', 'S-1-5-32-544')) {
+  $sid = New-Object Security.Principal.SecurityIdentifier($id)
+  $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+    $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+    [Security.AccessControl.AccessControlType]::Allow)
+  [void]$a.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $p -AclObject $a
+'''
+    acl = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', set_acl_script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
     if acl.returncode:
         raise ValueError('cannot secure Windows snapshot ACL')
     verify_script = r'''
@@ -692,26 +846,23 @@ foreach ($r in $rules) {
       $r.IdentityReference.Value -notin $expected) { exit 8 }
 }
 if (@($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 9 }
-$expectedSet = @($expected | Sort-Object -Unique)
-$directory = (Get-Item -LiteralPath $p).Directory
-while ($null -ne $directory) {
-  $da = Get-Acl -LiteralPath $directory.FullName
-  $dr = @($da.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-  if (-not $da.AreAccessRulesProtected -or $dr.Count -ne 3) { exit 10 }
-  foreach ($r in $dr) {
-    if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-        $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
-        $r.IdentityReference.Value -notin $expectedSet) { exit 11 }
-  }
-  if (@($dr | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 12 }
-  $directory = $directory.Parent
+$private = Get-Item -LiteralPath $env:LFG_PRIVATE_DIRECTORY_PATH
+if (-not $private.PSIsContainer -or ($private.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 10 }
+$da = Get-Acl -LiteralPath $private.FullName
+$dr = @($da.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+if (-not $da.AreAccessRulesProtected -or $dr.Count -ne 3) { exit 11 }
+foreach ($r in $dr) {
+  if ($r.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+      $r.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+      $r.IdentityReference.Value -notin $expected) { exit 12 }
 }
+if (@($dr | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique).Count -ne 3) { exit 13 }
 exit 0
 '''
     verified = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', verify_script],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
     if verified.returncode:
-        raise ValueError('Windows snapshot ACL verification failed')
+        raise ValueError(f'Windows snapshot ACL verification failed ({verified.returncode})')
 
 
 def write_private_snapshot(path: Path, snapshot: dict) -> None:
@@ -719,6 +870,8 @@ def write_private_snapshot(path: Path, snapshot: dict) -> None:
     raw = json_bytes(snapshot)
     _require_ignored_untracked(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == 'nt':
+        _secure_windows_directory(path.parent)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
@@ -750,6 +903,8 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
         raise ValueError('private output must be bytes')
     _require_ignored_untracked(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == 'nt':
+        _secure_windows_directory(path.parent)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         if os.name == 'nt':
@@ -777,14 +932,20 @@ def write_private_bytes(path: Path, raw: bytes) -> None:
 
 def _write_verified_windows_handle(descriptor: int, path: Path, raw: bytes) -> None:
     """Write through the originally created handle after ACL and identity checks."""
-    opened = os.fstat(descriptor)
-    named = path.stat()
-    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
-        raise ValueError('Windows private file identity changed during ACL verification')
-    with os.fdopen(descriptor, 'wb', closefd=True) as stream:
-        stream.write(raw)
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        opened = os.fstat(descriptor)
+        named = path.stat()
+        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+            raise ValueError('Windows private file identity changed during ACL verification')
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError('Windows private write made no progress')
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def main() -> None:
@@ -795,6 +956,8 @@ def main() -> None:
     parser.add_argument('--screen-policy', type=Path, default=_default_screen_policy_path())
     parser.add_argument('--split-policy', choices=('exploratory_train', 'reserved_train'), required=True)
     parser.add_argument('--reserved-project', action='append', default=[])
+    parser.add_argument('--reserved-session-ids', type=Path,
+                        help='private lfg.reserved-session-groups.v1 manifest; coverage remains unknown or partial')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--max-session-bytes', type=int, default=512 * 1024 * 1024)
     parser.add_argument('--max-line-bytes', type=int, default=16 * 1024 * 1024)
@@ -813,7 +976,15 @@ def main() -> None:
         record = _strict_json(inventory_line)
         if not isinstance(record, dict):
             raise ValueError('invalid inventory record')
+        if args.reserved_session_ids is None:
+            reserved_groups, reserved_manifest_sha, reserved_coverage = [], None, 'unknown'
+        else:
+            reserved_groups, reserved_manifest_sha, reserved_coverage = read_reserved_session_manifest(
+                args.reserved_session_ids)
         result = build_snapshot(record, args.provider_cache, split_policy=args.split_policy,
+                                known_reserved_group_sha256=reserved_groups,
+                                known_reserved_manifest_sha256=reserved_manifest_sha,
+                                known_reserved_groups_coverage=reserved_coverage,
                                 known_reserved_project_labels=args.reserved_project,
                                 screen_policy_path=args.screen_policy,
                                 max_session_bytes=args.max_session_bytes, max_line_bytes=args.max_line_bytes,
@@ -822,6 +993,8 @@ def main() -> None:
         print(json.dumps({'status': 'verified', 'split_assignment': result['split']['assignment'],
                           'heldout_separation': result['split']['heldout_separation'],
                           'provider_models': len(result['provider_list']['models']),
+                          'reserved_session_groups_checked': result['split']['known_reserved_groups_checked'],
+                          'reserved_session_groups_coverage': result['split']['known_reserved_groups_coverage'],
                           'entitlement': result['access_claims']['subscription_entitlement']}))
     except (OSError, ValueError, KeyError, TypeError, UnicodeError, OverflowError):
         raise SystemExit('Snapshot validation failed; no source text or metadata was emitted.') from None
