@@ -186,6 +186,12 @@ enum Command {
         manifest_sha256: String,
         #[arg(long)]
         runtime_config: PathBuf,
+        /// Pin the exact runtime config bytes for service-spawned workers.
+        #[arg(long)]
+        runtime_config_sha256: Option<String>,
+        /// Bound runtime config bytes when a digest pin is supplied.
+        #[arg(long)]
+        runtime_config_max_bytes: Option<u64>,
         #[arg(long)]
         max_new_bytes: usize,
         #[arg(long)]
@@ -456,6 +462,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             artifact,
             manifest_sha256,
             runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
             max_new_bytes,
             stop,
             experimental,
@@ -469,6 +477,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &runtime_config,
                 max_new_bytes,
                 stop.as_deref(),
+                runtime_config_sha256.as_deref(),
+                runtime_config_max_bytes,
             )?;
         }
         #[cfg(feature = "embedded-owned-byte")]

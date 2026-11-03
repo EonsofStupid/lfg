@@ -54,14 +54,14 @@ impl FeedbackApi {
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .filter(|value| local_http_origin(value))
+            .filter(|value| super::local_access::valid_origin(value))
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let hosts = std::env::var("LFG_FEEDBACK_ALLOWED_HOSTS")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
-            .filter(|value| local_authority(value))
+            .filter(|value| super::local_access::valid_authority(value))
             .map(str::to_owned)
             .take(16)
             .collect::<Vec<_>>();
@@ -76,7 +76,7 @@ impl FeedbackApi {
             };
         }
         let token = match std::env::var("LFG_FEEDBACK_TOKEN") {
-            Ok(token) if valid_token(&token) => Arc::new(token),
+            Ok(token) if super::local_access::valid_token(&token) => Arc::new(token),
             _ => {
                 return Self {
                     store: None,
@@ -370,35 +370,6 @@ fn verify_safe_ancestors(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn local_http_origin(value: &str) -> bool {
-    let Some(authority) = value.strip_prefix("http://") else {
-        return false;
-    };
-    if authority.contains('/')
-        || authority.contains('@')
-        || authority.contains('#')
-        || authority.contains('?')
-    {
-        return false;
-    }
-    let host = authority
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(authority);
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-}
-
-fn local_authority(value: &str) -> bool {
-    if value.contains(['/', '@', '#', '?']) {
-        return false;
-    }
-    let host = value
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(value);
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
-}
-
 fn positive_limit(name: &str, default: u64) -> Result<u64, String> {
     let value = std::env::var(name)
         .ok()
@@ -572,77 +543,42 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
-fn valid_token(token: &str) -> bool {
-    token.len() >= 32
-        && token.len() <= 4096
-        && !token
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        && token
-            .bytes()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            >= 12
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut difference = left.len() ^ right.len();
-    for index in 0..left.len().max(right.len()) {
-        difference |= (left.get(index).copied().unwrap_or(0)
-            ^ right.get(index).copied().unwrap_or(0)) as usize;
-    }
-    difference == 0
-}
-
 fn authorize(api: &FeedbackApi, peer: SocketAddr, headers: &HeaderMap) -> Result<(), ApiError> {
-    if !api.listener.ip().is_loopback() || !peer.ip().is_loopback() {
-        return Err(ApiError {
+    match super::local_access::authorize(
+        api.listener,
+        peer,
+        headers,
+        api.token.as_deref().map(String::as_str),
+        &api.hosts,
+        &api.origins,
+    ) {
+        Ok(()) => Ok(()),
+        Err(super::local_access::LocalAccessError::NonLoopback) => Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "local_only",
             message: "feedback is available only to loopback clients".into(),
-        });
-    }
-    let authority = api.listener.to_string();
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    if host != authority && !api.hosts.iter().any(|allowed| allowed == host) {
-        return Err(ApiError {
+        }),
+        Err(super::local_access::LocalAccessError::InvalidHost) => Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "invalid_host",
             message: "Host must match the configured loopback listener".into(),
-        });
-    }
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let expected = format!("http://{authority}");
-        if origin != expected && !api.origins.iter().any(|allowed| allowed == origin) {
-            return Err(ApiError {
-                status: StatusCode::FORBIDDEN,
-                code: "invalid_origin",
-                message: "Origin is not allowed for local feedback".into(),
-            });
-        }
-    }
-    let Some(token) = &api.token else {
-        return Err(ApiError::unavailable(
+        }),
+        Err(super::local_access::LocalAccessError::InvalidOrigin) => Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "invalid_origin",
+            message: "Origin is not allowed for local feedback".into(),
+        }),
+        Err(super::local_access::LocalAccessError::TokenUnavailable) => Err(ApiError::unavailable(
             api.unavailable_reason
                 .clone()
                 .unwrap_or_else(|| "feedback is not configured".into()),
-        ));
-    };
-    let supplied = headers
-        .get("x-lfg-session-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !constant_time_eq(supplied.as_bytes(), token.as_bytes()) {
-        return Err(ApiError {
+        )),
+        Err(super::local_access::LocalAccessError::InvalidToken) => Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "invalid_session_token",
             message: "a valid local feedback session token is required".into(),
-        });
+        }),
     }
-    Ok(())
 }
 
 fn store(api: &FeedbackApi) -> Result<&FeedbackStore, ApiError> {
@@ -1099,6 +1035,7 @@ fn reserve_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_access::valid_token;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     fn state(label: &str) -> Value {

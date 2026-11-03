@@ -6,6 +6,8 @@ import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
 import { FeedbackPanel } from './FeedbackPanel'
+import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
+import type { OwnedResult } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
@@ -24,6 +26,7 @@ export default function App() {
   const [revision, setRevision] = useState(1)
   const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
+  const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; result: OwnedResult } | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -139,7 +142,8 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
+        {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={ownedSnapshot?.revision === revision ? ownedSnapshot.result : null} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">
           <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />

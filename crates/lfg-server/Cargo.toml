@@ -35,7 +35,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 tokio-stream.workspace = true
 tower-http.workspace = true
 tract = { version = "=0.23.9", default-features = false, features = ["onnx"], optional = true }

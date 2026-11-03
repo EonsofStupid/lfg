@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, expect, test, vi } from 'vitest'
-import { FeedbackPanel, feedbackFromAssessment } from './FeedbackPanel'
+import { FeedbackPanel, feedbackFromAssessment, feedbackFromOwned } from './FeedbackPanel'
 import type { FeedbackClient, FeedbackRecord, FeedbackState } from './feedbackApi'
 import type { Assessment } from './types'
 
@@ -49,6 +49,55 @@ test('captures assessment output without implicitly retaining prompt content', a
   expect(JSON.stringify(state)).not.toContain('private prompt text')
   expect(state.provenance.sourceRef).toMatch(/^sha256:[0-9a-f]{64}$/)
   expect(state.outcome).toEqual({ status: 'unknown' })
+})
+
+test('an explicitly selected owned output keeps its provenance, extensions and failure state', async () => {
+  const state = await feedbackFromAssessment(assessment, 'private prompt text')
+  const saved = feedbackFromOwned(state, { status: 'truncated', elapsedMs: 4, engine: { id: 'owned-test', modelSha256: 'model-hash', modelManifestSha256: 'model-manifest', trainingManifestSha256: 'training-manifest', framingSha256: 'framing-hash', runtimeConfigSha256: 'runtime-hash', serviceConfigSha256: 'service-hash' }, stopReason: 'byte_limit', output: { intent: 'research', extra: { keep: true } }, outputText: 'partial output' })
+  expect(saved.provenance).toMatchObject({ engineId: 'owned-test', modelDigest: 'model-hash', modelManifestSha256: 'model-manifest', trainingManifestSha256: 'training-manifest', framingSha256: 'framing-hash', runtimeConfigSha256: 'runtime-hash', serviceConfigSha256: 'service-hash', sourceRef: expect.stringMatching(/^sha256:/) })
+  expect(saved.originalRecommendation).toMatchObject({ intent: 'research', modelOutput: { intent: 'research', extra: { keep: true } }, generationStatus: 'truncated', rawOutput: 'partial output' })
+  expect(saved.outcome).toEqual({ status: 'unknown' })
+})
+
+test('saves owned model output only after the user selects it', async () => {
+  const api = makeClient()
+  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash' }, elapsedMs: 5, outputText: 'partial model output' }
+  render(<FeedbackPanel prompt="private prompt text" assessment={assessment} ownedResult={owned} client={api} />)
+  await connect()
+  fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
+  expect(screen.getByText(/actual output, including any partial text/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
+  await screen.findByText('Assessment saved for review.')
+  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ provenance: expect.objectContaining({ engineId: 'owned-test', modelDigest: 'model-hash' }), originalRecommendation: expect.objectContaining({ generationStatus: 'truncated', rawOutput: 'partial model output' }) }), 'token')
+})
+
+test('can save an owned result when the rules assessment is unavailable', async () => {
+  const api = makeClient()
+  const owned = { status: 'truncated' as const, engine: { id: 'owned-test' }, elapsedMs: 5, outputText: 'partial model output' }
+  render(<FeedbackPanel prompt="private prompt text" assessmentRef="session:3" assessment={null} ownedResult={owned} client={api} />)
+  await connect()
+  fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
+  await screen.findByText('Assessment saved for review.')
+  expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ assessmentRef: 'session:3', provenance: expect.objectContaining({ engineId: 'owned-test' }) }), 'token')
+})
+
+test('reopening owned feedback preserves its framing and training lineage', async () => {
+  const api = makeClient()
+  const owned = { status: 'truncated' as const, engine: { id: 'owned-test', modelSha256: 'model-hash', trainingManifestSha256: 'training-hash', framingSha256: 'frame-hash', runtimeConfigSha256: 'runtime-hash', serviceConfigSha256: 'service-hash' }, elapsedMs: 5, outputText: 'partial' }
+  const view = render(<FeedbackPanel prompt="private prompt text" assessment={assessment} ownedResult={owned} client={api} />)
+  await connect()
+  fireEvent.change(screen.getByLabelText('Assessment source'), { target: { value: 'owned' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save current assessment' }))
+  await screen.findByText('Assessment saved for review.')
+  view.unmount()
+  render(<FeedbackPanel prompt="private prompt text" assessment={assessment} client={api} />)
+  await connect()
+  fireEvent.click(screen.getByRole('button', { name: 'Load saved assessments' }))
+  fireEvent.change(await screen.findByLabelText('Saved assessment'), { target: { value: 'record-1' } })
+  fireEvent.click(await screen.findByText('View provenance'))
+  expect(screen.getByText(/Training manifest: training-hash/)).toHaveTextContent('Framing: frame-hash')
+  expect(screen.getByText(/Training manifest: training-hash/)).toHaveTextContent('Runtime config: runtime-hash')
 })
 
 test('creates, reviews, reopens and restores feedback as separate revisions', async () => {

@@ -1,16 +1,25 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Assessment } from './types'
 import { feedbackClient, type FeedbackClient, type FeedbackRecord, type FeedbackState } from './feedbackApi'
+import type { OwnedResult } from './ownedAssessmentApi'
 
 // Assessment.prompt and matched terms may contain user text. Never save the full
 // assessment implicitly: capture only the output fields needed for supervision.
-export async function feedbackFromAssessment(assessment: Assessment, prompt: string): Promise<FeedbackState> {
+async function feedbackBase(reference: string, prompt: string): Promise<FeedbackState> {
   if (!globalThis.crypto?.subtle) throw new Error('A secure local browser context is required to identify the original request.')
   const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(prompt))
   const sourceRef = 'sha256:' + Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
   return {
-    assessmentRef: `${assessment.sessionId}:${assessment.revision}`,
-    provenance: { engineId: 'deterministic-assessment', configDigest: assessment.configDigest, sourceRef },
+    assessmentRef: reference, provenance: { engineId: 'unknown', sourceRef }, originalRecommendation: {},
+    ownerCorrection: null, outcome: { status: 'unknown' },
+  }
+}
+
+export async function feedbackFromAssessment(assessment: Assessment, prompt: string): Promise<FeedbackState> {
+  const base = await feedbackBase(`${assessment.sessionId}:${assessment.revision}`, prompt)
+  return {
+    ...base,
+    provenance: { ...base.provenance, engineId: 'deterministic-assessment', configDigest: assessment.configDigest },
     originalRecommendation: {
       intent: assessment.intent.primary,
       complexity: assessment.complexity.bracket,
@@ -23,17 +32,46 @@ export async function feedbackFromAssessment(assessment: Assessment, prompt: str
       reasonCodes: assessment.rules,
       scoringTruncated: !!assessment.prompt.scoringTruncated,
     },
-    ownerCorrection: null,
-    outcome: { status: 'unknown' },
   }
 }
 
 function asText(value: unknown): string { return typeof value === 'string' ? value : '' }
+function displayValue(value: unknown): string {
+  if (value === null || value === undefined) return 'unknown'
+  return typeof value === 'object' ? JSON.stringify(value) : String(value)
+}
 
-export function FeedbackPanel({ assessment, prompt, client = feedbackClient }: {
+export function feedbackFromOwned(state: FeedbackState, result: OwnedResult): FeedbackState {
+  const output = result.output ?? {}
+  const { configDigest, ...baseProvenance } = state.provenance
+  return {
+    ...state,
+    provenance: {
+      ...baseProvenance, engineId: result.engine?.id ?? 'unknown',
+      ...(configDigest ? { comparisonRulesConfigDigest: configDigest } : {}),
+      ...(result.engine?.modelSha256 ? { modelDigest: result.engine.modelSha256 } : {}),
+      ...(result.engine?.modelManifestSha256 ? { modelManifestSha256: result.engine.modelManifestSha256 } : {}),
+      ...(result.engine?.trainingManifestSha256 ? { trainingManifestSha256: result.engine.trainingManifestSha256 } : {}),
+      ...(result.engine?.framingSha256 ? { framingSha256: result.engine.framingSha256 } : {}),
+      ...(result.engine?.runtimeConfigSha256 ? { runtimeConfigSha256: result.engine.runtimeConfigSha256 } : {}),
+      ...(result.engine?.serviceConfigSha256 ? { serviceConfigSha256: result.engine.serviceConfigSha256 } : {}),
+    },
+    originalRecommendation: {
+      intent: output.intent ?? null, complexity: output.complexity ?? null,
+      model: output.suggested_models ?? null, agentCount: output.agent_count ?? null,
+      reason: output.reason ?? null, modelOutput: output,
+      generationStatus: result.status, stopReason: result.stopReason ?? null,
+      ...(result.outputText ? { rawOutput: result.outputText } : {}),
+    },
+  }
+}
+
+export function FeedbackPanel({ assessment, prompt, client = feedbackClient, ownedResult = null, assessmentRef }: {
   assessment: Assessment | null
   prompt: string
   client?: FeedbackClient
+  ownedResult?: OwnedResult | null
+  assessmentRef?: string
 }) {
   const [token, setToken] = useState<string | null>(null)
   const [tokenInput, setTokenInput] = useState('')
@@ -56,6 +94,9 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient }: {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [source, setSource] = useState<'rules' | 'owned'>('rules')
+  const canSaveOwned = !!ownedResult && (!!ownedResult.output || !!ownedResult.outputText)
+  useEffect(() => { if (!canSaveOwned) setSource('rules') }, [canSaveOwned])
 
   function show(next: FeedbackRecord, revisions: FeedbackRecord[], before: number | null) {
     setRecord(next); setHistory(revisions); setSelectedRevision(String(next.revision))
@@ -128,7 +169,7 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient }: {
 
   return <section className="dev-panel feedback-panel" aria-label="Assessment feedback">
     <div className="dev-heading"><div><p className="eyebrow">LOCAL SUPERVISION</p><h2>Review an assessment</h2></div></div>
-    <p>Save the recommendation, add your correction, and record an outcome only when you have observed it. A digest can help match the original prompt to a separately available source; its text is not copied. Anything you enter here is saved locally.</p>
+    <p>Save the recommendation, add your correction, and record an outcome only when you have observed it. A digest can help match the original prompt to a separately available source; it is not copied automatically. Anything you enter here is saved locally.</p>
     {!available || !token ? <>
       <p>Connect using the private feedback token configured for your local server. It stays in this browser session and is not put in the address bar.</p>
       <label>Local feedback token <input type="password" autoComplete="off" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} /></label>
@@ -140,21 +181,26 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient }: {
       {unavailableReason && <p role="status">Local feedback is unavailable. {unavailableReason}</p>}
     </> : <>
       <div className="feedback-actions">
-        <button type="button" disabled={busy || !assessment} onClick={() => void run(async () => {
-          if (!assessment) return
-          const created = await client.create(await feedbackFromAssessment(assessment, prompt), token)
+        {canSaveOwned && <label>Assessment source <select value={source} onChange={(event) => setSource(event.target.value === 'owned' ? 'owned' : 'rules')}><option value="rules">Rules assessment</option><option value="owned">Experimental owned model</option></select></label>}
+        <button type="button" disabled={busy || (source === 'rules' ? !assessment : !canSaveOwned || !(assessmentRef || assessment))} onClick={() => void run(async () => {
+          if (source === 'rules' && !assessment) return
+          let state = assessment ? await feedbackFromAssessment(assessment, prompt) : await feedbackBase(assessmentRef!, prompt)
+          if (source === 'owned' && ownedResult) state = feedbackFromOwned(state, ownedResult)
+          const created = await client.create(state, token)
           await open(created.feedbackId); await refresh(created); setMessage('Assessment saved for review.')
         })}>Save current assessment</button>
         <button type="button" disabled={busy} onClick={() => void run(() => refresh(record ?? undefined))}>Load saved assessments</button>
         <button type="button" disabled={busy} onClick={() => { setToken(null); setAvailable(false); setEntries([]); setNextCursor(null); setRecord(null); setHistory([]); setHistoryNextBefore(null); setMessage('Local feedback disconnected.') }}>Disconnect</button>
       </div>
+      {source === 'owned' && canSaveOwned && <p>The model's actual output, including any partial text and extra fields, will be saved locally. It may repeat parts of the request; it remains unverified.</p>}
       {entries.length > 0 && <label>Saved assessment <select aria-label="Saved assessment" value={record?.feedbackId ?? ''} onChange={(event) => {
         if (event.target.value) void run(() => open(event.target.value))
       }}><option value="">Choose an assessment</option>{entries.map((entry) => <option key={entry.feedbackId} value={entry.feedbackId}>{entry.feedbackId} · revision {entry.revision}</option>)}</select></label>}
       {nextCursor && <button type="button" disabled={busy} onClick={() => void run(loadMore)}>Load more assessments</button>}
       {record && <div className="feedback-editor">
         <p>Engine: {record.provenance.engineId} · Assessment: {record.assessmentRef} · Revision {record.revision}</p>
-        <p>Original suggestion: intent {String(record.originalRecommendation.intent ?? 'unknown')}, complexity {String(record.originalRecommendation.complexity ?? 'unknown')}, {String(record.originalRecommendation.agentCount ?? 'unknown')} agents, model {String(record.originalRecommendation.model ?? 'unknown')}.</p>
+        <details><summary>View provenance</summary><p>Model: {displayValue(record.provenance.modelDigest)} · Model manifest: {displayValue(record.provenance.modelManifestSha256)} · Training manifest: {displayValue(record.provenance.trainingManifestSha256)} · Framing: {displayValue(record.provenance.framingSha256)} · Runtime config: {displayValue(record.provenance.runtimeConfigSha256)} · Service config: {displayValue(record.provenance.serviceConfigSha256)} · Source reference: {displayValue(record.provenance.sourceRef)}</p><p>These identify recorded artifacts; they do not verify the correctness of an assessment.</p></details>
+        <p>Original suggestion: intent {displayValue(record.originalRecommendation.intent)}, complexity {displayValue(record.originalRecommendation.complexity)}, {displayValue(record.originalRecommendation.agentCount)} agents, model {displayValue(record.originalRecommendation.model)}.</p>
         <p>Fill in only the fields you want to correct; leave others blank.</p>
         <label>Corrected intent <input value={intent} onChange={(event) => setIntent(event.target.value)} /></label>
         <label>Corrected complexity <input value={complexity} onChange={(event) => setComplexity(event.target.value)} /></label>
@@ -162,6 +208,7 @@ export function FeedbackPanel({ assessment, prompt, client = feedbackClient }: {
         <label>Corrected agent count <input type="number" min="1" step="1" value={agentCount} onChange={(event) => setAgentCount(event.target.value)} /></label>
         <label>Owner correction <textarea value={correction} onChange={(event) => setCorrection(event.target.value)} rows={3} /></label>
         <label><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> I observed the outcome</label>
+        {record.outcome?.kind !== undefined && record.outcome?.kind !== null && <p>Recorded outcome type: {displayValue(record.outcome.kind)}</p>}
         {confirmed ? <>
           <label>Observed outcome <textarea value={observed} onChange={(event) => setObserved(event.target.value)} rows={2} /></label>
           <label>Confirmed by <input value={confirmer} onChange={(event) => setConfirmer(event.target.value)} /></label>

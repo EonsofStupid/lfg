@@ -45,8 +45,10 @@ mod embedded_ui;
 pub mod exemplar_suggest;
 mod intake;
 pub mod knowledge;
+mod local_access;
 #[cfg(feature = "onnx-shadow")]
 pub mod onnx_embedding;
+mod owned_assessment;
 mod project_attunement;
 use dev_stats::{DevStats, Operation};
 
@@ -398,7 +400,9 @@ pub fn router(state: AppState) -> Router {
 
 /// Adds the private feedback API only after the actual listener identity is known.
 pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
-    router(state).merge(feedback::FeedbackApi::for_listener(listener).routes())
+    router(state)
+        .merge(feedback::FeedbackApi::for_listener(listener).routes())
+        .merge(owned_assessment::routes(listener))
 }
 
 pub fn router_with_ui_and_listener(
