@@ -398,13 +398,10 @@ fn render_model_list(models: &[&KnownModel]) -> String {
         .iter()
         .map(|model| {
             let role = model.role.as_deref().unwrap_or("unknown role");
-            match model.description.trim() {
-                "" => format!("- {} ({role})", model.model),
-                description => format!("- {} ({role}): {description}", model.model),
-            }
+            format!("{} ({role})", model.model)
         })
         .collect();
-    rows.join("\n")
+    rows.join("; ")
 }
 
 /// A name the model made up must not read as a suggestion. It stays visible as its
@@ -862,7 +859,7 @@ mod tests {
     async fn the_live_model_list_fills_the_instruction_and_made_up_names_are_set_aside() {
         let reply = r#"{"intent":"build","agent_count":2,"reasons":["x"],"suggested_models":["real-fast","made-up",7,"gone"]}"#;
         let (address, seen) = model(200, answer(reply, "stop"), Duration::ZERO).await;
-        let service = load_with_instruction(address, "Choose from:\n{{available_models}}\nDone.");
+        let service = load_with_instruction(address, "Choose from: {{available_models}}. Done.");
         let models = vec![
             known("real-fast", Some("fast"), "Quick work.", true),
             known("no-details", None, "", true),
@@ -874,10 +871,10 @@ mod tests {
         )
         .await;
         let (_, request) = seen.lock().unwrap().clone().unwrap();
-        let list = "- real-fast (fast): Quick work.\n- no-details (unknown role)";
+        let list = "real-fast (fast); no-details (unknown role)";
         assert_eq!(
             request["messages"][0]["content"],
-            format!("Choose from:\n{list}\nDone.")
+            format!("Choose from: {list}. Done.")
         );
         assert_eq!(body["status"], "ok");
         assert_eq!(body["modelListSha256"], sha(list));
@@ -925,7 +922,7 @@ mod tests {
         let service = load_service(path, |_| Some("model-key".to_owned()))
             .unwrap()
             .unwrap();
-        let models = vec![known("model", Some("fast"), &"long ".repeat(40), true)];
+        let models = vec![known(&"long-name-".repeat(40), Some("fast"), "", true)];
         let (_, body) = send(
             app_with_models(service, models),
             post_request(&json!({"text":"Add"}), TOKEN),

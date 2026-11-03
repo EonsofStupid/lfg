@@ -27,9 +27,15 @@ file stops the service from starting rather than silently changing its answers.
 ## Which models it can suggest
 
 Put `{{available_models}}` in the instruction and the service fills it on each request with
-the models LFG has learned are available, with each model's role and provider description.
-No model names need to be kept in the instruction, and the result's `modelListSha256`
-identifies the list that was used.
+the models LFG has learned are available, each with its role, for example
+`gpt-6-luna (fast); gpt-6-astra (frontier)`. No model names need to be kept in the
+instruction, and the result's `modelListSha256` identifies the list that was used.
+
+Provider descriptions are deliberately left out. When Nemotron 3 Nano 4B was given them
+on 470 of the owner's requests, the share of answers containing an invented name rose
+from 10% to 60%, and the share of low-complexity requests going first to a fast model
+fell from 99% to 14%. That result comes from one model and one list, so measure again
+before changing the format.
 
 Small models sometimes invent a name. A name that isn't on the list is moved from
 `suggested_models` to `unlisted_models`, and the raw answer stays in `outputText`. If LFG
