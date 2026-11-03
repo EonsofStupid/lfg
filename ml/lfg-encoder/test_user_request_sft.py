@@ -252,7 +252,7 @@ class UserRequestSFTTests(unittest.TestCase):
         config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
         config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
                       max_parameters=100_000, max_attention_elements=100_000)
-        with self.assertRaisesRegex(ValueError, 'duplicate source span'):
+        with self.assertRaisesRegex(ValueError, 'unique source span'):
             trainer.read_training(mutated, config)
 
     def test_unknown_only_example_remains_trainable_without_negative_candidates(self):
