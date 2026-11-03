@@ -97,6 +97,26 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         self.assertNotIn('requests.jsonl', opened)
         self.assertFalse(self.output.exists())
 
+    def test_collector_rejects_non_train_rows_before_opening_context(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        request_path = self.selected / 'requests.jsonl'
+        rows = [json.loads(line) for line in request_path.read_bytes().splitlines()]
+        rows[0]['split'] = 'validation'
+        request_raw = b''.join(selection.encoded(row) for row in rows)
+        request_path.write_bytes(request_raw)
+        manifest_path = self.selected / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest['requests_sha256'] = selection.sha(request_raw)
+        manifest_path.write_bytes(selection.encoded(manifest))
+        context_file = self.root / 'project-context.json'
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector.project_context, 'load', side_effect=AssertionError('must not open context')) as load_context:
+            with self.assertRaisesRegex(ValueError, 'invalid selected train request'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+        load_context.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     def test_collector_rechecks_selection_manifest_after_request_read(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
         manifest_path = self.selected / 'manifest.json'

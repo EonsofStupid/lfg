@@ -126,7 +126,7 @@ def build(plan_path: Path, output: Path) -> dict:
     if output.exists():
         raise ValueError('output directory must be new')
 
-    ids, groups, projects, texts, original_sources = set(), {}, {}, {}, {}
+    ids, groups, projects, rendered_texts, underlying_texts, original_sources = set(), {}, {}, {}, {}, {}
     source_evidence, selected = [], {'train': [], 'validation': []}
     counts = {split: {'review_status': Counter(), 'outcome': Counter(), 'seen': 0, 'selected': 0}
               for split in selected}
@@ -162,7 +162,9 @@ def build(plan_path: Path, output: Path) -> dict:
                 raise ValueError('invalid teacher trace')
             dedup_request = underlying_request(row)
             teacher_system_sha = row.get('teacher_system_sha256')
-            if ('teacher_system_sha256' in row
+            context_bearing = 'project_context_sha256' in row or 'project_context_byte_length' in row
+            if (context_bearing and 'teacher_system_sha256' not in row) or (
+                    'teacher_system_sha256' in row
                     and (not isinstance(teacher_system_sha, str) or len(teacher_system_sha) != 64
                          or any(char not in '0123456789abcdef' for char in teacher_system_sha)
                          or teacher_system_sha != sha(plan['system_prompt'].encode('utf-8')))):
@@ -178,10 +180,12 @@ def build(plan_path: Path, output: Path) -> dict:
                 raise ValueError('trace count exceeds configured limit')
             if contains_forbidden(row, plan['forbidden_literals']):
                 raise ValueError('trace contains a configured forbidden literal')
-            text_key = sha(' '.join(unicodedata.normalize('NFKC', dedup_request).casefold().split()).encode('utf-8'))
-            if text_key in texts:
+            rendered_key = sha(' '.join(unicodedata.normalize('NFKC', row['request']).casefold().split()).encode('utf-8'))
+            underlying_key = sha(' '.join(unicodedata.normalize('NFKC', dedup_request).casefold().split()).encode('utf-8'))
+            if rendered_key in rendered_texts or underlying_key in underlying_texts:
                 raise ValueError('duplicate normalized request across sources or splits')
-            texts[text_key] = split
+            rendered_texts[rendered_key] = split
+            underlying_texts[underlying_key] = split
             counts[split]['seen'] += 1
             counts[split]['review_status'][row['review_status']] += 1
             counts[split]['outcome'][row['outcome']] += 1

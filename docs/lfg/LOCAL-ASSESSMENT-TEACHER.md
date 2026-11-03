@@ -53,6 +53,12 @@ for every selected project, and records the context file digest in the
 immutable run identity. `max_context_bytes` bounds each context and the fully
 rendered teacher user request.
 
+Context is operator-supplied opaque transport. The context file has no source
+record identity or split field, so the software cannot establish that its
+contents are derived only from train-split material or prove held-out material
+was excluded. The caller must attest that boundary; source-bound context
+provenance is not implemented.
+
 Teacher collection and `/api/lfg/assess/owned` share the same user rendering:
 context text, two newline characters, then request text. The API accepts
 optional `context` and `contextSha256` alongside the existing `text`; it
@@ -62,10 +68,12 @@ the legacy prompt bytes. Teacher traces store the rendered request verbatim,
 and the existing distillation and SFT paths train on those exact bytes.
 The collector also records a digest of its exact teacher system prompt;
 distillation requires a supplied digest to match the plan system prompt and
-preserves trace extensions in SFT metadata. The current SFT trainer records the
-single system prompt digest in its training manifest, and the owned service
-checks it against serving framing when that digest is present. Legacy traces
-without a teacher system digest remain supported but do not provide this link.
+preserves trace extensions in SFT metadata. Context-bearing traces require the
+teacher system digest and it must match the distillation plan. The current SFT
+trainer records the system prompt digest and a canonical digest of all six
+framing delimiters; the owned service recomputes and checks those values against
+the serving system and delimiter fields. Legacy artifacts without these links
+remain compatible but are explicitly unlinked.
 Context-file and trace extension fields are retained as metadata and do not
 change rendering or routing behavior.
 

@@ -95,11 +95,50 @@ class DistillationPreparationTests(unittest.TestCase):
             subject.build(self.plan_path, self.output)
         self.assertFalse(self.output.exists())
 
+    def test_context_requires_present_non_null_matching_system_digest(self):
+        context = 'context facts'
+        self.row.update(request=context + '\n\nfixture request',
+                        project_context_sha256=hashlib.sha256(context.encode()).hexdigest(),
+                        project_context_byte_length=len(context.encode()))
+        for mode, digest_value in (('omitted', None), ('null', None),
+                                   ('mismatch', hashlib.sha256(b'wrong system').hexdigest())):
+            with self.subTest(mode=mode):
+                if mode == 'omitted':
+                    self.row.pop('teacher_system_sha256', None)
+                else:
+                    self.row['teacher_system_sha256'] = digest_value
+                self.write_source([self.row])
+                self.plan['sources'][0] = self.source_entry(self.source, 'train', 'project-one')
+                self.write_plan()
+                with self.assertRaisesRegex(ValueError, 'system prompt digest'):
+                    subject.build(self.plan_path, self.output)
+                self.assertFalse(self.output.exists())
+
+    def test_contextual_render_collision_with_legacy_request_is_rejected(self):
+        context = 'context A'
+        rendered = context + '\n\nrequest B'
+        first = {**self.row, 'request': rendered,
+                 'teacher_system_sha256': hashlib.sha256(self.plan['system_prompt'].encode()).hexdigest(),
+                 'project_context_sha256': hashlib.sha256(context.encode()).hexdigest(),
+                 'project_context_byte_length': len(context.encode())}
+        second = {**self.row, 'id': 'fixture-2', 'request': rendered,
+                  'source_ref': 'fixture-session-2', 'source_sha256': 'b' * 64}
+        second_path = self.root / 'legacy-collision.jsonl'
+        self.write_source([first])
+        self.write_source([second], second_path)
+        self.plan['sources'] = [self.source_entry(self.source, 'train', 'project-one'),
+                                self.source_entry(second_path, 'validation', 'project-two')]
+        self.write_plan()
+        with self.assertRaisesRegex(ValueError, 'duplicate normalized request'):
+            subject.build(self.plan_path, self.output)
+        self.assertFalse(self.output.exists())
+
     def test_underlying_requests_deduplicate_across_context_and_splits(self):
         source_request = 'ＦＩＸＴＵＲＥ\trequest'
         for second_is_contextual in (True, False):
             with self.subTest(second_is_contextual=second_is_contextual):
                 first = {**self.row, 'request': 'first facts\n\n' + source_request,
+                         'teacher_system_sha256': hashlib.sha256(self.plan['system_prompt'].encode()).hexdigest(),
                          'project_context_sha256': hashlib.sha256(b'first facts').hexdigest(),
                          'project_context_byte_length': len('first facts'.encode())}
                 second_request = ('second facts\n\nfixture   REQUEST' if second_is_contextual
@@ -108,7 +147,8 @@ class DistillationPreparationTests(unittest.TestCase):
                           'source_ref': 'fixture-session-2', 'source_sha256': 'b' * 64}
                 if second_is_contextual:
                     second.update(project_context_sha256=hashlib.sha256(b'second facts').hexdigest(),
-                                  project_context_byte_length=len('second facts'.encode()))
+                                  project_context_byte_length=len('second facts'.encode()),
+                                  teacher_system_sha256=hashlib.sha256(self.plan['system_prompt'].encode()).hexdigest())
                 second_path = self.root / f'second-{second_is_contextual}.jsonl'
                 self.write_source([first])
                 self.write_source([second], second_path)

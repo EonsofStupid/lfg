@@ -154,15 +154,6 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
             or manifest.get('test_opened') is not False or manifest.get('validation_opened') is not False):
         raise ValueError('invalid selected request identity')
     context_map, context_file_sha, context_file_extensions = ({}, None, {})
-    if project_context_path is not None:
-        context_map, context_file_sha, context_file_extensions = project_context.load(
-            project_context_path, max_file_bytes=config['max_manifest_bytes'],
-            max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']))
-        context_strings = [*project_context.strings(context_file_extensions)]
-        for entry in context_map.values():
-            context_strings.extend((entry['text'], *project_context.strings(entry['extensions'])))
-        if any(screen._screen(text, rules, policy['limits'])[0] != text for text in context_strings):
-            raise ValueError('project context needs additional screening')
     source_raw = screen._read(selection / 'requests.jsonl', config['max_request_bytes'] * config['max_requests'], 'requests_unavailable')
     if (manifest.get('requests_sha256') != sha(source_raw)
             or screen._read(selection / 'manifest.json', config['max_manifest_bytes'], 'selection_changed') != selection_raw):
@@ -183,6 +174,16 @@ def collect(selection: Path, config_path: Path, policy_path: Path, output: Path,
         if screen._screen(row['text'], rules, policy['limits'])[0] != row['text']:
             raise ValueError('request needs additional screening')
         ids.add(row['id'])
+    # The selected request split is validated before opening any optional context asset.
+    if project_context_path is not None:
+        context_map, context_file_sha, context_file_extensions = project_context.load(
+            project_context_path, max_file_bytes=config['max_manifest_bytes'],
+            max_context_bytes=config.get('max_context_bytes', config['max_request_bytes']))
+        context_strings = [*project_context.strings(context_file_extensions)]
+        for entry in context_map.values():
+            context_strings.extend((entry['text'], *project_context.strings(entry['extensions'])))
+        if any(screen._screen(text, rules, policy['limits'])[0] != text for text in context_strings):
+            raise ValueError('project context needs additional screening')
     if project_context_path is not None and any(row['project'] not in context_map for row in rows):
         raise ValueError('selected project has no supplied context')
     private_directory(output)

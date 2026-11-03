@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,17 @@ from torch.nn import functional as F
 import owned_student
 import owned_sft_checkpoint as checkpoints
 import train_owned_student as base
+
+
+FRAMING_FIELDS = ('system_prefix', 'system_suffix', 'user_prefix', 'user_suffix',
+                 'assistant_prefix', 'assistant_suffix')
+
+
+def framing_sha256(framing: dict) -> str:
+    """Hash the exact delimiter strings used to render every SFT example."""
+    canonical = json.dumps({key: framing[key] for key in FRAMING_FIELDS}, sort_keys=True,
+                           ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def configuration(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
@@ -140,6 +152,7 @@ def read_training(dataset: Path, config: dict) -> tuple[list[dict], bytes, bytes
         raise ValueError('no positively weighted training traces')
     return records, manifest_raw, train_raw, {'selected': len(records), 'claims': dict(sorted(counts.items())),
         'system_sha256': system_sha,
+        'framing_sha256': framing_sha256(config['framing']),
         'initial_prompt_exceeds_context': sum(item['response_start'] > config['context'] for item in records),
         'complete_example_exceeds_context': sum(len(item['bytes']) > config['context'] + 1 for item in records)}
 
@@ -294,7 +307,7 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
                 'source_checkpoint_weights_sha256': base.sha(initial_weights),
                 'dataset_manifest_sha256': base.sha(dataset_manifest), 'training_file_sha256': base.sha(train_raw),
-                'system_sha256': coverage['system_sha256'],
+                'system_sha256': coverage['system_sha256'], 'framing_sha256': coverage['framing_sha256'],
                 'config_sha256': base.sha(config_raw), 'code_sha256': code, 'coverage': coverage,
                 'position_rows_reused': old_context, 'position_rows_initialized': config['context'] - old_context,
                 'context_clipping_possible': coverage['complete_example_exceeds_context'] > 0,

@@ -44,10 +44,11 @@ Additional trace fields are accepted as extensions and copied unchanged under
 `metadata.trace_extensions`. When `project_context_sha256` and
 `project_context_byte_length` are present, the builder verifies the exact UTF-8
 context prefix and its delimiter before preparing the request. It deduplicates
-on the underlying request after removing that verified prefix, so different
-context and legacy rows cannot hide a normalized duplicate across splits.
-When `teacher_system_sha256` is present, it must match the plan's exact system
-prompt bytes. Plan and source objects still use their current exact schemas;
+on both the rendered and underlying request after removing that verified
+prefix, so contextual and legacy rows cannot hide a normalized duplicate
+across splits. Context-bearing traces must carry `teacher_system_sha256`
+matching the plan's exact system prompt bytes. Plan and source objects still
+use their current exact schemas;
 unknown fields on those objects are rejected. Unknown trace extensions are
 preserved but do not affect behavior.
 

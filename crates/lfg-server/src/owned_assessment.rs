@@ -332,22 +332,28 @@ async fn infer(
             );
         }
     };
+    // The context bytes have now been checked against this digest. Return the
+    // digest only so a caller can explicitly bind its own feedback record.
+    let verified_context_sha256 = request.context_sha256.clone();
     let permit: OwnedSemaphorePermit = match service.permits.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            return response(
-                "busy",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
+            return add_context_digest(
+                response(
+                    "busy",
+                    Some(service.engine.clone()),
+                    started,
+                    None,
+                    None,
+                    None,
+                ),
+                verified_context_sha256.as_deref(),
             );
         }
     };
     let result = run_inference(service.clone(), user_text, started).await;
     drop(permit);
-    result
+    add_context_digest(result, verified_context_sha256.as_deref())
 }
 
 fn render_user_text(
@@ -765,6 +771,16 @@ fn response(
     (StatusCode::OK, Json(serde_json::to_value(response).unwrap_or_else(|_| json!({"schemaVersion":"lfg.owned-assessment.v1","status":"inference_error","engine":null,"elapsedMs":0}))))
 }
 
+fn add_context_digest(
+    (status, Json(mut value)): (StatusCode, Json<Value>),
+    context_sha256: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    if let Some(context_sha256) = context_sha256 {
+        value["projectContextSha256"] = json!(context_sha256);
+    }
+    (status, Json(value))
+}
+
 fn auth_reason(code: StatusCode) -> &'static str {
     if code == StatusCode::SERVICE_UNAVAILABLE {
         "session_token_unavailable"
@@ -817,16 +833,32 @@ fn is_sha256_value(value: &Value) -> bool {
     })
 }
 
+fn framing_digest(framing: &Framing) -> String {
+    let canonical = json!({
+        "assistant_prefix": framing.assistant_prefix,
+        "assistant_suffix": framing.assistant_suffix,
+        "system_prefix": framing.system_prefix,
+        "system_suffix": framing.system_suffix,
+        "user_prefix": framing.user_prefix,
+        "user_suffix": framing.user_suffix,
+    });
+    digest(&serde_json::to_vec(&canonical).expect("serializing framing fields cannot fail"))
+}
+
 fn provenance_links_valid(
     manifest: &Value,
     framing: &Value,
     training: &Value,
     system: &str,
+    actual_framing: &Framing,
     training_digest: &str,
 ) -> bool {
     let system_sha256 = digest(system.as_bytes());
     let training_system_matches = training.get("system_sha256").map_or(true, |value| {
         is_sha256_value(value) && value.as_str() == Some(system_sha256.as_str())
+    });
+    let training_framing_matches = training.get("framing_sha256").map_or(true, |value| {
+        is_sha256_value(value) && value.as_str() == Some(framing_digest(actual_framing).as_str())
     });
     let linked_hashes = [
         &manifest["source_weights_sha256"],
@@ -842,6 +874,7 @@ fn provenance_links_valid(
         return false;
     }
     training_system_matches
+        && training_framing_matches
         && framing["system_sha256"].as_str() == Some(system_sha256.as_str())
         && training["weights_sha256"].as_str() == manifest["source_weights_sha256"].as_str()
         && training_digest
@@ -956,6 +989,7 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
             &framing_json,
             &training,
             &framing_envelope.system,
+            &framing_envelope.framing,
             &digest(&training_raw),
         )
     {
@@ -1059,6 +1093,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_context_digest_is_returned_without_context_text() {
+        let context = "private context";
+        let context_hash = digest(context.as_bytes());
+        let result = add_context_digest(
+            response("busy", None, Instant::now(), None, None, None),
+            Some(&context_hash),
+        );
+        assert_eq!(result.1["projectContextSha256"], context_hash);
+        assert!(result.1.get("private context").is_none());
+        let legacy = add_context_digest(
+            response("busy", None, Instant::now(), None, None, None),
+            None,
+        );
+        assert!(legacy.1.get("projectContextSha256").is_none());
+    }
+
+    #[test]
     fn output_contract_detects_missing_and_wrong_types_but_keeps_extensions() {
         let required: Vec<RequiredField> = serde_json::from_str(
             r#"[
@@ -1137,8 +1188,17 @@ mod tests {
         let data = "c".repeat(64);
         let system = "system text";
         let system_sha = digest(system.as_bytes());
+        let actual_framing = Framing {
+            system_prefix: "<s>".into(),
+            system_suffix: "</s>".into(),
+            user_prefix: "<u>".into(),
+            user_suffix: "</u>".into(),
+            assistant_prefix: "<a>".into(),
+            assistant_suffix: "</a>".into(),
+        };
+        let framing_sha = framing_digest(&actual_framing);
         let training = json!({"weights_sha256":weights,"config_sha256":config,
-            "training_file_sha256":data,"system_sha256":system_sha});
+            "training_file_sha256":data,"system_sha256":system_sha,"framing_sha256":framing_sha});
         let raw = serde_json::to_vec(&training).unwrap();
         let manifest =
             json!({"source_weights_sha256":weights,"source_manifest_sha256":digest(&raw)});
@@ -1148,6 +1208,17 @@ mod tests {
             &framing,
             &training,
             system,
+            &actual_framing,
+            &digest(&raw)
+        ));
+        let mut changed_delimiter = actual_framing.clone();
+        changed_delimiter.user_prefix = "<different>".into();
+        assert!(!provenance_links_valid(
+            &manifest,
+            &framing,
+            &training,
+            system,
+            &changed_delimiter,
             &digest(&raw)
         ));
         let mut changed_system = training.clone();
@@ -1160,6 +1231,7 @@ mod tests {
             &framing,
             &changed_system,
             system,
+            &actual_framing,
             &digest(&changed_raw)
         ));
         for invalid in [Value::Null, json!(7)] {
@@ -1170,6 +1242,7 @@ mod tests {
                 &framing,
                 &bad,
                 system,
+                &actual_framing,
                 &digest(&raw)
             ));
         }
@@ -1183,6 +1256,7 @@ mod tests {
             &framing,
             &training,
             system,
+            &actual_framing,
             &digest(&raw)
         ));
     }

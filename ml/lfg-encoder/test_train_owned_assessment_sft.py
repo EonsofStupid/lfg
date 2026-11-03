@@ -72,6 +72,7 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         self.assertEqual(records[0]['response_start'], len(expected))
         self.assertEqual(coverage['selected'], 1)
         self.assertEqual(coverage['system_sha256'], hashlib.sha256(b'Assess the supplied request.').hexdigest())
+        self.assertEqual(coverage['framing_sha256'], self.subject.framing_sha256(self.config['framing']))
 
     def test_training_rejects_mixed_system_prompts(self):
         manifest_path = self.dataset / 'manifest.json'
@@ -127,6 +128,7 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         self.assertEqual(a['weights_sha256'], b['weights_sha256'])
         self.assertEqual(a['losses'], b['losses'])
         self.assertEqual(a['system_sha256'], hashlib.sha256(b'Assess the supplied request.').hexdigest())
+        self.assertEqual(a['framing_sha256'], self.subject.framing_sha256(self.config['framing']))
         self.assertEqual(a['position_rows_reused'], 8)
         self.assertEqual(a['position_rows_initialized'], 120)
         self.assertGreater(a['supervised_tokens'], 0)
