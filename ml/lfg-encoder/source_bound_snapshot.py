@@ -32,7 +32,7 @@ SENSITIVE_KEY = re.compile(
     r'(?:^|[_-])(?:secret|password|credential|access[_-]?token|refresh[_-]?token|'
     r'auth[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|jwt|'
     r'authorization|proxy[_-]?authorization|cookie|cookies|set[_-]?cookie|'
-    r'api[_-]?key|access[_-]?key)(?:$|[_-])', re.I)
+    r'api[_-]?key|access[_-]?key|private[_-]?key|oauth[_-]?token)(?:$|[_-])', re.I)
 
 
 def _project_key(value: str) -> str:
@@ -685,10 +685,19 @@ def revalidate_snapshot(value: dict, *, max_session_bytes: int = 512 * 1024 * 10
     # The byte digests alone do not bind the separately serialized projection:
     # compare all reconstructed source, provider, split, and access fields so a
     # caller cannot edit model rows or claims while retaining the original hash.
+    expected_training = current['training_claims']
+    training = value.get('training_claims')
     if (current['source'] != source or current['provider_list'] != provider
             or current['split'] != split or current['access_claims'] != value.get('access_claims')
-            or current['training_claims'] != value.get('training_claims')):
+            or not isinstance(training, dict)
+            or any(training.get(key) != expected for key, expected in expected_training.items())
+            or training.get('promotion_eligible') is not False):
         raise ValueError('snapshot source or provider cache changed')
+    baseline, baseline_rules, _ = screen_private_corpus.load_policy(_default_screen_policy_path(), 1024 * 1024)
+    policy, rules, policy_sha = screen_private_corpus.load_policy(policy_path, 1024 * 1024)
+    if policy_sha != provider.get('screen_policy_sha256'):
+        raise ValueError('snapshot screening policy changed')
+    _require_screened_extensions(training, set(expected_training), [(baseline, baseline_rules), (policy, rules)])
 
 
 def render_bound_context(value: dict, request: str, *, max_context_bytes: int,

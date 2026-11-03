@@ -115,6 +115,16 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             with self.subTest(field=name), self.assertRaisesRegex(ValueError, 'provider cache changed'):
                 snapshot.revalidate_snapshot(changed)
 
+    def test_training_claim_safe_extension_roundtrips_through_origin_and_staging(self):
+        value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train')
+        value['training_claims']['safe_extra'] = {'note': ['retained']}
+        policy = Path(__file__).with_name('private-corpus-screen.example.json')
+        snapshot.revalidate_snapshot(value)
+        prepared = snapshot.prepare_single_request(value, policy_path=policy,
+                                                   max_request_bytes=4096, max_context_bytes=100_000)
+        self.assertEqual(json.loads(prepared[6])['training_claims']['safe_extra'], {'note': ['retained']})
+        snapshot.validate_staged_artifacts(prepared[6], prepared[3], prepared[4], prepared[5], prepared[7], policy.read_bytes())
+
     def test_single_request_selection_and_context_are_snapshot_bound(self):
         value = snapshot.build_snapshot(self.record, self.cache, split_policy='exploratory_train',
                                         known_reserved_project_labels=['Makers-Impulse'])
@@ -622,7 +632,9 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.write_cache({'models': rows})
         with self.assertRaisesRegex(ValueError, 'duplicate provider model'):
             snapshot.read_provider_cache(self.cache)
-        for key in ('auth_token', 'session_token', 'id_token', 'jwt'):
+        for key in ('auth_token', 'session_token', 'id_token', 'jwt',
+                    'privateKey', 'private_key', 'PrivateKey', 'PRIVATEKEY',
+                    'oauthToken', 'oauth_token', 'OauthToken', 'OAuthToken'):
             with self.subTest(sensitive_key=key):
                 self.write_cache({'models': [{'slug': 'visible', 'visibility': 'list', key: 'private'}]})
                 with self.assertRaisesRegex(ValueError, 'sensitive provider extension'):
@@ -969,13 +981,49 @@ class StagedBindingTests(unittest.TestCase):
 
     def test_sensitive_provider_keys_and_basic_values_are_screened(self):
         policy, rules, _ = snapshot.screen_private_corpus.load_policy(snapshot._default_screen_policy_path(), 1024 * 1024)
-        for key in ('authorization', 'proxyAuthorization', 'cookie', 'setCookie'):
+        for key in ('authorization', 'proxyAuthorization', 'cookie', 'setCookie',
+                    'privateKey', 'private_key', 'PrivateKey', 'PRIVATEKEY',
+                    'oauthToken', 'oauth_token', 'OauthToken', 'OAuthToken'):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'sensitive provider extension key'):
                 snapshot._safe_extensions({key: 'fixture'}, rules, policy['limits'])
         result = snapshot._safe_extensions({'note': 'Basic YWxhZGRpbjpvcGVuc2VzYW1l'}, rules, policy['limits'])
         self.assertNotIn('YWxhZGRpbjpvcGVuc2VzYW1l', result['note'])
         result = snapshot._safe_extensions({'note': 'Cookie: session=fixture-cookie-value'}, rules, policy['limits'])
         self.assertNotIn('fixture-cookie-value', result['note'])
+
+    def test_origin_training_extensions_are_screened_and_fixed_claims_stay_strict(self):
+        import copy
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = Path(directory) / 'policy.json'
+            policy_path.write_bytes(self.policy_raw)
+            value = {'schema_version': snapshot.SCHEMA,
+                     'source': {'source_locator': '/synthetic/session',
+                                'inventory_identity': {'source_file': '/synthetic/session'}},
+                     'provider_list': {'source_locator': '/synthetic/cache',
+                                       'screen_policy_locator': str(policy_path),
+                                       'screen_policy_sha256': snapshot.sha(self.policy_raw)},
+                     'split': {'policy': 'exploratory_train'}, 'access_claims': {},
+                     'training_claims': {'task_outcome': 'unknown', 'teacher_proposal': 'none',
+                                         'review_status': 'unreviewed', 'promotion_eligible': False}}
+            current = copy.deepcopy(value)
+            with mock.patch.object(snapshot, 'build_snapshot', return_value=current):
+                value['training_claims']['safe_extra'] = {'nested': ['retained']}
+                snapshot.revalidate_snapshot(value)
+                for key, bad in [('safe_extra', {'nested': ['CUSTOM_SECRET_VALUE']}),
+                                 ('safe_extra', {'nested': ['Basic YWxhZGRpbjpvcGVuc2VzYW1l']}),
+                                 ('oauthToken', 'fixture'), ('privateKey', 'fixture')]:
+                    with self.subTest(extension=key):
+                        changed = copy.deepcopy(value)
+                        changed['training_claims'][key] = bad
+                        with self.assertRaises(ValueError):
+                            snapshot.revalidate_snapshot(changed)
+                for key, bad in [('task_outcome', 'success'), ('teacher_proposal', 'accepted'),
+                                 ('review_status', 'reviewed'), ('promotion_eligible', 0)]:
+                    with self.subTest(fixed=key):
+                        changed = copy.deepcopy(value)
+                        changed['training_claims'][key] = bad
+                        with self.assertRaisesRegex(ValueError, 'provider cache changed'):
+                            snapshot.revalidate_snapshot(changed)
 
     def test_structured_unknown_data_cannot_hide_inside_provider_scalar_fields(self):
         model = self.projection['provider_list']['models'][0]

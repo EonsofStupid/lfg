@@ -170,8 +170,8 @@ hashes recomputed by the same party that edits staged files are not an
 independent signature or attestation of the origin host's checks.
 
 Provider metadata screening is a defense-in-depth heuristic, not proof that all
-secrets are absent. Common credential key names (including session and ID
-tokens) are rejected, and string values are screened with the configured
+secrets are absent. Common credential key names (including private keys, OAuth,
+session and ID tokens) are rejected, and string values are screened with the configured
 private-corpus policy, but an unknown field or unrecognized secret format can
 still evade screening. Review and version the policy for the local corpus;
 extension fields remain inert and do not change model or access behavior.
