@@ -355,6 +355,12 @@ def _matches_reserved_identity(record: dict, identities: list[dict]) -> bool:
                for item in identities)
 
 
+def _require_supported_reserved_groups(groups: list[str] | tuple[str, ...]) -> None:
+    """A path group alone cannot prove coverage of an append-growing session."""
+    if groups:
+        raise ValueError('reserved group mode requires verifiable session-wide coverage; use explicit source identities')
+
+
 def read_reserved_session_manifest(path: Path, *,
                                    screen_policy_path: Path | None = None) -> tuple[list[str], str, str, list[dict]]:
     """Read an owner-only POSIX manifest; completeness remains unknown.
@@ -417,6 +423,7 @@ def read_reserved_session_manifest(path: Path, *,
             or any(char not in '0123456789abcdef' for char in item) for item in groups)
             or len(set(groups)) != len(groups)):
         raise ValueError('invalid reserved-session identity')
+    _require_supported_reserved_groups(groups)
     identities = _validate_reserved_source_identities(value['identities'], screen_policy_path=screen_policy_path)
     return groups, sha(raw), value['coverage'], identities
 
@@ -424,6 +431,7 @@ def read_reserved_session_manifest(path: Path, *,
 def _recheck_reserved_manifest(locator: str | None, manifest_sha: str | None,
                                groups: list[str], coverage: str, identities: list[dict],
                                screen_policy_path: Path | None = None) -> None:
+    _require_supported_reserved_groups(groups)
     if manifest_sha is None:
         if locator is not None:
             raise ValueError('unexpected reserved-session manifest locator')
@@ -565,6 +573,7 @@ def build_snapshot(record: dict, cache_path: Path, *, split_policy: str,
            or any(char not in '0123456789abcdef' for char in item)
            for item in known_reserved_group_sha256):
         raise ValueError('invalid reserved-group identity')
+    _require_supported_reserved_groups(known_reserved_group_sha256)
     if (known_reserved_manifest_sha256 is not None and
             (not isinstance(known_reserved_manifest_sha256, str)
              or len(known_reserved_manifest_sha256) != 64
@@ -948,7 +957,7 @@ def validate_staged_artifacts(snapshot_raw: bytes, request_raw: bytes,
             or reserved_coverage not in ('unknown', 'partial')
             or (reserved_manifest_sha is not None and not valid_sha(reserved_manifest_sha))
             or (reserved_manifest_sha is None and reserved_coverage != 'unknown')
-            or source_group in reserved_groups
+            or bool(reserved_groups)
             or _matches_reserved_identity(staged_identity, reserved_identities)
             or not isinstance(reserved_projects, list)
             or any(not isinstance(label, str) or not label.strip() for label in reserved_projects)

@@ -310,6 +310,37 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         changed = {**self.record, 'source_file': alias}
         self.assertEqual(snapshot.source_group_id(self.record), snapshot.source_group_id(changed))
 
+    def test_moved_hardlink_cannot_use_unsupported_path_group_reservation(self):
+        original_group = snapshot.source_group_id(self.record)
+        alias = self.root / 'moved-session.jsonl'
+        os.link(self.session, alias)
+        self.session.unlink()
+        self.assertEqual(alias.stat().st_nlink, 1)
+        changed = dict(self.record, source_file=str(alias))
+        self.assertNotEqual(snapshot.source_group_id(changed), original_group)
+        with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+            with self.assertRaisesRegex(ValueError, 'reserved group mode requires'):
+                snapshot.build_snapshot(changed, self.cache, split_policy='exploratory_train',
+                                        known_reserved_group_sha256=[original_group])
+        opened.assert_not_called()
+
+    def test_nonempty_group_manifests_are_rejected_even_with_unrelated_identities(self):
+        path = self.root / 'unsupported-group-manifest.json'
+        identity = snapshot._source_identity_claim(self.record)
+        for key in ('source_file_sha256', 'source_prefix_sha256', 'source_line_sha256', 'text_sha256'):
+            identity[key] = 'f' * 64
+        for groups, identities in [(['a' * 64], []), (['a' * 64], [identity]),
+                                   (['a' * 64, 'b' * 64], [identity])]:
+            with self.subTest(group_count=len(groups), identity_count=len(identities)):
+                path.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
+                                                      'coverage': 'partial', 'groups': groups,
+                                                      'identities': identities, 'safe_extra': {'kept': True}}))
+                path.chmod(0o600)
+                with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
+                    with self.assertRaisesRegex(ValueError, 'reserved group mode requires'):
+                        snapshot.read_reserved_session_manifest(path)
+                opened.assert_not_called()
+
     @unittest.skipUnless(os.name == 'posix', 'source identity checks require POSIX no-follow reads')
     def test_reserved_identity_rejects_copy_and_relocated_hardlink_before_read(self):
         identity = snapshot._source_identity_claim(self.record)
@@ -469,8 +500,8 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         manifest_path = self.root / 'reserved-groups.json'
         manifest_value = {'schema_version': 'lfg.reserved-session-groups.v1',
                           'coverage': 'partial',
-                          'groups': [snapshot.source_group_id(self.record)],
-                          'identities': [],
+                          'groups': [],
+                          'identities': [snapshot._source_identity_claim(self.record)],
                           'extension': {'kept_in_digest': True}}
         manifest_path.write_bytes(snapshot.json_bytes(manifest_value))
         if os.name == 'posix':
@@ -479,7 +510,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertEqual(groups, manifest_value['groups'])
         self.assertEqual(digest, snapshot.sha(manifest_path.read_bytes()))
         self.assertEqual(coverage, 'partial')
-        self.assertEqual(identities, [])
+        self.assertEqual(identities, manifest_value['identities'])
         changed = dict(self.record, project='renamed-project-label')
         inventory_path.write_bytes(snapshot.json_bytes(changed))
         output_path = self.root / 'snapshot.json'
@@ -585,7 +616,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
             result = original_stage(snapshot_value, context_text)
             manifest.write_bytes(snapshot.json_bytes({
                 'schema_version': 'lfg.reserved-session-groups.v1',
-                'coverage': 'partial', 'groups': [snapshot.source_group_id(self.record)], 'identities': []}))
+                'coverage': 'partial', 'groups': [], 'identities': [snapshot._source_identity_claim(self.record)]}))
             manifest.chmod(0o600)
             return result
 
@@ -617,7 +648,7 @@ class SourceBoundSnapshotTests(unittest.TestCase):
         self.assertEqual(projection['split']['known_reserved_manifest_sha256'], digest)
         manifest.write_bytes(snapshot.json_bytes({'schema_version': 'lfg.reserved-session-groups.v1',
                                                   'coverage': 'partial',
-                                                  'groups': [snapshot.source_group_id(self.record)], 'identities': []}))
+                                                  'groups': [], 'identities': [snapshot._source_identity_claim(self.record)]}))
         with mock.patch.object(snapshot, 'verify_selected_source', side_effect=AssertionError('opened source')) as opened:
             with self.assertRaisesRegex(ValueError, 'reserved-session manifest changed'):
                 snapshot.revalidate_snapshot(value)
@@ -952,6 +983,18 @@ class StagedBindingTests(unittest.TestCase):
         self.manifest['projects'] = {'fixture': 1}
         self.context['projects']['other'] = dict(self.context['projects']['fixture'])
         with self.assertRaises(ValueError):
+            self.check()
+
+    def test_staged_nonempty_reserved_groups_are_not_treated_as_covered(self):
+        split = self.projection['split']
+        split['known_reserved_group_sha256'] = ['9' * 64]
+        split['known_reserved_groups_checked'] = 1
+        split['known_reserved_source_identities'] = [{
+            'source_file_sha256': '1' * 64, 'source_prefix_sha256': '2' * 64,
+            'source_prefix_bytes': 7, 'source_line': 2,
+            'source_line_sha256': '3' * 64, 'text_sha256': '4' * 64,
+            'source_group_sha256': '9' * 64, 'safe_extra': 'retained'}]
+        with self.assertRaisesRegex(ValueError, 'reserved-group claims'):
             self.check()
 
     def test_safe_unknown_fields_remain_inert_but_both_policies_screen_extensions(self):

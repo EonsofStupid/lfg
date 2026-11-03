@@ -117,21 +117,22 @@ When no separately verified reserved final-test group exists, the caller can
 explicitly use `exploratory_train`. This is an exploratory collection assignment
 with `heldout_separation: unknown`; it does not claim an independent holdout or
 blinded evaluation. Known reserved project candidates are rejected before the
-selected session is opened, and no test or validation source is opened. Known
-session exclusions use project-label-independent session IDs; normalized
+selected session is opened. Normalized
 project-label aliases are an additional preflight check, but inventory labels
 are unverified and do not prove project identity. Reserved-set coverage is
 therefore incomplete. The Makers Impulse candidate external-project group
 remains excluded from this selection. A separate, independently reserved
 evaluation group is still needed before any quality claim or promotion.
 The CLI accepts `--reserved-session-ids` with a private
-`lfg.reserved-session-groups.v1` manifest containing SHA-256 session IDs,
-predeclared source inventory identities, and an `unknown` or `partial` coverage
-marker. Each inventory identity includes whole-file digest, selected-text
+`lfg.reserved-session-groups.v1` manifest containing predeclared source inventory
+identities and an `unknown` or `partial` coverage marker. Its `groups` list must
+be empty: path-derived group IDs cannot establish session-wide coverage after a
+rename, copy, or append, even if some identity entries are present. Unsupported
+group reservations fail before the selected source is opened. Each inventory identity includes whole-file digest, selected-text
 digest, selected line number/digest, and prefix byte count/digest. An exact
 whole-file digest, matching selected-text digest, matching selected line, or
-matching prefix independently excludes a candidate before source open. This
-catches copied/renamed aliases and append drift. The snapshot binds the full
+matching prefix independently excludes a candidate before source open. These
+checks cover only the declared identities, not every message in a session. The snapshot binds the full
 manifest digest and identities, retains its private locator, and rereads the
 bounded manifest during revalidation and immediately before returning staged
 bytes. Additional identity fields are accepted as bounded inert extensions;
