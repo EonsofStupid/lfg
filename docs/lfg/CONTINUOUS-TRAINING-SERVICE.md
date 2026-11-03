@@ -170,16 +170,17 @@ intentional service restart and then continued training. This does not prove
 recovery from power loss or all storage failures.
 
 Two additional user services chain from that run: the first verified the
-completed byte-model weights and started assessment fine-tuning using the
-prepared 349-example dataset. The second waits for that fine-tune and runs
-the existing 10-request private development-format check. Their control flow
+completed byte-model weights and completed assessment fine-tuning using the
+prepared 349-example dataset. The second started the existing 10-request
+private development-format check; its report is pending. Their control flow
 was also exercised with completed-checkpoint software fixtures on the Spark.
 The dashboard switches to the assessment job when its status appears and
 displays the resulting aggregate format count when the report is available.
 
 Each teacher collection is a finite, resumable job. The configured
 [continual data handoff](CONTINUAL-DATA-HANDOFF.md) publishes completed
-collections and queues new datasets; the live first update is still waiting for
-the initial assessment model. The completed earlier assessment services used
+collections and queues new datasets; the live first update on the 369-record
+dataset started after the initial assessment model completed. The completed
+earlier assessment services used
 the prior trainer implementation; the final-checkpoint recovery improvement
 applies to new jobs, not migrations of their pinned checkpoints.

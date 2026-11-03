@@ -64,9 +64,11 @@ receiver recognized the second delivery as identical. A later collection of
 20 additional screened real requests produced a 369-record dataset, which the
 publisher delivered to the Spark inbox after a manual service trigger; its
 periodic timer is enabled. The queue verified that
-it contains the prior 349 records and measured the required context. The queue
-is enabled but is waiting for the initial owned assessment model; the actual
-subsequent fine-tune and its evaluation have not yet occurred.
+it contains the prior 349 records and measured the required context. The
+initial 349-record assessment fine-tune completed. The queue picked up
+the 369-record dataset and started the subsequent fine-tune, reaching its
+first 200-step checkpoint with all 369 examples fitting the configured context.
+That update and its evaluation have not yet completed.
 
 The transfer receiver, publisher, queue restart behavior and independent
 evaluator were tested with isolated software fixtures; those fixtures are not
