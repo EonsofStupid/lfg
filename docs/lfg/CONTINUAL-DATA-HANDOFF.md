@@ -68,7 +68,10 @@ it contains the prior 349 records and measured the required context. The
 initial 349-record assessment fine-tune completed. The queue picked up
 the 369-record dataset and completed the subsequent 5,000-step fine-tune,
 with all 369 examples fitting the configured context. The queue returned to
-idle and its separate development-format evaluation started.
+idle. Its separate check on the reused 10-request development set returned
+four JSON objects with the required fields, five invalid JSON responses and
+one JSON object missing required fields. It did not measure recommendation
+accuracy or qualify the checkpoint for promotion.
 
 The transfer receiver, publisher, queue restart behavior and independent
 evaluator were tested with isolated software fixtures; those fixtures are not
