@@ -22,7 +22,7 @@ class CheckpointPairTests(unittest.TestCase):
         self.subject, self.model_code, self.base = subject, owned_student, base
         # Successful fixture runs exercise scoring while explicitly bypassing
         # the platform guard; OutputSafetyTests verifies Windows fails closed.
-        self.output_guard = patch.object(subject, 'require_private_output_directory', lambda _path: None)
+        self.output_guard = patch.object(subject.output_safety, 'require_private_output_directory', lambda _path: None)
         self.output_guard.start()
         self.addCleanup(self.output_guard.stop)
         self.torch, self.save = torch, save
@@ -91,6 +91,17 @@ class CheckpointPairTests(unittest.TestCase):
         self.assertFalse(report['promotion_eligible'])
         self.assertGreater(report['metrics']['left']['bits_per_byte'], 0)
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX owner/mode checks are platform-specific')
+    def test_scoring_writes_through_real_private_output_guard(self):
+        import stat
+
+        self.output_guard.stop()
+        output = self.root / 'guarded-report.json'
+        self._evaluate(self.source, output)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        with self.assertRaisesRegex(ValueError, 'output already exists'):
+            self._evaluate(self.source, output)
+
     def test_rejects_data_declared_by_either_checkpoint(self):
         manifest_path, weights_path, _config_path = self.right
         manifest = json.loads(manifest_path.read_text())
@@ -134,38 +145,51 @@ class CheckpointPairTests(unittest.TestCase):
         self.assertIsNone(result['left_checkpoint']['completed'])
 
 
+@unittest.skipUnless(AVAILABLE, 'torch and safetensors required')
+class OutputSafetyIntegrationTests(unittest.TestCase):
+    def test_windows_guard_precedes_all_input_reads(self):
+        import evaluate_owned_checkpoint_pair as subject
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / 'must-not-exist.json'
+            with patch.object(subject.output_safety, '_is_windows', return_value=True), \
+                 patch.object(subject, 'load_config', side_effect=AssertionError('input read')):
+                with self.assertRaisesRegex(ValueError, 'unavailable on Windows'):
+                    subject.evaluate(root / 'missing-config', root / 'missing-source',
+                        root / 'missing-policy', output, root / 'left-manifest',
+                        root / 'left-weights', root / 'left-config',
+                        root / 'right-manifest', root / 'right-weights', root / 'right-config')
+            self.assertFalse(output.exists())
+
+
 class OutputSafetyTests(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', 'POSIX owner/mode checks are platform-specific')
     def test_accepts_private_parent_and_creates_owner_only_file(self):
-        import evaluate_owned_checkpoint_pair as subject
+        import checkpoint_pair_output_safety as subject
         import stat
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'report.json'
-            subject.require_private_output_directory(output)
-            descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                                 getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            descriptor = subject.create_private_output(output)
             os.close(descriptor)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
 
-    def test_windows_fails_closed_before_reading_inputs_or_writing_output(self):
-        import evaluate_owned_checkpoint_pair as subject
+    def test_windows_output_creation_fails_closed(self):
+        import checkpoint_pair_output_safety as subject
         from unittest.mock import patch
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'must-not-exist.json'
             with patch.object(subject, '_is_windows', return_value=True):
                 with self.assertRaisesRegex(ValueError, 'unavailable on Windows'):
-                    subject.evaluate(Path(temporary) / 'missing-config', Path(temporary) / 'missing-source',
-                        Path(temporary) / 'missing-policy', output, Path(temporary) / 'left-manifest',
-                        Path(temporary) / 'left-weights', Path(temporary) / 'left-config',
-                        Path(temporary) / 'right-manifest', Path(temporary) / 'right-weights',
-                        Path(temporary) / 'right-config')
+                    subject.create_private_output(output)
             self.assertFalse(output.exists())
 
     @unittest.skipIf(os.name == 'nt', 'POSIX owner/mode checks are platform-specific')
     def test_rejects_group_accessible_output_parent(self):
-        import evaluate_owned_checkpoint_pair as subject
+        import checkpoint_pair_output_safety as subject
 
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary) / 'public-parent'
