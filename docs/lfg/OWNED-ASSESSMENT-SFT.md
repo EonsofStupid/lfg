@@ -128,7 +128,7 @@ single unreviewed real-request pilot had a 792-byte framed prompt and a
 423-byte response. The original checkpoint had context 64. The illustrative
 2,048-byte setting accommodates the complete example but initializes 1,984
 additional position rows; the expanded model has 101,376 parameters. No real
-assessment fine-tuning or quality evaluation was performed by this check. One
+assessment fine-tuning or quality evaluation was performed by that check. One
 unreviewed example is not a representative training or evaluation corpus.
 
 On the same date, a bounded software-fixture smoke check on an owner-accessible
@@ -153,3 +153,64 @@ the local ignored `target` directory; the recorded probe and trainer code hashes
 match the local files at commit `d44ad76`. The existing SWAG container was still
 running afterward. This second run also used no real training data and does not
 establish a useful model or a qualified Spark environment.
+
+## Real-request pilot, 2026-11-02
+
+The owner authorizes teacher distillation on their projects and chats. A
+bounded CUDA pilot used the private notes-inclusive byte checkpoint and the
+previously prepared single real user request with one assistant-written
+assessment. The assessment remains an **unreviewed teacher proposal** with
+unknown outcome, not a human-verified target or a successful task outcome.
+The request and proposal were screened again with the local pattern policy;
+no matches were found, which does not prove complete redaction.
+
+The 859,904-parameter student trained for eight steps, with a two-step
+checkpoint followed by a resumed run. It processed 1,658 supervised byte
+positions. The context grew from 128 to 1,536 bytes, initializing 1,408
+position rows randomly; the full framed example fit without truncation. A
+separate uninterrupted run on the same Spark, software and inputs produced
+the same weight digest, loss history and supervised-token count. The maximum
+reported PyTorch allocation across the completed runs was 116,463,616 bytes
+(134,217,728 reserved); the configured allocator fraction was 0.01, with a
+4 GiB host memory limit, 200% CPU quota and 128 tasks in the systemd scope.
+The allocator fraction is not GPU isolation, and the installed environment was
+not wheel-locked. No validation or test data was opened.
+
+This is evidence that the owned assessment SFT and recovery path can process a
+real request and teacher proposal, not evidence of useful assessment behavior.
+One unreviewed example, a few steps and mostly untrained new context positions
+are insufficient for a task model. The resulting private weights may disclose
+their source and are not promotion eligible.
+
+The completed pilot checkpoint was exported to ONNX and embedded with the UI
+in an optimized Windows developer executable. ONNX Runtime matched PyTorch at
+source lengths 1, 4, 32, 128 and 792 bytes, with a maximum absolute difference
+of 0.00000430. The native executable's next-byte logits matched the checkpoint
+at those lengths within 0.00000287, and native greedy generation of 16 bytes
+from the actual 792-byte framed training request matched PyTorch. The executable
+served the UI and the 425-question catalog from an empty working directory.
+These are implementation checks, not evidence of useful assessments. The
+assessment endpoint still uses the deterministic implementation; the trained
+model is accessible only through its experimental byte-generation command.
+
+`evaluate_owned_assessment_format.py` compares that experimental generator's
+JSON field presence with the deterministic endpoint's assessment envelope on
+an explicitly selected, screened development validation source. Its system
+prompt, framing, stop sequence, request limits and expected fields are
+configuration. It does not open a test source, establish ground truth or score
+intent, complexity, model choices, agents or reasons. Its aggregate report
+contains hashes and timing data but no request or generated text; keep it
+private. The two paths perform different work, and their timings are not a
+quality-adjusted or equivalent-work benchmark.
+
+On 2026-11-02, one previously screened development validation request with a
+222-byte framed prompt was tested with a 512-byte generation limit and the
+training suffix as the stop sequence. The deterministic endpoint returned its
+assessment envelope. The experimental model reached the byte limit without
+producing a valid JSON document. The observed local wall times were 1.85 ms for
+the endpoint request and 26.10 seconds for byte generation on an active
+machine. This is one unlabeled request, not an independent accuracy test or
+representative latency measurement. Native generation recomputes the full
+prefix for each byte, and the limit may terminate an unfinished response. Do
+not use this result to claim the student is ready or that every longer response
+would fail.

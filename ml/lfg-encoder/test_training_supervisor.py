@@ -53,9 +53,9 @@ class TrainingSupervisorTests(unittest.TestCase):
         for name in ("run-manifest.json", "trainer_state.json", "labels.json", "model.safetensors"):
             (self.output / name).write_bytes(b"test-only-output")
 
-    def test_config_rejects_unreviewed_override_and_unpinned_inputs(self):
+    def test_config_rejects_ambiguous_resume_and_unpinned_inputs(self):
         supervisor.load_config(self.config_path)
-        for extra in (["--allow-below-gate"], ["--allow-below"], ["--resume"], ["--unknown"]):
+        for extra in (["--allow-below"], ["--resume"], ["--unknown"]):
             with self.subTest(extra=extra):
                 self.config["trainer_arguments"] += extra
                 self.write_config()
@@ -65,6 +65,45 @@ class TrainingSupervisorTests(unittest.TestCase):
         self.config["trainer_sha256"] = "0" * 64
         self.write_config()
         with self.assertRaisesRegex(ValueError, "trainer digest"):
+            supervisor.load_config(self.config_path)
+
+    def test_authorized_mode_does_not_require_reviewed_plan_or_gate(self):
+        self.config["training_mode"] = "authorized"
+        self.config["extra_metadata"] = {"owner": "fixture"}
+        self.config["resource_limits"]["extra_metadata"] = "fixture"
+        index = self.config["trainer_arguments"].index("--audited-plan")
+        del self.config["trainer_arguments"][index:index + 2]
+        self.write_config()
+        supervisor.load_config(self.config_path)
+        child = SimpleNamespace(wait=lambda: -9, poll=lambda: -9)
+        with patch.object(supervisor, "verify_cgroup_limits", return_value={}), patch.object(subprocess, "Popen", return_value=child) as launch:
+            self.assertEqual(supervisor.execute(self.config_path), 1)
+        command = launch.call_args.args[0]
+        self.assertIn("--allow-below-gate", command)
+        self.assertIn("--verify-installed-payload", command)
+        self.assertNotIn("--require-reviewed", command)
+
+    def test_reviewed_mode_remains_explicit_and_requires_audited_plan(self):
+        child = SimpleNamespace(wait=lambda: -9, poll=lambda: -9)
+        with patch.object(supervisor, "verify_cgroup_limits", return_value={}), patch.object(subprocess, "Popen", return_value=child) as launch:
+            self.assertEqual(supervisor.execute(self.config_path), 1)
+        self.assertIn("--require-reviewed", launch.call_args.args[0])
+        index = self.config["trainer_arguments"].index("--audited-plan")
+        del self.config["trainer_arguments"][index:index + 2]
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "audited plan"):
+            supervisor.load_config(self.config_path)
+
+    def test_conflicting_modes_are_rejected(self):
+        self.config["training_mode"] = "reviewed"
+        self.config["trainer_arguments"].append("--allow-below-gate")
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            supervisor.load_config(self.config_path)
+        self.config["training_mode"] = "authorized"
+        self.config["trainer_arguments"][-1] = "--require-reviewed"
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "conflicts"):
             supervisor.load_config(self.config_path)
 
     def test_start_resume_and_incomplete_checkpoints_fail_closed(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch one reviewed training run and recover only from a complete checkpoint."""
+"""Launch one configured training run and recover only from a complete checkpoint."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ import train
 ROOT = Path(__file__).resolve().parent
 TRAINER = ROOT / "train.py"
 COMPLETE = "supervised-complete.json"
-REQUIRED_OPTIONS = {"--dataset", "--output", "--audited-plan", "--base-model", "--model-revision",
+REQUIRED_OPTIONS = {"--dataset", "--output", "--base-model", "--model-revision",
                     "--model-manifest", "--environment-lock", "--wheelhouse"}
 
 
@@ -43,7 +43,7 @@ def load_config(path: Path) -> tuple[dict[str, Any], str, argparse.Namespace]:
     raw = path.read_bytes()
     value = json.loads(raw)
     fields = {"schema_version", "python", "trainer_sha256", "trainer_arguments", "recovery", "resource_limits"}
-    if not isinstance(value, dict) or set(value) != fields or value["schema_version"] != "lfg.reviewed-training-service.v1":
+    if not isinstance(value, dict) or not fields <= value.keys() or value["schema_version"] != "lfg.reviewed-training-service.v1":
         raise ValueError("invalid training service configuration")
     python = value["python"]
     if not isinstance(python, str) or not Path(python).is_absolute() or not Path(python).is_file():
@@ -56,7 +56,7 @@ def load_config(path: Path) -> tuple[dict[str, Any], str, argparse.Namespace]:
         raise ValueError("recovery must be resume or manual")
     limits = value["resource_limits"]
     limit_fields = {"cpu_quota_percent", "memory_max_bytes", "tasks_max"}
-    if (not isinstance(limits, dict) or set(limits) != limit_fields
+    if (not isinstance(limits, dict) or not limit_fields <= limits.keys()
             or any(type(limits[name]) is not int or limits[name] < 1 for name in limit_fields)):
         raise ValueError("positive CPU, memory and task limits are required")
     arguments = value["trainer_arguments"]
@@ -64,19 +64,27 @@ def load_config(path: Path) -> tuple[dict[str, Any], str, argparse.Namespace]:
         raise ValueError("trainer_arguments must be a list of nonempty strings")
     supplied = {item.split("=", 1)[0] for item in arguments if item.startswith("--")}
     if not REQUIRED_OPTIONS <= supplied:
-        raise ValueError("reviewed training requires explicit dataset, output, plan, model and environment inputs")
+        raise ValueError("training requires explicit dataset, output, model and environment inputs")
     parser = train.build_parser()
     parser.allow_abbrev = False
     try:
         parsed = parser.parse_args(["train", *arguments])
     except SystemExit as error:
         raise ValueError("invalid trainer arguments") from error
-    if parsed.allow_below_gate or parsed.resume:
-        raise ValueError("service forbids the below-gate override and chooses resume itself")
-    for name in ("dataset", "output", "audited_plan", "base_model", "model_manifest", "environment_lock", "wheelhouse",
+    mode = value.get("training_mode", "authorized" if "--allow-below-gate" in supplied else "reviewed")
+    if mode not in ("authorized", "reviewed"):
+        raise ValueError("training_mode must be authorized or reviewed")
+    if (parsed.resume or (mode == "reviewed" and "--allow-below-gate" in supplied)
+            or (mode == "authorized" and "--require-reviewed" in supplied)):
+        raise ValueError("training mode conflicts with trainer arguments or manually supplied resume")
+    if mode == "reviewed" and parsed.audited_plan is None:
+        raise ValueError("reviewed training requires an audited plan")
+    for name in ("dataset", "output", "base_model", "model_manifest", "environment_lock", "wheelhouse",
                  "training_config", "promotion_policy", "support_policy"):
         if not Path(getattr(parsed, name)).is_absolute():
             raise ValueError(f"{name} must be an absolute path")
+    if parsed.audited_plan is not None and not Path(parsed.audited_plan).is_absolute():
+        raise ValueError("audited_plan must be an absolute path")
     if not re.fullmatch(r"[0-9a-f]{40}", parsed.model_revision or ""):
         raise ValueError("model revision must be a full lowercase commit ID")
     train.validate_input_options(False, parsed.environment_lock, parsed.wheelhouse,
@@ -208,11 +216,19 @@ def execute(config_path: Path) -> int:
         print("supervised run already completed; output identities match", flush=True)
         return 0
     command = [config["python"], str(TRAINER), "train", *config["trainer_arguments"]]
+    supplied = {item.split("=", 1)[0] for item in config["trainer_arguments"] if item.startswith("--")}
+    training_mode = config.get("training_mode", "authorized" if "--allow-below-gate" in supplied else "reviewed")
+    if training_mode == "authorized" and "--allow-below-gate" not in supplied:
+        command.append("--allow-below-gate")
+    elif training_mode == "reviewed" and "--require-reviewed" not in supplied:
+        command.append("--require-reviewed")
+    if training_mode == "authorized" and "--verify-installed-payload" not in supplied:
+        command.append("--verify-installed-payload")
     if not parsed.development_plan_only:
         command.append("--development-plan-only")
     if mode == "resume":
         command.append("--resume")
-    print(f"starting reviewed training ({mode}); trainer enforces corpus and environment gates", flush=True)
+    print(f"starting {training_mode} training ({mode}); environment and resource limits remain enforced", flush=True)
     child = subprocess.Popen(command)
     previous = {}
     def forward(signum: int, _frame: Any) -> None:
@@ -244,7 +260,7 @@ def execute(config_path: Path) -> int:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-    print("reviewed training finished; independent evaluation remains required", flush=True)
+    print("training finished; independent evaluation remains required before promotion", flush=True)
     return 0
 
 

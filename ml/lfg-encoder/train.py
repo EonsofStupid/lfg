@@ -82,24 +82,25 @@ def verify_training_device(requested: str, selected: str, cuda_available: bool) 
         raise ValueError(f"training device mismatch: requested {requested}, selected {selected}")
 
 
-def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_class: Any) -> tuple[Any, bool]:
+def make_training_arguments(args: argparse.Namespace, torch: Any, arguments_class: Any,
+                            has_validation: bool = True) -> tuple[Any, bool]:
     cuda_available = torch.cuda.is_available()
     verify_training_device(args.device, "cuda", cuda_available)
     result = arguments_class(
         output_dir=str(args.output), seed=args.seed, num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size, per_device_eval_batch_size=args.batch_size,
-        eval_strategy="steps", eval_steps=args.checkpoint_steps, save_strategy="steps",
-        save_steps=args.checkpoint_steps, load_best_model_at_end=True, save_only_model=False,
+        eval_strategy="steps" if has_validation else "no", eval_steps=args.checkpoint_steps, save_strategy="steps",
+        save_steps=args.checkpoint_steps, load_best_model_at_end=has_validation, save_only_model=False,
         use_cpu=False, report_to="none")
     verify_training_device(args.device, result.device.type, cuda_available)
     return result, cuda_available
 
 
-def make_final_evaluation_callback(callback_base: Any) -> Any:
+def make_final_evaluation_callback(callback_base: Any, has_validation: bool = True) -> Any:
     class FinalEvaluationCallback(callback_base):
         def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
             if state.max_steps > 0 and state.global_step >= state.max_steps:
-                control.should_evaluate = True
+                control.should_evaluate = has_validation
                 control.should_save = True
             return control
     return FinalEvaluationCallback()
@@ -107,10 +108,10 @@ def make_final_evaluation_callback(callback_base: Any) -> Any:
 
 def make_trainer(model_init: Any, arguments: Any, train_data: Any, validation_data: Any,
                  tokenizer: Any, trainer_class: Any, collator_class: Any, callback_base: Any) -> Any:
-    """Pad both datasets and evaluate the final checkpoint even between intervals."""
+    """Save the final step and evaluate it when a validation set exists."""
     return trainer_class(model_init=model_init, args=arguments, train_dataset=train_data,
                          eval_dataset=validation_data, data_collator=collator_class(tokenizer=tokenizer),
-                         callbacks=[make_final_evaluation_callback(callback_base)])
+                         callbacks=[make_final_evaluation_callback(callback_base, validation_data is not None)])
 
 
 def validate_selected_checkpoint(state: Any) -> None:
@@ -292,6 +293,16 @@ def grouped_split(records: list[dict[str, Any]], seed: int) -> tuple[list[dict[s
             [record for record in records if record["family"] in validation_families])
 
 
+def development_partitions(records: list[dict[str, Any]], seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Train authorized data even when it cannot support a meaningful validation split."""
+    try:
+        training, validation = grouped_split(records, seed)
+        validate_validation_labels(training, validation)
+    except ValueError:
+        return records, [], "not_performed"
+    return training, validation, "grouped-development-split"
+
+
 def select_training_records(records: list[dict[str, Any]], minimum: int, development: bool) -> list[dict[str, Any]]:
     verified = [record for record in records if record["verified"]]
     if not development and len(verified) < minimum:
@@ -408,10 +419,14 @@ def tokenize_complete_batch(batch: dict[str, Any], tokenizer: Any, maximum: int)
 
 def train(args: argparse.Namespace) -> None:
     input_records, dataset_digest = load_dataset(args.dataset)
-    policy_path = getattr(args, "promotion_policy", POLICY)
-    policy_bytes = policy_path.read_bytes()
-    policy = parse_promotion_policy(policy_bytes)
-    records = select_training_records(input_records, policy["minimum_human_verified_examples"], args.allow_below_gate)
+    policy_bytes = None
+    if args.allow_below_gate:
+        records = input_records
+    else:
+        policy_path = getattr(args, "promotion_policy", POLICY)
+        policy_bytes = policy_path.read_bytes()
+        policy = parse_promotion_policy(policy_bytes)
+        records = select_training_records(input_records, policy["minimum_human_verified_examples"], False)
     corpus_audit = None
     support = None
     taxonomy = None
@@ -446,8 +461,13 @@ def train(args: argparse.Namespace) -> None:
             raise SystemExit(f"training corpus gate blocked: {error}") from error
     try:
         if args.allow_below_gate:
-            train_rows, validation_rows = grouped_split(records, args.seed)
-        validate_validation_labels(train_rows, validation_rows)
+            train_rows, validation_rows, validation_source = development_partitions(records, args.seed)
+            if not validation_rows:
+                print("No usable development validation split; training all selected data without evaluation. "
+                      "The output is not promotion eligible.", file=sys.stderr, flush=True)
+        else:
+            validate_validation_labels(train_rows, validation_rows)
+            validation_source = "audited-validation-partition"
     except ValueError as error:
         raise SystemExit(str(error)) from error
     if not re.fullmatch(r"[0-9a-f]{40}", args.model_revision or ""):
@@ -484,7 +504,7 @@ def train(args: argparse.Namespace) -> None:
         ) from error
 
     try:
-        training_arguments, cuda_available = make_training_arguments(args, torch, TrainingArguments)
+        training_arguments, cuda_available = make_training_arguments(args, torch, TrainingArguments, bool(validation_rows))
     except ValueError as error:
         raise SystemExit(f"training device rejected: {error}") from error
     selected_device = training_arguments.device
@@ -503,7 +523,7 @@ def train(args: argparse.Namespace) -> None:
                                                local_files_only=bool(model_manifest))
     try:
         coverage = {"train": token_coverage(train_rows, tokenizer, args.max_length, "train"),
-                    "validation": token_coverage(validation_rows, tokenizer, args.max_length, "validation")}
+                    "validation": token_coverage(validation_rows, tokenizer, args.max_length, "validation") if validation_rows else None}
     except ValueError as error:
         raise SystemExit(str(error)) from error
     check_model_snapshot()
@@ -513,7 +533,7 @@ def train(args: argparse.Namespace) -> None:
         "seed": args.seed,
         "development_override": args.allow_below_gate,
         "training_support": support,
-        "validation_source": "grouped-development-split" if args.allow_below_gate else "audited-validation-partition",
+        "validation_source": validation_source,
         "corpus_audit": corpus_audit,
         "train_ids": [row["id"] for row in train_rows],
         "validation_ids": [row["id"] for row in validation_rows],
@@ -525,7 +545,7 @@ def train(args: argparse.Namespace) -> None:
         "base_model": args.base_model,
         "model_revision": args.model_revision,
         "dataset_sha256": split["dataset_sha256"],
-        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest() if policy_bytes is not None else None,
         "trainer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
         "training_config_sha256": args.training_config_sha256,
@@ -539,6 +559,8 @@ def train(args: argparse.Namespace) -> None:
         "batch_size": args.batch_size, "checkpoint_steps": args.checkpoint_steps,
         "allow_mismatched_sizes": args.allow_mismatched_sizes,
         "development_override": args.allow_below_gate,
+        "validation_performed": bool(validation_rows),
+        "promotion_eligible": False,
         "split": split,
         "python": sys.version,
         "platform": platform.platform(),
@@ -572,7 +594,7 @@ def train(args: argparse.Namespace) -> None:
         return tokenize_complete_batch(batch, tokenizer, args.max_length)
 
     train_data = make_dataset(train_rows).map(tokenize, batched=True)
-    validation_data = make_dataset(validation_rows).map(tokenize, batched=True)
+    validation_data = make_dataset(validation_rows).map(tokenize, batched=True) if validation_rows else None
     def model_init() -> Any:
         check_model_snapshot()
         return AutoModelForSequenceClassification.from_pretrained(
@@ -584,7 +606,8 @@ def train(args: argparse.Namespace) -> None:
     verify_training_device(args.device, trainer.args.device.type, torch.cuda.is_available())
     verify_training_device(args.device, next(trainer.model.parameters()).device.type, torch.cuda.is_available())
     trainer.train(resume_from_checkpoint=checkpoint)
-    validate_selected_checkpoint(trainer.state)
+    if validation_rows:
+        validate_selected_checkpoint(trainer.state)
     check_model_snapshot()
     if verify_payload and training_inputs.verify_environment(environment_lock, wheelhouse, allowed_extra,
                                                               verify_payload=True) != environment_evidence:
@@ -1048,7 +1071,8 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         choices=["validate", "plan", "train", "export", "benchmark"],
     )
-    parser.add_argument("--dataset", type=Path, default=DATASET)
+    parser.add_argument("--dataset", type=Path,
+                        help="explicit selected training data; validation defaults to the packaged fixture")
     parser.add_argument("--training-config", type=Path, default=TRAINING_CONFIG)
     parser.add_argument("--promotion-policy", type=Path, default=POLICY)
     parser.add_argument("--support-policy", type=Path, default=SUPPORT_POLICY,
@@ -1073,7 +1097,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-mismatched-sizes", action=argparse.BooleanOptionalAction, default=None,
                         help="permit reinitialization of mismatched weights (review model loading warnings)")
     parser.add_argument("--resume", action="store_true", help="resume the latest complete checkpoint of the same run")
-    parser.add_argument("--allow-below-gate", action="store_true", help="development only; output remains ineligible")
+    policy_mode = parser.add_mutually_exclusive_group()
+    policy_mode.add_argument("--allow-below-gate", dest="allow_below_gate", action="store_true", default=True,
+                             help="train selected authorized data without review gates (default; not promotion eligible)")
+    policy_mode.add_argument("--require-reviewed", dest="allow_below_gate", action="store_false",
+                             help="restrict this run to the reviewed, audited training workflow")
     parser.add_argument("--audited-plan", type=Path, help="reviewed and project-separated corpus plan")
     parser.add_argument("--development-plan-only", action="store_true",
                         help="reject complete or test-containing plans before opening corpus sources")
@@ -1084,6 +1112,10 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command not in ("validate", "train"):
         raise SystemExit(f"{args.command} is not yet integrated with the reviewed training pipeline")
+    if args.dataset is None:
+        if args.command == "train":
+            raise SystemExit("training requires an explicitly selected --dataset")
+        args.dataset = DATASET
     try:
         config_bytes = args.training_config.read_bytes()
         config = parse_training_config(config_bytes)

@@ -112,6 +112,43 @@ class DatasetGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two distinct families"):
             train.grouped_split([record(1, True), record(2, True)], 731)
 
+    def test_authorized_training_does_not_require_a_validation_family(self):
+        rows = [record(1, False), record(2, False)]
+        training, validation, source = train.development_partitions(rows, 731)
+        self.assertEqual(training, rows)
+        self.assertEqual(validation, [])
+        self.assertEqual(source, "not_performed")
+
+    def test_authorized_training_keeps_unseen_validation_labels_for_training(self):
+        rows = [dict(record(1, False), family="one"),
+                dict(record(2, False), family="two", risks=["sensitive-data"])]
+        training, validation, source = train.development_partitions(rows, 731)
+        self.assertEqual(training, rows)
+        self.assertEqual(validation, [])
+        self.assertEqual(source, "not_performed")
+
+    def test_cli_defaults_to_authorized_and_reviewed_is_opt_in(self):
+        parser = train.build_parser()
+        self.assertTrue(parser.parse_args(["train"]).allow_below_gate)
+        self.assertTrue(parser.parse_args(["train", "--allow-below-gate"]).allow_below_gate)
+        self.assertFalse(parser.parse_args(["train", "--require-reviewed"]).allow_below_gate)
+
+    def test_cli_requires_an_explicit_training_dataset(self):
+        result = subprocess.run([sys.executable, str(Path(train.__file__)), "train"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicitly selected --dataset", result.stderr)
+
+    def test_authorized_training_does_not_read_promotion_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "train.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            args = argparse.Namespace(dataset=dataset, allow_below_gate=True, promotion_policy=root / "missing.json",
+                                      seed=731, model_revision=None)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(SystemExit, "model-revision"):
+                train.train(args)
+
     def test_validation_cannot_silently_drop_a_label_absent_from_training(self):
         training = [record(1, True)]
         validation = [dict(record(2, True), risks=["sensitive-data"])]
@@ -275,6 +312,9 @@ class DatasetGateTests(unittest.TestCase):
             return SimpleNamespace(device=SimpleNamespace(type="cuda"))
         train.make_training_arguments(args, torch, arguments)
         self.assertIs(captured["use_cpu"], False)
+        train.make_training_arguments(args, torch, arguments, has_validation=False)
+        self.assertEqual(captured["eval_strategy"], "no")
+        self.assertFalse(captured["load_best_model_at_end"])
         torch.cuda.is_available = lambda: False
         with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
             train.make_training_arguments(args, torch, arguments)
@@ -316,6 +356,11 @@ class DatasetGateTests(unittest.TestCase):
         state.global_step = 3
         callback.on_step_end(None, state, control)
         self.assertTrue(control.should_evaluate)
+        self.assertTrue(control.should_save)
+        callback = train.make_final_evaluation_callback(object, has_validation=False)
+        control = SimpleNamespace(should_evaluate=False, should_save=False)
+        callback.on_step_end(None, state, control)
+        self.assertFalse(control.should_evaluate)
         self.assertTrue(control.should_save)
 
     def test_training_result_requires_finite_selected_validation_checkpoint(self):

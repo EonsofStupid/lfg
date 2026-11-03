@@ -30,6 +30,29 @@ Read this before planning work. It is the owner's direction.
   on chats and projects they mark successful. Confirmation and weighting rules
   are configurable.
 
+## Execution rules
+
+- Advance the actual product milestone: representative authorized data,
+  meaningful training, task evaluation, and a usable integrated build. A tiny
+  pilot or fixture establishes only the specific path it exercises; do not make
+  another isolated pilot the default next milestone after that path works.
+- Training may use selected authorized data before review or quality thresholds
+  are met. Record provenance and uncertainty, and apply evaluation gates to
+  trust and promotion. Never describe a teacher proposal as a verified outcome.
+- Set architecture, data, resource and integration policies through configuration.
+  Accept extension fields where the contract permits them; do not imply an
+  unrecognized field changes behavior. Size Spark work from measurements and
+  coexistence needs rather than retaining a pilot's resource cap by habit.
+- Keep private inputs, logs and derived weights local and out of Git. Redact
+  before use, retain source identities, and keep independent evaluation material
+  separate. Screening and labels are claims unless independently verified.
+- Run the checks needed for the change and report their actual scope. While
+  checked merges or builds run, continue independent substantive work; reconcile
+  moving bases and finish authorized merges without bypassing required checks.
+- Report the real blocker and the next action when the end state is incomplete.
+  Do not present scaffolding, synthetic fixtures or a passing smoke test as a
+  trained, qualified product.
+
 Details: [README objective](README.md#project-objective),
 [model and distillation and the order of work](docs/lfg/MODEL-AND-DISTILLATION.md#order-of-work),
 [product and delivery](docs/lfg/PRODUCT-AND-DELIVERY.md).

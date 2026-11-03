@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.teacher-request-selection.v1",
+  "seed": "REPLACE_WITH_SELECTION_SEED",
+  "max_manifest_bytes": 1048576,
+  "max_train_bytes": 10485760,
+  "max_record_bytes": 1048576,
+  "max_candidates": 10000,
+  "max_per_project": 2,
+  "max_selected": 26,
+  "min_text_bytes": 80,
+  "max_text_bytes": 700
+}

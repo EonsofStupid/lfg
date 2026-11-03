@@ -1,22 +1,32 @@
-# Supervised reviewed training on Linux
+# Supervised classifier training on Linux
 
 The repository includes a configurable systemd user-service template and
-`ml/lfg-encoder/training_supervisor.py`. They run one existing reviewed trainer,
+`ml/lfg-encoder/training_supervisor.py`. They run one existing classifier trainer,
 enforce finite CPU, memory and task limits, and recover only from a complete
 checkpoint. The template is opt-in: installing it does not start training.
 It is not a trained model, an evaluation, or a production-qualified service.
 
-The launcher rejects `--allow-below-gate` and chooses `--resume` itself. The
-trainer still requires a reviewed corpus, audit, immutable model revision,
-model manifest and locked environment, and applies its existing eligibility
-checks. The supervisor always requests a
-[development-only corpus plan](CORPUS-REVIEW.md#development-only-assembly).
-The trainer rejects a legacy complete plan before the audit opens its sources,
-and development plans reject declared test sources. Keep final holdout data
+The configured `training_mode` is `authorized` or `reviewed`. The example uses
+`authorized`, which permits selected unreviewed data without requiring a review
+ledger or audited plan; its output is not promotion eligible. For backward
+compatibility, a service configuration without `training_mode` remains reviewed
+unless it explicitly includes `--allow-below-gate`. Reviewed mode requires the
+audited plan and adds `--require-reviewed`; the supervisor chooses `--resume`
+itself in both modes. Both modes still require the immutable model revision,
+local model manifest and locked environment, and the authorized mode explicitly
+verifies the installed payload. The supervisor requests a
+[development-only corpus plan](CORPUS-REVIEW.md#development-only-assembly)
+when a reviewed plan is used. Keep final holdout data
 physically separate: source split labels are assertions and this does not detect
-a test file mislabeled as training or validation. The direct trainer can still
-accept legacy plans unless `--development-plan-only` is supplied; their audits
-read test data. A completion marker is not a quality or release gate.
+a test file mislabeled as training or validation. Authorized mode reads its
+selected dataset directly and does not use the audited plan. A completion marker
+is not a quality or release gate, and neither mode supervises the owned-byte
+distillation or assessment SFT trainers.
+
+Existing runs bind their trainer and supervisor identities. Changing this
+workflow does not silently rewrite those identities: resume an older run with
+its matching source and configuration, or start a new run after deliberately
+choosing its inputs. This change does not migrate old checkpoints.
 
 ## Configure an instance
 
