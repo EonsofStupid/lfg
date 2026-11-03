@@ -16,6 +16,74 @@ step; a native implementation should benchmark bounded preallocation and its
 memory costs rather than assume this implementation is optimal. There is no
 prompt-level task quality or concurrent-service measurement here.
 
+## Native cached CLI and service
+
+The Rust `owned-byte-cached-generate` command loads the two graphs once per
+invocation, validates the pinned manifest and graph digests, checks their ONNX
+tensor contracts and rejects external tensor data before tract loads either
+graph. It accepts one JSONL request, uses the first prefill logits to choose the
+first byte, and then advances one absolute byte position per decode call. It
+does not evict history or attempt to decode beyond the context boundary. The
+service invokes this command in a separate child process for each request, so
+graph loading is repeated across requests; the in-memory cache belongs to one
+request and is discarded when that child exits. This is an experimental
+correctness path, not a persistent model server or a performance claim.
+
+The child runtime configuration is byte-bounded and pinned by SHA-256 both at
+service startup and when the child reads it. `--max-total-graph-bytes` bounds
+the combined graph file size; `--max-cache-state-bytes-per-request` must cover
+the manifest's maximum cache tensors for one batch item. The latter does not
+bound peak RAM: graph weights, tract workspace, allocation overhead and
+transient cache copies are additional. Graph loading currently materializes
+bounded graph files in memory before tract compiles the runnable models.
+
+Build the opt-in native runtime with `--features owned-byte-onnx`. To embed a
+private export into a standalone binary, additionally enable
+`embedded-owned-cached-byte` and provide the `LFG_EMBEDDED_OWNED_CACHED_DIR`,
+`LFG_EMBEDDED_OWNED_CACHED_MANIFEST_SHA256`, and
+`LFG_EMBEDDED_OWNED_CACHED_MAX_TOTAL_BYTES` build environment values. The
+build script verifies the manifest digest, graph hashes and configured total
+size before emitting the embedded byte arrays. Private graphs and build
+outputs must stay out of Git. Embedding the weights increases executable size
+by approximately the graph payload size and does not eliminate tract's runtime
+workspace or compilation memory.
+
+This embeds the cached manifest and two graph files only. The CLI still reads
+the pinned native runtime JSON and one JSONL request from the paths supplied at
+invocation. It does not embed the assessment framing, training manifest,
+service configuration, session token, or browser UI. The service still needs
+those private configuration files and an out-of-band token; embedded artifact
+mode only removes the graph directory dependency. To embed UI assets as well,
+build with `embedded-ui` and supply a built, reviewed UI distribution using
+`LFG_UI_DIST` (or build it at `ui/master-clyffy-web/dist`). A graph-only binary
+is therefore not the complete owner-facing standalone product.
+
+## Local release integration check
+
+On 2026-11-03, an isolated Linux release binary embedded the private cached
+graphs and a five-file UI distribution from source commit
+`c0e3efafa75ac085b729c828e825c06e0faf621f`. The staged UI archive SHA-256 was
+`a48124e345c0fdd9bbeed4a821a992661cbe084175ca5dc8ce8dcbba47dccd57`; the UI
+payload was 607,990 bytes. The resulting copied executable was 211,121,608
+bytes. From an empty working directory, its UI root and a JavaScript asset both
+returned HTTP 200, authenticated status was `ready`, and authenticated
+inference returned `ok` with `stop_sequence` in 32,085 ms server time / 32,099
+ms loopback client wall time. The output object matched the separately pinned
+private suffix-stopped reference exactly. Its checked field types were string
+for `intent` and `complexity`, array for `suggested_models` and `reasons`, and
+integer for `agent_count`; the model list was empty and the reasons array had
+13 entries. This checks artifact loading, stop-suffix handling, configured
+schema validation, and serving the embedded UI. It does not evaluate
+recommendation quality.
+
+The test binary needed the external service JSON, framing JSON, training
+manifest, runtime JSON, session token in the environment, and a private state
+directory. The request arrived over loopback. It needed no graph directory or
+UI directory at runtime and made no external network request. A network
+namespace was unavailable on the test host, so this was not a hard network
+isolation test. It was a Linux release build; Windows packaging and the
+owner-facing Windows executable remain unverified.
+
 ## Separate ONNX prefill and decode graphs
 
 `ml/lfg-encoder/export_owned_cached_onnx.py` exports a versioned experimental
