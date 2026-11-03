@@ -1,6 +1,7 @@
 """Fixture tests for private two-checkpoint byte evaluation."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,8 +17,14 @@ class CheckpointPairTests(unittest.TestCase):
         import train_owned_student as base
         from safetensors.torch import save
         import torch
+        from unittest.mock import patch
 
         self.subject, self.model_code, self.base = subject, owned_student, base
+        # Successful fixture runs exercise scoring while explicitly bypassing
+        # the platform guard; OutputSafetyTests verifies Windows fails closed.
+        self.output_guard = patch.object(subject, 'require_private_output_directory', lambda _path: None)
+        self.output_guard.start()
+        self.addCleanup(self.output_guard.stop)
         self.torch, self.save = torch, save
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -106,6 +113,54 @@ class CheckpointPairTests(unittest.TestCase):
         config_path.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError, 'checkpoint does not match'):
             self._evaluate(self.source, self.root / 'config-drift.json')
+
+    def test_rejects_non_boolean_completion_claims(self):
+        manifest_path, _weights_path, _config_path = self.left
+        original = json.loads(manifest_path.read_text())
+        for index, invalid in enumerate((0, 'no', None)):
+            manifest = dict(original, completed=invalid)
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'not complete'):
+                self._evaluate(self.source, self.root / f'incomplete-{index}.json')
+            self.assertFalse((self.root / f'incomplete-{index}.json').exists())
+        manifest_path.write_text(json.dumps(original))
+
+    def test_accepts_absent_completion_field_from_legacy_writer(self):
+        manifest_path, _weights_path, _config_path = self.left
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop('completed')
+        manifest_path.write_text(json.dumps(manifest))
+        result = self._evaluate(self.source, self.root / 'legacy-complete.json')
+        self.assertIsNone(result['left_checkpoint']['completed'])
+
+
+class OutputSafetyTests(unittest.TestCase):
+    def test_windows_fails_closed_before_reading_inputs_or_writing_output(self):
+        import evaluate_owned_checkpoint_pair as subject
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'must-not-exist.json'
+            with patch.object(subject, '_is_windows', return_value=True):
+                with self.assertRaisesRegex(ValueError, 'unavailable on Windows'):
+                    subject.evaluate(Path(temporary) / 'missing-config', Path(temporary) / 'missing-source',
+                        Path(temporary) / 'missing-policy', output, Path(temporary) / 'left-manifest',
+                        Path(temporary) / 'left-weights', Path(temporary) / 'left-config',
+                        Path(temporary) / 'right-manifest', Path(temporary) / 'right-weights',
+                        Path(temporary) / 'right-config')
+            self.assertFalse(output.exists())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX owner/mode checks are platform-specific')
+    def test_rejects_group_accessible_output_parent(self):
+        import evaluate_owned_checkpoint_pair as subject
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary) / 'public-parent'
+            parent.mkdir()
+            parent.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, 'must be owned and private'):
+                subject.require_private_output_directory(parent / 'report.json')
+            self.assertFalse((parent / 'report.json').exists())
 
 
 if __name__ == '__main__':

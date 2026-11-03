@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import statistics
+import stat
 import time
 
 import torch
@@ -37,6 +38,37 @@ def strict_json(raw: bytes) -> object:
         raise ValueError('invalid JSON numeric value')
 
     return json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=reject_constant)
+
+
+def _is_windows() -> bool:
+    return os.name == 'nt'
+
+
+def require_private_output_directory(output: Path) -> None:
+    """Require a protected POSIX parent chain; Windows ACL creation is not implemented."""
+    if _is_windows():
+        raise ValueError('private output ACL verification is unavailable on Windows')
+    absolute = Path(os.path.abspath(output))
+    if absolute.exists() or absolute.is_symlink():
+        raise ValueError('output already exists')
+    parent = absolute.parent
+    chain = []
+    while True:
+        chain.append(parent)
+        if parent.parent == parent:
+            break
+        parent = parent.parent
+    uid = os.getuid()
+    for index, directory in enumerate(reversed(chain)):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError('output path contains a non-directory component')
+        if index == len(chain) - 1:
+            if info.st_uid != uid or (info.st_mode & 0o077):
+                raise ValueError('output parent must be owned and private to this account')
+        elif (info.st_uid not in (0, uid)
+              or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise ValueError('output path has an unsafe writable ancestor')
 
 
 def load_config(path: Path) -> tuple[dict, str]:
@@ -80,7 +112,8 @@ def load_checkpoint(manifest_path: Path, weights_path: Path, student_config_path
     model, identity = byte_eval.load_student(manifest_path, weights_path,
         'lfg.owned-distillation-result.v1', config, code_sha)
     manifest = strict_json(base.read_bounded(manifest_path, config['max_manifest_bytes']))
-    if manifest.get('completed') is False or manifest.get('teacher_distillation_performed') is not True:
+    if (('completed' in manifest and manifest['completed'] is not True)
+            or manifest.get('teacher_distillation_performed') is not True):
         raise ValueError('checkpoint is not complete')
     steps = manifest.get('steps')
     tokens = manifest.get('tokens_processed')
@@ -144,9 +177,8 @@ def evaluate(config_path: Path, source_path: Path, policy_path: Path, output: Pa
              left_manifest: Path, left_weights: Path, left_student_config: Path,
              right_manifest: Path, right_weights: Path, right_student_config: Path) -> dict:
     evaluation_started = time.perf_counter()
+    require_private_output_directory(output)
     config, config_sha = load_config(config_path)
-    if output.exists():
-        raise ValueError('output already exists')
     byte_eval.private_output(output)
     source_raw = base.read_bounded(source_path, config['max_data_bytes'])
     policy_raw = base.read_bounded(policy_path, config['max_policy_bytes'])
@@ -204,7 +236,8 @@ def evaluate(config_path: Path, source_path: Path, policy_path: Path, output: Pa
               'byte_modeling_only': True, 'assessment_evaluated': False,
               'project_independence': 'unknown', 'semantic_independence': 'unknown',
               'training_histories_comparison': 'not_performed', 'promotion_eligible': False}
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    require_private_output_directory(output)
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(descriptor, 'wb') as stream:
         stream.write((json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + '\n').encode())
     return report
