@@ -49,6 +49,8 @@ mod local_access;
 #[cfg(feature = "onnx-shadow")]
 pub mod onnx_embedding;
 mod owned_assessment;
+#[cfg(feature = "owned-byte-onnx")]
+pub mod owned_cached;
 mod project_attunement;
 use dev_stats::{DevStats, Operation};
 
