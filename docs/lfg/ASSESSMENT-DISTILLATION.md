@@ -40,6 +40,17 @@ normalized request cannot appear twice, including across splits. Teacher
 responses are preserved as supplied; the tool does not invent missing answers.
 The source reference and original-source SHA-256 are supplied claims for later
 traceability; this builder does not open the original source or verify them.
+Additional trace fields are accepted as extensions and copied unchanged under
+`metadata.trace_extensions`. When `project_context_sha256` and
+`project_context_byte_length` are present, the builder verifies the exact UTF-8
+context prefix and its delimiter before preparing the request. It deduplicates
+on both the rendered and underlying request after removing that verified
+prefix, so contextual and legacy rows cannot hide a normalized duplicate
+across splits. Context-bearing traces must carry `teacher_system_sha256`
+matching the plan's exact system prompt bytes. Plan and source objects still
+use their current exact schemas;
+unknown fields on those objects are rejected. Unknown trace extensions are
+preserved but do not affect behavior.
 
 Create a private JSON plan alongside the source. A minimal train-only plan has
 this structure; replace every uppercase placeholder and set resource limits to

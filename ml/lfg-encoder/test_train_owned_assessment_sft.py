@@ -32,13 +32,19 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
             'schema_version': 'lfg.owned-student-experiment-result.v1', 'architecture': self.architecture,
             'weights_sha256': sha(weights.read_bytes()),
             'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}))
-        trace = {'id': 'fixture', 'request': 'Fixture prompt', 'response': 'Fixture teacher response',
+        context_text = 'P \u03b1'
+        trace = {'id': 'fixture', 'request': context_text + '\n\nQ',
+                 'project_context_sha256': hashlib.sha256(context_text.encode()).hexdigest(),
+                 'project_context_byte_length': len(context_text.encode()),
+                 'teacher_system_sha256': hashlib.sha256(b'Assess the supplied request.').hexdigest(),
+                 'project_context_extensions': {'custom_extension': 'preserve-me'},
+                 'response': 'Fixture teacher response',
                  'teacher': 'fixture', 'review_status': 'unreviewed', 'outcome': 'unknown',
                  'source_ref': 'fixture', 'source_sha256': 'a' * 64}
         source = self.root / 'trace.jsonl'
         source.write_text(json.dumps(trace) + '\n')
         plan = {'schema_version': assessment_distill.PLAN_SCHEMA, 'revision': 'fixture', 'task': 'fixture',
-                'system_prompt': 'Fixture system', 'authorization_attestation': 'fixture',
+                'system_prompt': 'Assess the supplied request.', 'authorization_attestation': 'fixture',
                 'redaction_attestation': 'fixture', 'forbidden_literals': [], 'include_outcomes': ['unknown'],
                 'max_source_bytes': 8192, 'max_total_bytes': 8192, 'max_examples': 1,
                 'sources': [{'path': source.name, 'sha256': sha(source.read_bytes()), 'project': 'fixture',
@@ -54,6 +60,34 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
                            max_parameters=100000, cpu_threads=1)
         self.config_path = self.root / 'config.json'
         self.write_config()
+
+    def test_training_prompt_preserves_rendered_context_bytes(self):
+        records, _, _, coverage = self.subject.read_training(self.dataset, self.config)
+        expected = (self.config['framing']['system_prefix'] + 'Assess the supplied request.'
+                    + self.config['framing']['system_suffix'] + self.config['framing']['user_prefix']
+                    + 'P \u03b1\n\nQ'
+                    + self.config['framing']['user_suffix']
+                    + self.config['framing']['assistant_prefix']).encode('utf-8')
+        self.assertTrue(records[0]['bytes'].startswith(expected))
+        self.assertEqual(records[0]['response_start'], len(expected))
+        self.assertEqual(coverage['selected'], 1)
+        self.assertEqual(coverage['system_sha256'], hashlib.sha256(b'Assess the supplied request.').hexdigest())
+        self.assertEqual(coverage['framing_sha256'], self.subject.framing_sha256(self.config['framing']))
+
+    def test_training_rejects_mixed_system_prompts(self):
+        manifest_path = self.dataset / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        train_path = self.dataset / 'train.jsonl'
+        rows = [json.loads(line) for line in train_path.read_bytes().splitlines()]
+        second = json.loads(json.dumps(rows[0]))
+        second['id'] = 'fixture-2'
+        second['messages'][0]['content'] += ' changed'
+        raw = b''.join((json.dumps(row, sort_keys=True) + '\n').encode() for row in (rows[0], second))
+        train_path.write_bytes(raw)
+        manifest['files']['train.jsonl'] = hashlib.sha256(raw).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'different system prompts'):
+            self.subject.read_training(self.dataset, self.config)
 
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config))
@@ -93,6 +127,8 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
         b = self.subject.experiment(self.dataset, self.checkpoint, self.config_path, self.root / 'second')
         self.assertEqual(a['weights_sha256'], b['weights_sha256'])
         self.assertEqual(a['losses'], b['losses'])
+        self.assertEqual(a['system_sha256'], hashlib.sha256(b'Assess the supplied request.').hexdigest())
+        self.assertEqual(a['framing_sha256'], self.subject.framing_sha256(self.config['framing']))
         self.assertEqual(a['position_rows_reused'], 8)
         self.assertEqual(a['position_rows_initialized'], 120)
         self.assertGreater(a['supervised_tokens'], 0)
