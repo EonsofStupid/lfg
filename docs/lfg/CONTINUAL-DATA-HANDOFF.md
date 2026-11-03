@@ -55,6 +55,11 @@ records or labels. Loss is a training statistic, not assessment accuracy.
 The example [evaluator service](../../ml/lfg-encoder/systemd/owned-update-evaluator.service.example)
 runs independently from the training queue.
 
+The dashboard can also display a separately configured training status via
+`--additional-status`. It exposes only the same bounded, sanitized progress
+fields as the primary status. The lab's teacher panel can point at the
+currently selected collection rather than a completed earlier batch.
+
 ## Local deployment evidence
 
 The owner's lab and `clyffy-03` Spark use an authenticated dataset-only HTTPS
