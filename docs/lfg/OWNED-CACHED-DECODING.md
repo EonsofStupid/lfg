@@ -78,8 +78,9 @@ One private local experiment used the owner-authorized 573-byte and 603-byte
 framed development inputs with the actual private checkpoint (context 4,352,
 width 512, eight layers). ONNX Runtime 1.31.1 with one CPU thread checked
 prefill lengths 1, 4, 32, 64, and 573, plus four greedy decode steps for each
-input, against both references. Greedy bytes matched exactly; maximum absolute
-logit and cache differences were 1.82e-5 and 1.05e-5 respectively. Median
+input, against both references. Later greedy-byte choices matched, but the original
+check did not independently compare the first choice; maximum absolute logit and
+cache differences were 1.82e-5 and 1.05e-5 respectively. Median
 prefill times were 388.6 ms and 367.0 ms. Median four-byte decode batches were
 34.4 ms and 30.8 ms (8.60 ms and 7.70 ms per byte). This run used no warmup and
 three repeats. It did not measure a full-prefix timing baseline, evaluate
