@@ -60,3 +60,25 @@ from it. Exact matching describes recorded execution settings only, and does not
 establish which settings were optimal or that a task succeeded.
 Two runs with the same inputs, code and Python version produced identical
 output bytes. That local check does not establish cross-platform reproducibility.
+
+## Source-bound current provider snapshot
+
+`source_bound_snapshot.py` separately verifies one selected Codex user-message
+line and its exact prefix digest, then records the current `models_cache.json`
+digest, fetched time, listed IDs, descriptions, and provider-supported effort
+fields. Model rows are compared against the reconstructed cache on
+revalidation, and provider extension strings are screened with the configured
+policy before private persistence. Session exclusion identity is based on a
+canonical project-label-independent path; the inventory's project association
+is explicitly unverified. A full session-file digest may drift when later log events append; the
+snapshot keeps that inventory-time claim separate from the current whole-file
+digest, which is unknown. The selected prefix and line must still verify.
+
+`exploratory_train` is an explicit collection assignment when no reserved final
+test has been independently verified. It leaves `heldout_separation`, paid
+entitlement, and historical effort unknown. The collector's source-bound
+preflight binds the staged projection, one request, context, policy, and
+selection manifest before any teacher call. Staging omits full source paths,
+unselected cache extensions, and all validation/test data. See
+[local teacher collection](LOCAL-ASSESSMENT-TEACHER.md) for the privacy and
+remaining evaluation limits.
