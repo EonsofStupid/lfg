@@ -309,7 +309,7 @@ conformance and access-boundary tests.
 The Spark is accessible as `clyffy-03`. An owned 19,264,512-parameter
 byte model completed 100,000 pretraining steps on the screened owner corpus;
 its 349-proposal assessment fine-tune also completed. The lab publisher
-delivered a 369-proposal superset and its subsequent fine-tune has started. The
+delivered a 369-proposal superset and its subsequent fine-tune also completed. The
 persistent services, dataset boundaries, evaluation and dashboard are
 described in [the training service](CONTINUOUS-TRAINING-SERVICE.md) and
 [the continual handoff](CONTINUAL-DATA-HANDOFF.md). All proposals have unknown
@@ -321,8 +321,8 @@ remain future work.
 
 The next execution sequence is:
 
-1. Investigate the first assessment format failures and observe the running
-   369-record update and its own development report. Investigate service failures
+1. Investigate the first assessment format failures and observe the completed
+   369-record update's development report. Investigate service failures
    and preserve checkpoint and dataset lineage; do not treat JSON formatting
    as recommendation accuracy.
 2. Expand authorized train sources with provenance and secret screening;

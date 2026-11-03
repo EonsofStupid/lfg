@@ -184,7 +184,8 @@ displays the resulting aggregate format count when the report is available.
 Each teacher collection is a finite, resumable job. The configured
 [continual data handoff](CONTINUAL-DATA-HANDOFF.md) publishes completed
 collections and queues new datasets; the live first update on the 369-record
-dataset started after the initial assessment model completed. The completed
+dataset completed after the initial assessment model. Its separate format
+evaluation started and the queue returned to idle. The completed
 earlier assessment services used
 the prior trainer implementation; the final-checkpoint recovery improvement
 applies to new jobs, not migrations of their pinned checkpoints.

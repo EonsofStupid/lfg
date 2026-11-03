@@ -66,9 +66,9 @@ publisher delivered to the Spark inbox after a manual service trigger; its
 periodic timer is enabled. The queue verified that
 it contains the prior 349 records and measured the required context. The
 initial 349-record assessment fine-tune completed. The queue picked up
-the 369-record dataset and started the subsequent fine-tune, reaching its
-first 200-step checkpoint with all 369 examples fitting the configured context.
-That update and its evaluation have not yet completed.
+the 369-record dataset and completed the subsequent 5,000-step fine-tune,
+with all 369 examples fitting the configured context. The queue returned to
+idle and its separate development-format evaluation started.
 
 The transfer receiver, publisher, queue restart behavior and independent
 evaluator were tested with isolated software fixtures; those fixtures are not
