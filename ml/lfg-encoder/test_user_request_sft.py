@@ -255,6 +255,27 @@ class UserRequestSFTTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(coverage['selected'], 1)
 
+    def test_matched_effort_linked_to_negated_model_remains_unknown(self):
+        caller = json.loads(self.caller_input_path.read_bytes())
+        caller['relations']['items'] = [
+            {'model_span_id': 'span-2'},
+            {'model_span_id': 'span-4', 'effort_span_id': 'span-3'},
+            {'model_span_id': 'span-5'},
+        ]
+        self.caller_input_path.write_text(json.dumps(caller), encoding='utf-8')
+        self._build()
+        envelope = json.loads((self.root / 'dataset.json').read_bytes())
+        target = json.loads(envelope['train_records'][0]['messages'][2]['content'])
+        self.assertEqual(target['requested'][1], {'model_id': 'provider/model-q', 'polarity': 'negated'})
+        self.assertIn({'field': 'effort', 'mention': 'high', 'status': 'model_not_affirmed'}, target['unknown'])
+        import train_owned_assessment_sft as trainer
+        config = json.loads(Path(trainer.__file__).with_name('owned-user-request-sft.example.json').read_bytes())
+        config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+                      max_parameters=100_000, max_attention_elements=100_000)
+        records, _, _, coverage = trainer.read_training(self.root / 'dataset.json', config)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(coverage['selected'], 1)
+
     def test_config_and_caller_extensions_are_inert_bounded_and_screened(self):
         caller = json.loads(self.caller_input_path.read_bytes())
         caller['safe_note'] = {'owner_comment': 'safe fixture value'}

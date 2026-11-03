@@ -32,6 +32,11 @@ materialized as negative candidate labels. If screening would alter source
 text, this span-bound builder refuses the record rather than risk offset drift.
 The provider candidate projection is screened before storage.
 
+An effort span linked to a negated model is retained as
+`model_not_affirmed` unknown: this task does not claim the effort is a positive
+setting for a model the caller explicitly negated. An effort linked to quoted
+or uncertain model polarity remains `model_polarity_unknown`.
+
 The dataset records the selected verified source identity (or a separately
 verified POSIX projection identity), line, prompt, provider-cache, relation,
 target, screening-policy, adapter and framing digests. It explicitly retains

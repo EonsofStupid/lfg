@@ -122,6 +122,20 @@ def _span_ref(span: dict, text: bytes, field: str, status: str) -> dict:
             'start_byte': start, 'end_byte': end, 'status': status}
 
 
+def _unknown_effort_status(row: dict) -> str:
+    polarity = row['effort_span']['polarity']
+    if polarity in ('quoted', 'uncertain'):
+        return polarity
+    if row['effort_match_status'] != 'matched':
+        return row['effort_match_status']
+    model_polarity = row['model_span']['polarity']
+    if model_polarity == 'negated':
+        return 'model_not_affirmed'
+    if model_polarity in ('quoted', 'uncertain'):
+        return 'model_polarity_unknown'
+    return 'model_not_affirmed'
+
+
 def _sparse_target(target: dict, provider_models: list[dict], observation: dict,
                    raw_request: str) -> tuple[dict, list[dict], list[dict], list[dict]]:
     """Emit explicit requests plus labeled abstentions for annotated unknowns."""
@@ -149,8 +163,7 @@ def _sparse_target(target: dict, provider_models: list[dict], observation: dict,
                             'supported_efforts': candidate['provider_supported_efforts']})
             if row['effort_span'] is not None:
                 effort = span_by_id[row['effort_span']['id']]
-                effort_status = (row['effort_span']['polarity'] if row['effort_span']['polarity'] in ('quoted', 'uncertain')
-                                 else row['effort_match_status'])
+                effort_status = _unknown_effort_status(row)
                 effort_ref = _span_ref(effort, request_bytes, 'effort', effort_status)
                 unknown.append({'field': 'effort', 'mention': request_bytes[
                     effort_ref['start_byte']:effort_ref['end_byte']].decode('utf-8'),
@@ -187,8 +200,7 @@ def _sparse_target(target: dict, provider_models: list[dict], observation: dict,
                      'effort_polarity': None if row['effort_span'] is None else row['effort_span']['polarity']})
         if row['effort_span'] is not None and 'effort' not in request:
             effort = span_by_id[row['effort_span']['id']]
-            effort_status = (row['effort_span']['polarity'] if row['effort_span']['polarity'] in ('quoted', 'uncertain')
-                             else row['effort_match_status'])
+            effort_status = _unknown_effort_status(row)
             effort_ref = _span_ref(effort, request_bytes, 'effort', effort_status)
             unknown.append({'field': 'effort', 'mention': request_bytes[
                 effort_ref['start_byte']:effort_ref['end_byte']].decode('utf-8'),

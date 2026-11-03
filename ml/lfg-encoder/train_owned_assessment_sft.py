@@ -487,7 +487,8 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
             if ('effort' in requested
                     and requested['effort'] not in candidate_by_id[requested['model_id']]['supported_efforts']):
                 raise ValueError('effort output is absent from the pinned provider candidate projection')
-        allowed_unknown_statuses = {'unmatched', 'ambiguous', 'requires_redaction', 'quoted', 'uncertain', 'model_unresolved'}
+        allowed_unknown_statuses = {'unmatched', 'ambiguous', 'requires_redaction', 'quoted', 'uncertain',
+                                    'model_unresolved', 'model_not_affirmed', 'model_polarity_unknown'}
         for item, ref in zip(target['unknown'], metadata['unknown_span_refs'], strict=True):
             if (not isinstance(item, dict) or set(item) != {'field', 'mention', 'status'}
                     or item.get('field') not in ('model', 'effort')
