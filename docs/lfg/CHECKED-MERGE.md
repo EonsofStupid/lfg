@@ -19,6 +19,10 @@ failed or cancelled required job cannot satisfy this gate. A failed CI run or
 timeout leaves the PR open; after fixing or rerunning CI, rerun checked merge
 or reapply the label. If the base changes, update the branch or rerun verification.
 
+Agents must not use `gh pr merge` directly, including `--auto`. On this
+repository GitHub can merge immediately without waiting for CI. Use the
+`ready-to-auto-merge` checked workflow even when GitHub permits a direct merge.
+
 The private repository currently has no branch protection: this workflow does
 not prevent another actor from merging directly, and the base check and merge
 are separate GitHub operations, leaving a small race if `main` changes between

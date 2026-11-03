@@ -2,13 +2,35 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+const EXECUTABLE_BUSY_RETRIES: usize = 40;
+const EXECUTABLE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
+
+fn retry_executable_busy<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for attempt in 0..=EXECUTABLE_BUSY_RETRIES {
+        match operation() {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    && attempt < EXECUTABLE_BUSY_RETRIES =>
+            {
+                thread::sleep(EXECUTABLE_BUSY_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final attempt returns without retrying")
+}
+
+fn spawn(command: &mut Command) -> io::Result<Child> {
+    retry_executable_busy(|| command.spawn())
+}
 
 struct Server(Child);
 impl Drop for Server {
@@ -43,7 +65,7 @@ fn start(root: &Path, external_ui: Option<&Path>) -> (Server, u16) {
     if let Some(path) = external_ui {
         command.env("MASTER_CLYFFY_UI_DIR", path);
     }
-    let mut server = Server(command.spawn().unwrap());
+    let mut server = Server(spawn(&mut command).unwrap());
     let deadline = Instant::now() + Duration::from_secs(10);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(
@@ -114,4 +136,47 @@ fn explicitly_configured_ui_overrides_embedded_assets() {
     fs::write(ui.join("index.html"), "custom ui").unwrap();
     let (_server, port) = start(temp.path(), Some(&ui));
     assert_eq!(get(port, "GET", "/").2, b"custom ui");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn copied_binary_waits_for_a_transient_executable_write_handle() {
+    use std::fs::OpenOptions;
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp
+        .path()
+        .join(format!("lfg-server{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_lfg-server"), &executable).unwrap();
+
+    let held_write_handle = OpenOptions::new().write(true).open(&executable).unwrap();
+    let error = Command::new(&executable).arg("--help").spawn().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::ExecutableFileBusy);
+
+    let release = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        drop(held_write_handle);
+    });
+    let mut command = Command::new(&executable);
+    command
+        .arg("--help")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = spawn(&mut command).unwrap();
+    assert!(child.wait().unwrap().success());
+    release.join().unwrap();
+}
+
+#[test]
+fn executable_busy_retry_does_not_retry_other_spawn_errors() {
+    use std::cell::Cell;
+
+    let calls = Cell::new(0);
+    let error = retry_executable_busy(|| {
+        calls.set(calls.get() + 1);
+        Err::<(), _>(io::Error::new(io::ErrorKind::PermissionDenied, "fixture"))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(calls.get(), 1);
 }
