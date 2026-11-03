@@ -24,12 +24,27 @@ export type OwnedResult = {
   stopReason?: string | null
   outputText?: string | null
   output?: Record<string, unknown> | null
+  projectContextSha256?: string | null
   [key: string]: unknown
 }
 
+export type OwnedProjectContext = { context: string; contextSha256: string; [key: string]: unknown }
+
 export type OwnedAssessmentClient = {
   status: (token: string) => Promise<OwnedStatus>
-  assess: (text: string, token: string) => Promise<OwnedResult>
+  assess: (text: string, token: string, context?: OwnedProjectContext) => Promise<OwnedResult>
+}
+
+export function ownedAssessmentBody(text: string, context?: OwnedProjectContext): Record<string, unknown> {
+  if (context === undefined) return { text }
+  const { context: suppliedContext, contextSha256, ...extensions } = context
+  return { ...extensions, context: suppliedContext, contextSha256, text }
+}
+
+export async function sha256Utf8(text: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error('A secure local browser context is required to identify project context bytes.')
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 async function request<T>(path: string, token: string, body?: unknown): Promise<T> {
@@ -48,5 +63,5 @@ async function request<T>(path: string, token: string, body?: unknown): Promise<
 
 export const ownedAssessmentClient: OwnedAssessmentClient = {
   status: (token) => request('/api/lfg/assess/owned/status', token),
-  assess: (text, token) => request('/api/lfg/assess/owned', token, { text }),
+  assess: (text, token, context) => request('/api/lfg/assess/owned', token, ownedAssessmentBody(text, context)),
 }

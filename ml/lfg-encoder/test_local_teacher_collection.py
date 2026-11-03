@@ -10,6 +10,8 @@ import unicodedata
 from unittest.mock import patch
 
 import assessment_distill
+import inventory_codex_sessions as codex_inventory
+import source_bound_snapshot
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ('torch', 'safetensors'))
 if AVAILABLE:
@@ -72,6 +74,71 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             selection.select(self.dataset, self.policy, self.selection_config, self.root / 'bad')
 
+    def test_collector_rejects_heldout_manifest_before_opening_requests(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        context_text = 'should not be opened'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'projects': {'a': {'text': context_text, 'sha256': hashlib.sha256(context_text.encode()).hexdigest()}}}))
+        manifest_path = self.selected / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest['validation_opened'] = True
+        manifest_path.write_bytes(selection.encoded(manifest))
+        opened = []
+        original_read = collector.screen._read
+        def record_read(path, *args, **kwargs):
+            opened.append(Path(path).name)
+            return original_read(path, *args, **kwargs)
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), \
+                patch.object(collector.screen, '_read', side_effect=record_read), patch.object(
+                collector.project_context, 'load', side_effect=AssertionError('must not open context')) as load_context:
+            with self.assertRaisesRegex(ValueError, 'selected request identity'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+        load_context.assert_not_called()
+        self.assertNotIn('requests.jsonl', opened)
+        self.assertFalse(self.output.exists())
+
+    def test_collector_rejects_non_train_rows_before_opening_context(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        request_path = self.selected / 'requests.jsonl'
+        rows = [json.loads(line) for line in request_path.read_bytes().splitlines()]
+        rows[0]['split'] = 'validation'
+        request_raw = b''.join(selection.encoded(row) for row in rows)
+        request_path.write_bytes(request_raw)
+        manifest_path = self.selected / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest['requests_sha256'] = selection.sha(request_raw)
+        manifest_path.write_bytes(selection.encoded(manifest))
+        context_file = self.root / 'project-context.json'
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector.project_context, 'load', side_effect=AssertionError('must not open context')) as load_context:
+            with self.assertRaisesRegex(ValueError, 'invalid selected train request'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+        load_context.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_collector_rechecks_selection_manifest_after_request_read(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        manifest_path = self.selected / 'manifest.json'
+        original_read = collector.screen._read
+        changed = False
+        def race_manifest(path, *args, **kwargs):
+            nonlocal changed
+            value = original_read(path, *args, **kwargs)
+            if Path(path).name == 'requests.jsonl' and not changed:
+                manifest_path.write_bytes(selection.encoded({'schema_version': 'lfg.teacher-request-selection-result.v1',
+                    'requests_sha256': '0' * 64, 'validation_opened': False, 'test_opened': False}))
+                changed = True
+            return value
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector.screen, '_read', side_effect=race_manifest):
+            with self.assertRaisesRegex(ValueError, 'selected request identity'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output)
+        self.assertTrue(changed)
+        self.assertFalse(self.output.exists())
+
     def test_selection_can_exclude_requests_collected_in_an_earlier_batch(self):
         config = json.loads(self.selection_config.read_text())
         config['exclude_ids'] = ['id-0', 'id-1']
@@ -84,18 +151,28 @@ class LocalTeacherCollectionTests(unittest.TestCase):
     def test_split_preserves_and_revalidates_completed_records(self):
         import split_teacher_collection
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        context_text = 'bounded project context'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'projects': {name: {'text': context_text, 'sha256': hashlib.sha256(context_text.encode()).hexdigest()}
+                         for name in ('a', 'b')}}))
         response = '{"intent":"x","complexity":"unknown"}'
         with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}):
             with patch.object(collector, 'ask', side_effect=[response, ValueError('incomplete')]):
                 with self.assertRaises(ValueError):
-                    collector.collect(self.selected, self.collection_config, self.policy, self.output)
+                    collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                      project_context_path=context_file)
             dest = self.root / 'split'
-            report = split_teacher_collection.split(self.selected, self.collection_config, self.policy, self.output, dest)
+            with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                split_teacher_collection.split(self.selected, self.collection_config, self.policy, self.output,
+                                                self.root / 'split-without-context')
+            report = split_teacher_collection.split(self.selected, self.collection_config, self.policy, self.output, dest,
+                                                    project_context_path=context_file)
             self.assertEqual(report['completed_prefix'], 1)
             self.assertEqual(report['remaining'], 0)
             with patch.object(collector, 'ask', side_effect=AssertionError('must reuse saved record')):
                 result = collector.collect(dest / 'prefix-selection', self.collection_config, self.policy,
-                                           dest / 'prefix-output', resume=True)
+                                           dest / 'prefix-output', resume=True, project_context_path=context_file)
             self.assertEqual(result['requests'], 1)
             self.assertFalse(result['promotion_eligible'])
 
@@ -200,6 +277,246 @@ class LocalTeacherCollectionTests(unittest.TestCase):
         self.collection_config.write_text(json.dumps(self.config))
         with self.assertRaisesRegex(ValueError, 'reserved'):
             collector.config_file(self.collection_config)
+
+    def test_project_context_bytes_are_sent_and_saved_for_sft(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        project = 'project facts'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'top_extension': 'file-retained',
+            'projects': {'a': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest(),
+                               'custom_extension': 'preserve-me'},
+                         'b': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest(),
+                               'custom_extension': 'preserve-me'}}}))
+        sent = []
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=lambda config, text, key: sent.append(
+                    (config['system_prompt'], text)) or
+                '{"intent":"x","complexity":"unknown"}'):
+            report = collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                       project_context_path=context_file)
+        self.assertEqual(report['requests'], 2)
+        traces = [json.loads(path.read_text()) for path in sorted((self.output / 'records').glob('*.json'))]
+        rendered = {trace['trace']['request'] for trace in traces}
+        self.assertEqual(rendered, {text for _, text in sent})
+        self.assertEqual(len(rendered), 2)
+        self.assertTrue(all(system == self.config['system_prompt'] for system, _ in sent))
+        self.assertTrue(all(text.startswith(project + '\n\nFixture request ') for text in rendered))
+        self.assertTrue(all(trace['trace']['project_context_sha256'] == hashlib.sha256(project.encode()).hexdigest()
+                            for trace in traces))
+        self.assertTrue(all(trace['trace']['project_context_extensions'] == {'custom_extension': 'preserve-me'}
+                            for trace in traces))
+        self.assertTrue(all(trace['trace']['project_context_file_extensions'] == {'top_extension': 'file-retained'}
+                            for trace in traces))
+        self.assertTrue(all(trace['trace']['teacher_system_sha256'] ==
+                            hashlib.sha256(self.config['system_prompt'].encode()).hexdigest() for trace in traces))
+        plan_path = self.output / 'distill-plan.json'
+        plan_path.write_text(json.dumps({'schema_version': assessment_distill.PLAN_SCHEMA, 'revision': 'fixture',
+            'task': 'context-contract', 'system_prompt': self.config['system_prompt'],
+            'authorization_attestation': 'fixture', 'redaction_attestation': 'fixture',
+            'forbidden_literals': [], 'include_outcomes': ['unknown'], 'max_source_bytes': 65536,
+            'max_total_bytes': 131072, 'max_examples': 10,
+            'sources': [{key: item[key] for key in ('path', 'sha256', 'project', 'project_group', 'split', 'origin')}
+                        for item in report['files']]}))
+        prepared = self.root / 'prepared'
+        assessment_distill.build(plan_path, prepared)
+        prepared_rows = [json.loads(line) for line in (prepared / 'train.jsonl').read_text().splitlines()]
+        self.assertEqual({row['messages'][1]['content'] for row in prepared_rows}, rendered)
+        self.assertTrue(all(row['metadata']['trace_extensions']['project_context_sha256']
+                            == hashlib.sha256(project.encode()).hexdigest() for row in prepared_rows))
+        self.assertTrue(all(row['metadata']['trace_extensions']['project_context_extensions']
+                            == {'custom_extension': 'preserve-me'} for row in prepared_rows))
+        self.assertTrue(all(row['metadata']['trace_extensions']['project_context_file_extensions']
+                            == {'top_extension': 'file-retained'} for row in prepared_rows))
+        self.assertTrue(all(row['metadata']['trace_extensions']['teacher_system_sha256'] ==
+                            hashlib.sha256(self.config['system_prompt'].encode()).hexdigest() for row in prepared_rows))
+        import train_owned_assessment_sft
+        training_config = json.loads(Path(train_owned_assessment_sft.__file__).with_name(
+            'owned-assessment-sft.example.json').read_text())
+        training_rows, _, _, _ = train_owned_assessment_sft.read_training(prepared, training_config)
+        expected_prefix = (training_config['framing']['system_prefix'] + self.config['system_prompt']
+                           + training_config['framing']['system_suffix'] + training_config['framing']['user_prefix']).encode()
+        self.assertTrue(all(row['bytes'].startswith(expected_prefix + text.encode() +
+                            training_config['framing']['user_suffix'].encode() +
+                            training_config['framing']['assistant_prefix'].encode()) for row, text in zip(
+                                training_rows, sorted(rendered), strict=True)))
+
+    def _source_bound_inputs(self):
+        if os.name != 'posix':
+            self.skipTest('source-bound source reads require POSIX no-follow traversal')
+        source_root = self.root / 'bound-project'
+        source_root.mkdir()
+        session = self.root / 'bound-session.jsonl'
+        message = {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                   'content': [{'type': 'input_text', 'text': 'Please assess fixture-model.'}],
+                   'internal_chat_message_metadata_passthrough': {'content_item_kinds': ['user.text']}}}
+        session.write_text(json.dumps({'type': 'session_meta', 'payload': {'cwd': str(source_root)}}) + '\n'
+                           + json.dumps(message) + '\n', encoding='utf-8')
+        state, rows = codex_inventory.scan_file(session, {'a': codex_inventory.normalize(str(source_root))},
+                                                65536, 65536)
+        self.assertEqual(state, 'scanned')
+        record = rows[0]
+        provider = self.root / 'provider-cache.json'
+        provider.write_text(json.dumps({'fetched_at': '2026-11-03T10:00:00Z', 'models': [
+            {'slug': 'fixture-model', 'display_name': 'Fixture Model', 'description': 'Fixture teacher model',
+             'visibility': 'list', 'supported_reasoning_levels': [{'effort': 'low'}]}]}), encoding='utf-8')
+        value = source_bound_snapshot.build_snapshot(record, provider, split_policy='exploratory_train',
+                                                     screen_policy_path=self.policy)
+        manifest, row, context, request_raw, manifest_raw, context_raw, projection_raw, bundle_raw = (
+            source_bound_snapshot.prepare_single_request(value, policy_path=self.policy,
+                                                        max_request_bytes=2000, max_context_bytes=2000))
+        self.selected.mkdir()
+        (self.selected / 'requests.jsonl').write_bytes(request_raw)
+        (self.selected / 'manifest.json').write_bytes(manifest_raw)
+        context_path = self.root / 'bound-context.json'
+        context_path.write_bytes(context_raw)
+        snapshot_path = self.root / 'snapshot-projection.json'
+        snapshot_path.write_bytes(projection_raw)
+        bundle_path = self.root / 'bundle.json'
+        bundle_path.write_bytes(bundle_raw)
+        return context_path, snapshot_path, bundle_path, row, context
+
+    def test_source_bound_collector_revalidates_copy_and_preserves_link(self):
+        context_path, snapshot_path, bundle_path, row, context = self._source_bound_inputs()
+        sent = []
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=lambda config, text, key: sent.append(text) or
+                '{"intent":"x","complexity":"unknown"}'):
+            result = collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                       project_context_path=context_path,
+                                       source_bound_snapshot_path=snapshot_path,
+                                       source_bound_bundle_path=bundle_path)
+        self.assertEqual(result['requests'], 1)
+        trace = json.loads(next((self.output / 'records').glob('*.json')).read_text())['trace']
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(trace['source_bound_snapshot_sha256'])
+        self.assertTrue(trace['source_bound_bundle_sha256'])
+        self.assertEqual(trace['project_context_extensions']['source_bound_snapshot_sha256'],
+                         row['source_bound_snapshot_sha256'])
+        self.assertEqual(trace['project_context_extensions']['source_text_sha256_claim'],
+                         row['source_text_sha256_claim'])
+        self.assertEqual(context['projects']['a']['heldout_separation'], 'unknown')
+        self.assertEqual(trace['outcome'], 'unknown')
+        self.assertEqual(trace['review_status'], 'unreviewed')
+
+    def test_tampered_source_bound_bundle_fails_before_teacher_call(self):
+        context_path, snapshot_path, bundle_path, _row, _context = self._source_bound_inputs()
+        bundle = json.loads(bundle_path.read_bytes())
+        bundle['requests_sha256'] = '0' * 64
+        bundle_path.write_text(json.dumps(bundle), encoding='utf-8')
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=AssertionError('must not call teacher')):
+            with self.assertRaisesRegex(ValueError, 'bundle digest'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_path,
+                                  source_bound_snapshot_path=snapshot_path,
+                                  source_bound_bundle_path=bundle_path)
+        self.assertFalse(self.output.exists())
+
+    def test_source_bound_non_train_selection_never_opens_snapshot_or_context(self):
+        context_path, snapshot_path, bundle_path, _row, _context = self._source_bound_inputs()
+        request_path = self.selected / 'requests.jsonl'
+        request = json.loads(request_path.read_bytes())
+        request['split'] = 'test'
+        request_raw = selection.encoded(request)
+        request_path.write_bytes(request_raw)
+        manifest_path = self.selected / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest['requests_sha256'] = selection.sha(request_raw)
+        manifest_path.write_bytes(selection.encoded(manifest))
+        opened = []
+        original = collector.screen._read
+        def tracked(path, *args, **kwargs):
+            opened.append(Path(path).resolve())
+            return original(path, *args, **kwargs)
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), \
+                patch.object(collector.screen, '_read', side_effect=tracked), \
+                patch.object(collector, 'ask', side_effect=AssertionError('must not call teacher')):
+            with self.assertRaisesRegex(ValueError, 'invalid selected train request'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_path,
+                                  source_bound_snapshot_path=snapshot_path,
+                                  source_bound_bundle_path=bundle_path)
+        self.assertNotIn(snapshot_path.resolve(), opened)
+        self.assertNotIn(context_path.resolve(), opened)
+        self.assertFalse(self.output.exists())
+
+    def test_source_bound_copy_is_rechecked_immediately_before_teacher_call(self):
+        context_path, snapshot_path, bundle_path, _row, _context = self._source_bound_inputs()
+        real_validate = collector.source_snapshot.validate_staged_artifacts
+        calls = 0
+        attempts = 0
+        sent = []
+        def mutate_after_preflight(*args, **kwargs):
+            nonlocal calls, attempts
+            attempts += 1
+            result = real_validate(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                bundle = json.loads(bundle_path.read_bytes())
+                bundle['requests_sha256'] = '0' * 64
+                bundle_path.write_text(json.dumps(bundle), encoding='utf-8')
+            return result
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), \
+                patch.object(collector.source_snapshot, 'validate_staged_artifacts',
+                             side_effect=mutate_after_preflight), \
+                patch.object(collector, 'ask', side_effect=lambda *args: sent.append(True)):
+            with self.assertRaisesRegex(ValueError, 'bundle digest'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_path,
+                                  source_bound_snapshot_path=snapshot_path,
+                                  source_bound_bundle_path=bundle_path)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(calls, 1)
+        self.assertEqual(sent, [])
+        self.assertFalse((self.output / 'records' / '000000.json').exists())
+
+    def test_project_context_requires_redaction_before_teacher_access(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        project = 'fixture-secret-123'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'projects': {'a': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest(),
+                               'private_marker': 'fixture-secret-123'},
+                         'b': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest(),
+                               'private_marker': 'fixture-secret-123'}}}))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=AssertionError('must reject before teacher call')):
+            with self.assertRaisesRegex(ValueError, 'additional screening'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+
+    def test_missing_project_context_fails_before_any_teacher_call(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        project = 'bounded project context'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'projects': {'a': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest()}}}))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=AssertionError('must reject before teacher call')):
+            with self.assertRaisesRegex(ValueError, 'no supplied context'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+        self.assertFalse(self.output.exists())
+
+    def test_credential_shaped_context_extension_key_is_screened_before_teacher_access(self):
+        selection.select(self.dataset, self.policy, self.selection_config, self.selected)
+        policy = json.loads(self.policy.read_text())
+        policy['rules'].append({'id': 'credential-shaped-key', 'pattern': r'(?i)api[_-]?key',
+                                'replacement': '[REDACTED]'})
+        self.policy.write_text(json.dumps(policy))
+        project = 'bounded project context'
+        context_file = self.root / 'project-context.json'
+        context_file.write_text(json.dumps({'schema_version': 'lfg.project-training-context.v1',
+            'api_key': 'dummy marker',
+            'projects': {'a': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest()},
+                         'b': {'text': project, 'sha256': hashlib.sha256(project.encode()).hexdigest()}}}))
+        with patch.dict(os.environ, {'LFG_TEST_TEACHER_KEY': 'test-only'}), patch.object(
+                collector, 'ask', side_effect=AssertionError('must reject before teacher call')):
+            with self.assertRaisesRegex(ValueError, 'additional screening'):
+                collector.collect(self.selected, self.collection_config, self.policy, self.output,
+                                  project_context_path=context_file)
+        self.assertFalse(self.output.exists())
 
     def test_skip_policy_records_bad_response_and_resumes_valid_ones(self):
         selection.select(self.dataset, self.policy, self.selection_config, self.selected)

@@ -49,6 +49,29 @@ def contains_forbidden(value: object, literals: list[str]) -> bool:
     return any(literal in text for text in strings(value) for literal in literals)
 
 
+def underlying_request(row: dict) -> str:
+    """Return the original request after validating optional rendered-context provenance."""
+    context_sha = row.get('project_context_sha256')
+    context_length = row.get('project_context_byte_length')
+    if 'project_context_sha256' not in row and 'project_context_byte_length' not in row:
+        return row['request']
+    request_bytes = row['request'].encode('utf-8')
+    if (not isinstance(context_sha, str) or len(context_sha) != 64
+            or any(char not in '0123456789abcdef' for char in context_sha)
+            or type(context_length) is not int or context_length < 1
+            or len(request_bytes) < context_length + 2
+            or request_bytes[context_length:context_length + 2] != b'\n\n'
+            or sha(request_bytes[:context_length]) != context_sha):
+        raise ValueError('invalid project context digest extension')
+    try:
+        request = request_bytes[context_length + 2:].decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('invalid project context request encoding') from None
+    if not request.strip():
+        raise ValueError('invalid project context request')
+    return request
+
+
 def private_output(path: Path) -> None:
     """Require outputs in any Git working tree to be ignored by that tree."""
     path = path.resolve()
@@ -103,7 +126,7 @@ def build(plan_path: Path, output: Path) -> dict:
     if output.exists():
         raise ValueError('output directory must be new')
 
-    ids, groups, projects, texts, original_sources = set(), {}, {}, {}, {}
+    ids, groups, projects, rendered_texts, underlying_texts, original_sources = set(), {}, {}, {}, {}, {}
     source_evidence, selected = [], {'train': [], 'validation': []}
     counts = {split: {'review_status': Counter(), 'outcome': Counter(), 'seen': 0, 'selected': 0}
               for split in selected}
@@ -130,13 +153,24 @@ def build(plan_path: Path, output: Path) -> dict:
             raise ValueError('source must contain nonempty JSONL records')
         for line in rows:
             row = json.loads(line)
-            if (not isinstance(row, dict) or set(row) != RECORD_FIELDS
+            if (not isinstance(row, dict)
+                    or row.get('schema_version') == 'lfg.user-requested-routing-observation.v1'
+                    or not RECORD_FIELDS.issubset(row)
                     or any(not nonempty(row[field]) for field in ('id', 'request', 'response', 'teacher', 'source_ref'))
                     or not isinstance(row['source_sha256'], str) or len(row['source_sha256']) != 64
                     or any(char not in '0123456789abcdef' for char in row['source_sha256'])
                     or row['review_status'] not in ('unreviewed', 'reviewed')
                     or row['outcome'] not in ('success', 'unknown', 'failure')):
                 raise ValueError('invalid teacher trace')
+            dedup_request = underlying_request(row)
+            teacher_system_sha = row.get('teacher_system_sha256')
+            context_bearing = 'project_context_sha256' in row or 'project_context_byte_length' in row
+            if (context_bearing and 'teacher_system_sha256' not in row) or (
+                    'teacher_system_sha256' in row
+                    and (not isinstance(teacher_system_sha, str) or len(teacher_system_sha) != 64
+                         or any(char not in '0123456789abcdef' for char in teacher_system_sha)
+                         or teacher_system_sha != sha(plan['system_prompt'].encode('utf-8')))):
+                raise ValueError('teacher system prompt digest does not match distillation plan')
             if row['id'] in ids:
                 raise ValueError('teacher trace IDs must be globally unique')
             ids.add(row['id'])
@@ -148,10 +182,12 @@ def build(plan_path: Path, output: Path) -> dict:
                 raise ValueError('trace count exceeds configured limit')
             if contains_forbidden(row, plan['forbidden_literals']):
                 raise ValueError('trace contains a configured forbidden literal')
-            text_key = sha(' '.join(unicodedata.normalize('NFKC', row['request']).casefold().split()).encode('utf-8'))
-            if text_key in texts:
+            rendered_key = sha(' '.join(unicodedata.normalize('NFKC', row['request']).casefold().split()).encode('utf-8'))
+            underlying_key = sha(' '.join(unicodedata.normalize('NFKC', dedup_request).casefold().split()).encode('utf-8'))
+            if rendered_key in rendered_texts or underlying_key in underlying_texts:
                 raise ValueError('duplicate normalized request across sources or splits')
-            texts[text_key] = split
+            rendered_texts[rendered_key] = split
+            underlying_texts[underlying_key] = split
             counts[split]['seen'] += 1
             counts[split]['review_status'][row['review_status']] += 1
             counts[split]['outcome'][row['outcome']] += 1
@@ -166,7 +202,9 @@ def build(plan_path: Path, output: Path) -> dict:
                              'original_source_ref_claim': row['source_ref'],
                              'original_source_sha256_claim': row['source_sha256'],
                              'teacher': row['teacher'], 'review_status_claim': row['review_status'],
-                             'outcome_claim': row['outcome']}})
+                             'outcome_claim': row['outcome'],
+                             'trace_extensions': {key: value for key, value in row.items()
+                                                  if key not in RECORD_FIELDS}}})
             counts[split]['selected'] += 1
         source_evidence.append({'path': path, 'sha256': sha(raw), 'split': split, 'records': len(rows),
                                 'project': project, 'project_group': group, 'origin': source['origin']})
