@@ -91,24 +91,54 @@ class CheckedMergeCITests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 404)
         self.assertNotIn('PRIVATE_TOKEN_DO_NOT_LOG', str(caught.exception))
         self.assertNotIn('BlobNotFound', str(caught.exception))
+        malformed = gate.subprocess.CompletedProcess(['gh', 'api'], 0, 'PRIVATE_BODY_DO_NOT_LOG', '')
+        with patch.object(gate.subprocess, 'run', return_value=malformed):
+            with self.assertRaises(gate.ApiFailure) as invalid:
+                gate.api('repos/owner/repo/pulls/7')
+        self.assertTrue(invalid.exception.__suppress_context__)
+        self.assertNotIn('PRIVATE_BODY_DO_NOT_LOG', str(invalid.exception))
 
     def test_repeated_403_or_404_fails_actionably_after_retries(self):
         head, base = 'a' * 40, 'b' * 40
         args = ['check_ci_run.py', '--repository', 'owner/repo', '--pull-request', '7', '--head', head,
                 '--base', base, '--timeout-seconds', '10', '--poll-seconds', '1',
                 '--required-job', 'rust']
-        for status in (403, 404):
+        for status in (401, 403, 404):
             with self.subTest(status=status):
                 output = io.StringIO()
                 with (patch.object(sys, 'argv', args), patch.object(gate, 'api',
                         side_effect=gate.ApiFailure(status=status, kind='http')) as api,
                      patch.object(gate.time, 'monotonic', return_value=0), patch.object(gate.time, 'sleep'),
                      redirect_stdout(output)):
-                    with self.assertRaisesRegex(SystemExit, f'HTTP {status}.*verify repository access'):
+                    guidance = ('verify GitHub authentication' if status == 401 else 'verify .*repository access')
+                    with self.assertRaisesRegex(SystemExit, f'HTTP {status}.*{guidance}'):
                         gate.main()
                 self.assertEqual(api.call_count, 3)
                 self.assertIn(f'HTTP {status}; retry 1/3', output.getvalue())
                 self.assertNotIn('BlobNotFound', output.getvalue())
+
+    def test_retryable_http_and_rate_limit_statuses_retry_and_recover(self):
+        head, base = 'a' * 40, 'b' * 40
+        run = self.run_record(7, head, base, 12)
+        run.update(status='completed', conclusion='success', run_attempt=1)
+        pr, branch = self.open_pr(head, base), {'commit': {'sha': base}}
+        jobs = [{'name': 'rust', 'status': 'completed', 'conclusion': 'success'}]
+        args = ['check_ci_run.py', '--repository', 'owner/repo', '--pull-request', '7', '--head', head,
+                '--base', base, '--timeout-seconds', '10', '--poll-seconds', '1', '--required-job', 'rust']
+        for failure in (gate.ApiFailure(status=408, kind='http'),
+                        gate.ApiFailure(status=425, kind='http'),
+                        gate.ApiFailure(status=429, kind='http'),
+                        gate.ApiFailure(status=403, kind='rate-limit')):
+            with self.subTest(status=failure.label):
+                output = io.StringIO()
+                with (patch.object(sys, 'argv', args), patch.object(gate, 'api', side_effect=[
+                        failure, pr, branch, {'workflow_runs': [run]}, {'jobs': jobs}]) as api,
+                     patch.object(gate.time, 'monotonic', return_value=0), patch.object(gate.time, 'sleep'),
+                     redirect_stdout(output)):
+                    gate.main()
+                self.assertEqual(api.call_count, 5)
+                self.assertIn(f'CI status unavailable ({failure.label}); retrying', output.getvalue())
+                self.assertIn('matching CI run 12 attempt 1 passed', output.getvalue())
 
     def test_transient_timeout_is_reported_safely_then_exact_check_retries(self):
         head, base = 'a' * 40, 'b' * 40

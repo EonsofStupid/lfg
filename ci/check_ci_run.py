@@ -64,8 +64,8 @@ def api(endpoint: str) -> dict:
         raise ApiFailure(status=status, kind=kind)
     try:
         return json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise ApiFailure(kind='invalid-json') from error
+    except json.JSONDecodeError:
+        raise ApiFailure(kind='invalid-json') from None
 
 
 def main() -> None:
@@ -110,7 +110,10 @@ def main() -> None:
                 print(f"matching CI run {run['id']} attempt {attempt} passed all required jobs")
                 return
         except ApiFailure as error:
-            if error.status in (403, 404) and error.kind != 'rate-limit':
+            permanent_client_error = (error.status is not None and 400 <= error.status < 500
+                                      and error.status not in (408, 425, 429)
+                                      and error.kind != 'rate-limit')
+            if permanent_client_error:
                 failure = (error.status, error.kind)
                 if failure == last_permanent_failure:
                     repeated_permanent_failures += 1
@@ -118,9 +121,15 @@ def main() -> None:
                     last_permanent_failure = failure
                     repeated_permanent_failures = 1
                 if repeated_permanent_failures >= 3:
+                    if error.status == 401:
+                        guidance = 'verify GitHub authentication and repository access'
+                    elif error.status == 403:
+                        guidance = 'verify GitHub permissions and repository access'
+                    else:
+                        guidance = 'verify the API request, repository access, workflow visibility, and PR'
                     raise SystemExit(
-                        f'GitHub API repeatedly returned HTTP {error.status}; verify repository access, '
-                        'workflow visibility, and the requested PR before retrying the exact check')
+                        f'GitHub API repeatedly returned HTTP {error.status}; {guidance} before retrying '
+                        'the exact check')
                 print(f'CI status unavailable ({error.label}; retry {repeated_permanent_failures}/3)', flush=True)
             else:
                 last_permanent_failure = None
