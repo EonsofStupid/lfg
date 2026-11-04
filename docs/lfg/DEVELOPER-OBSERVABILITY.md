@@ -106,6 +106,86 @@ The engine identities and raw proposal status remain in the ordinary owned
 response. No prompt, project context, output text, tokens, or private run
 history is added to `/api/lfg/dev-stats`.
 
+## Paired HTTP assessment benchmark
+
+`ml/lfg-encoder/benchmark_paired_assessment.py` runs a bounded, sequential
+loopback comparison of `/api/lfg/assess` and the protected
+`/api/lfg/assess/owned` route. The same selected UTF-8 text is sent to both;
+the owned request has no project context, and deterministic declarations are
+operator-configured (an empty list is valid). Warmups and measured rounds
+alternate request order, with one request in flight at a time. The benchmark
+does not tune, train, or evaluate proposal quality.
+
+Create a JSON config with the required `lfg.paired-http-benchmark-config.v1`
+fields below; there are no implicit defaults. Unknown extension fields are
+accepted but ignored by benchmark behavior. The config document itself is
+limited to 64 KiB. Configured record, round, and byte limits are used directly
+without an additional fixed dataset-size ceiling, subject to platform-safe
+integer arithmetic. The config, screening policy, and dataset must be outside
+the repository. `dataset_path` names one explicit file; no directory or glob
+is expanded. The configured split must be
+`train`, `training`, `dev`, or `development`; validation and heldout split
+names are not accepted. Split and `dataset_source_ref` are operator claims,
+not independently verified. A development split claim is not a final-holdout
+classification or a quality evaluation. The tool applies the configured screening policy to selected rows
+before sending the same screened text to both paths. The source and screened
+ID/text digests and redaction counts are reported without the text. The policy
+digest is recorded; screening matches are not proof that all sensitive data
+was removed. The tracked `ml/lfg-encoder/private-corpus-screen.example.json`
+is a starting point to copy and review into a private policy file. Use reviewed
+patterns because Python regular expressions do not provide hard per-match CPU
+limits. The service target must be a
+literal loopback IP over HTTP. Supply the high-entropy session token through
+the named environment variable or a separately protected file; never place it
+in the URL, config, or command line.
+
+```json
+{
+  "schema_version": "lfg.paired-http-benchmark-config.v1",
+  "target_base_url": "http://127.0.0.1:8090",
+  "owned_token_env": "LFG_OWNED_SESSION_TOKEN",
+  "owned_token_file": null,
+  "dataset_path": "C:/private-data/train.jsonl",
+  "dataset_split": "train",
+  "dataset_source_ref": "owner-selected:train",
+  "screening_policy_path": "C:/private-data/screen-policy.json",
+  "selection_seed": 42,
+  "max_records": 100,
+  "max_source_records": 10000,
+  "max_dataset_bytes": 16777216,
+  "max_input_bytes": 65536,
+  "max_request_bytes": 131072,
+  "max_response_bytes": 1048576,
+  "max_report_bytes": 1048576,
+  "client_timeout_seconds": 35,
+  "server_timeout_overhead_ms": 5000,
+  "warmup_rounds": 1,
+  "measured_rounds": 3,
+  "declared_subscriptions": [],
+  "first_order": "deterministic_first"
+}
+```
+
+Run it with `python ml/lfg-encoder/benchmark_paired_assessment.py --config
+<private-config.json> --output <new-report.json>`. The report path must be in
+an existing, private directory outside the repository; creation is exclusive
+and permissions are checked. Reports contain status counts and denominators,
+latency summaries, request settings, digests, and service identities, but no
+prompt text, project context, response text, tokens, or raw response bodies.
+Client timeout or ambiguous transport failure aborts further measurement and
+marks contamination unknown.
+
+End-to-end timing starts immediately before opening the HTTP request, after
+request JSON and headers are prepared, and ends after reading a bounded
+response body, including bounded HTTP error bodies. The deterministic
+`durationMicros` and owned `handlerElapsedMs` are separate endpoint-reported
+handler times. The owned timer starts after Axum body extraction and ends
+before response serialization and context-digest attachment; it may include
+child startup. These values are not CPU or model-only time. The current HTTP
+contracts do not attest the server binary hash. CPU, hardware cycles, and
+memory remain unknown because this tool does not sample verified isolated
+intervals. These measurements are not a quality result or promotion evidence.
+
 Both owned routes set `Cache-Control: no-store`, including authorization and
 body extraction errors. Inspector shows a side-by-side current-input proposal
 comparison. Deterministic
