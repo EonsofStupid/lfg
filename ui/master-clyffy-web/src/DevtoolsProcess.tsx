@@ -15,11 +15,13 @@ function Step({ number, lane, title, children }: { number: number; lane: 'pc' | 
 export function DevtoolsProcess({ panel }: { panel: Panel }) {
   const { dataset, process, rows, audits, predictions } = panel
   const redacted = Object.entries(dataset.redactions)
-  const runs = Object.entries(process.runs)
+  const runs = Object.entries(process.runs).filter(([id]) => rows.some((item) => item.id === id && item.kind === 'opponent'))
   const held = predictions.filter((prediction) => prediction.held).length
+  const devRows = rows.filter((row) => row.kind === 'lfg' && row.sizeBytes > 0)
+  const next = devRows.length > 0 ? 7 : 6
   return <div className="devtools-stack">
     <section className="devtools-card">
-      <div className="card-heading"><div><h2>How these numbers were made</h2><p>Each step, where it ran, and what it produced. Outcomes never left this PC, so no competitor could see the answers.</p></div></div>
+      <div className="card-heading"><div><h2>How these numbers were made</h2><p>Each step, where it ran, and what it produced. The Spark that ran the competitors never held outcomes, so no competitor could see the answers.</p></div></div>
       <div className="lane-key" aria-hidden="true"><span>This PC</span><span>Spark</span></div>
       <ol className="process-flow">
         <Step number={1} lane="pc" title="Read your session logs"><p>{dataset.sessions} sessions across {dataset.projects} projects, {dataset.first} to {dataset.last}. {dataset.snapshot}.</p></Step>
@@ -35,9 +37,15 @@ export function DevtoolsProcess({ panel }: { panel: Panel }) {
             })}
           </tbody></table></div>
         </Step>
-        <Step number={6} lane="pc" title="Join scores to real outcomes"><p>Only this PC holds outcomes, so scoring happens here. Models trained on your outcomes are always tested on a project they never saw.</p></Step>
-        <Step number={7} lane="pc" title="Check the checker"><p>{audits.filter((audit) => audit.passed).length} of {audits.length} audits passed: random scores and shuffled outcomes sit near 0, and a second implementation of the metric agrees.</p></Step>
-        <Step number={8} lane="pc" title="Read the result"><p><strong>{panel.decision.title}</strong> {panel.decision.detail} {held} of {predictions.length} predictions held.</p></Step>
+        {devRows.length > 0 && <Step number={6} lane="spark" title="Train the dev rows on your outcomes">
+          <p>One model per project group, each scored only on projects it never saw. These Sparks hold prompts and outcome levels, because training needs them. The kernel refused internet connections here too.</p>
+          <div className="dev-table-wrap"><table className="plain-table"><thead><tr><th>Dev row</th><th>Ran on</th><th>Size</th><th>Scored</th><th>Typical</th></tr></thead><tbody>
+            {devRows.map((row) => <tr key={row.id}><td>{row.label}</td><td>{row.where}</td><td>{row.sizeNote}</td><td>{row.latency?.rows.toLocaleString() ?? 'n/a'}</td><td>{row.latency ? `${row.latency.p50Ms.toFixed(1)} ms` : 'n/a'}</td></tr>)}
+          </tbody></table></div>
+        </Step>}
+        <Step number={next} lane="pc" title="Join scores to real outcomes"><p>All outcomes are joined here, so the final scoring happens on this PC. Models trained on your outcomes are always tested on a project they never saw.</p></Step>
+        <Step number={next + 1} lane="pc" title="Check the checker"><p>{audits.filter((audit) => audit.passed).length} of {audits.length} audits passed: random scores and shuffled outcomes sit near 0, and a second implementation of the metric agrees.</p></Step>
+        <Step number={next + 2} lane="pc" title="Read the result"><p><strong>{panel.decision.title}</strong> {panel.decision.detail} {held} of {predictions.length} predictions held.</p></Step>
       </ol>
     </section>
 

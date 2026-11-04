@@ -12,7 +12,7 @@ function split(value: number, paired: Record<string, Range> = {}): SplitScores {
 }
 
 function row(id: string, label: string, kind: PanelRow['kind'], long: number, short: number, sizeBytes = 0): PanelRow {
-  return { id, label, kind, sizeBytes, sizeNote: sizeBytes ? formatSize(sizeBytes) : 'no weights', plain: `${label} explained`, output: `${label} output`, where: 'This PC', latency: { rows: 10, p50Ms: 2, p95Ms: 3 }, splits: { all: split((long + short) / 2), long: split(long, { rules: range(.2, .05), clef: range(-.01) }), short: split(short) } }
+  return { id, label, kind, sizeBytes, sizeNote: sizeBytes ? formatSize(sizeBytes) : 'no weights', plain: `${label} explained`, output: `${label} output`, where: 'This PC', latency: { rows: 10, p50Ms: 2, p95Ms: 3 }, splits: { all: split((long + short) / 2), long: split(long, { rules: range(.2, .05), clef: range(-.01) }), short: split(short), later: split(long - .05) } }
 }
 
 function prompt(id: string, tool: string, chars: number, tools: number, rules: number | null, clef: number, effortRank: number, project = 'alpha'): PanelPrompt {
@@ -144,6 +144,19 @@ describe('DevtoolsView', () => {
     expect(screen.getByRole('heading', { name: /1 of 2 held/ })).toBeInTheDocument()
     fireEvent.click(within(table).getByRole('row', { name: /LFG rules/ }))
     expect(screen.getByLabelText('LFG rules details')).toHaveTextContent('LFG rules explained')
+  })
+
+  it('reports a dev row by its gap to the bar once one has been scored', async () => {
+    const devRow = row('devtext', 'LFG dev, prompt', 'lfg', .3, .2, 643800000)
+    serve({ ...PANEL, rows: [...PANEL.rows, devRow], target: { ...PANEL.target, scored: true, rows: { all: 'devtext', long: 'devtext', short: 'devtext', later: 'devtext' }, gaps: { all: -.1, long: -.09, short: .13, later: -.2 }, rival: false } })
+    window.history.replaceState(null, '', '/#devtools=launch-token')
+    render(<DevtoolsView status={null} />)
+    const table = await screen.findByRole('table', { name: 'Score for each predictor, best first' })
+    expect(within(table).queryByText('not scored')).not.toBeInTheDocument()
+    expect(screen.getByText('-0.09')).toBeInTheDocument()
+    expect(screen.getByText('Best dev row: LFG dev, prompt')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: /How it ran/ }))
+    expect(screen.getByRole('heading', { name: 'Train the dev rows on your outcomes' })).toBeInTheDocument()
   })
 
   it('shows how the numbers were made, including what went wrong', async () => {

@@ -1,5 +1,5 @@
 export type Range = { value: number | null; low: number | null; high: number | null }
-export type SplitId = 'all' | 'long' | 'short'
+export type SplitId = 'all' | 'long' | 'short' | 'later'
 export type MeasureId = 'overall' | 'session' | 'lengthFixed'
 export type RowKind = 'lfg' | 'trained' | 'opponent' | 'baseline'
 
@@ -50,7 +50,7 @@ export type Panel = {
   schemaVersion: string
   generatedAt: string
   metric: string
-  target: { label: string; sizeBytes: number; scored: boolean }
+  target: { label: string; sizeBytes: number; scored: boolean; rows?: Record<SplitId, string>; gaps?: Record<SplitId, number>; rival?: boolean }
   dataset: { rows: number; long: number; short: number; sessions: number; projects: number; first: string; last: string; redactions: Record<string, number>; sha256: Record<string, string>; snapshot: string }
   rows: PanelRow[]
   secondary: Array<{ label: string } & Record<SplitId, Range>>
@@ -70,7 +70,8 @@ export type DevtoolsStatus = { schemaVersion: string; modifiedMs: number | null;
 export const SPLITS: Array<{ id: SplitId; label: string; plain: string }> = [
   { id: 'all', label: 'All prompts', plain: 'Everything typed' },
   { id: 'long', label: '40+ characters', plain: 'Prompts that describe the work' },
-  { id: 'short', label: 'Under 40 characters', plain: 'Short follow-ups such as "continue"' }
+  { id: 'short', label: 'Under 40 characters', plain: 'Short follow-ups such as "continue"' },
+  { id: 'later', label: 'Later prompts', plain: 'The closest test of real use: models learn only from earlier prompts and are scored on the last 30% in each tool.' }
 ]
 
 export const MEASURES: Array<{ id: MeasureId; label: string; plain: string }> = [

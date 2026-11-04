@@ -43,7 +43,7 @@ function ForestPlot({ panel, split, measure, selected, onSelect }: { panel: Pane
         <span className="forest-value" role="cell"><strong>{formatScore(range?.value)}</strong><small>{formatRange(range) || 'not applicable'}</small></span>
       </motion.button>
     })}
-    <div className="forest-row is-target" role="row">
+    {!panel.target.scored && <div className="forest-row is-target" role="row">
       <span className="forest-label" role="cell"><strong>{panel.target.label}</strong><small>{formatSize(panel.target.sizeBytes)} budget</small></span>
       <span className="forest-plot" role="cell">
         {TICKS.map((tick) => <i key={tick} className={tick === 0 ? 'forest-grid is-zero' : 'forest-grid'} style={{ left: position(tick) }} aria-hidden="true" />)}
@@ -51,7 +51,7 @@ function ForestPlot({ panel, split, measure, selected, onSelect }: { panel: Pane
         <span className="forest-goal" style={{ left: position(bar) }}>has to land here</span>
       </span>
       <span className="forest-value" role="cell"><strong>not scored</strong><small>beat {formatScore(bar)}</small></span>
-    </div>
+    </div>}
   </div>
 }
 
@@ -164,9 +164,17 @@ export function DevtoolsRace({ panel }: { panel: Panel }) {
       })}
       <article className="is-target-tile">
         <span>{panel.target.label}</span>
-        <strong>not scored</strong>
-        <small>Has to beat every bar on the left</small>
-        <small>at {formatSize(panel.target.sizeBytes)} or smaller</small>
+        {panel.target.scored && panel.target.gaps
+          ? <>
+              <strong>{formatScore(panel.target.gaps[split])}</strong>
+              <small>Best dev row against every other row, on {SPLITS.find((item) => item.id === split)?.label.toLowerCase()}</small>
+              <small>Best dev row: {panel.rows.find((item) => item.id === panel.target.rows?.[split])?.label}</small>
+            </>
+          : <>
+              <strong>not scored</strong>
+              <small>Has to beat every bar on the left</small>
+              <small>at {formatSize(panel.target.sizeBytes)} or smaller</small>
+            </>}
       </article>
     </section>
 
@@ -177,7 +185,7 @@ export function DevtoolsRace({ panel }: { panel: Panel }) {
           {MEASURES.map((item) => <button key={item.id} type="button" aria-pressed={measure === item.id} className={measure === item.id ? 'is-active' : ''} onClick={() => setMeasure(item.id)}>{item.label}</button>)}
         </div>
       </div>
-      <p className="measure-note">{MEASURES.find((item) => item.id === measure)?.plain} Dots further right are better. The line through each dot is its likely range. Select a row for head-to-head results.</p>
+      <p className="measure-note">{split === 'later' ? `${SPLITS.find((item) => item.id === split)?.plain} ` : ''}{MEASURES.find((item) => item.id === measure)?.plain} Dots further right are better. The line through each dot is its likely range. Select a row for head-to-head results.</p>
       <Legend />
       <div className="race-layout">
         <ForestPlot panel={panel} split={split} measure={measure} selected={selected} onSelect={setSelected} />

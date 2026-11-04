@@ -77,48 +77,60 @@ target, developers reached 0.50 and Claude Sonnet 4.5 reached 0.44 on 1,000 JIRA
 
 ### Opponent panel
 
-Measured 3 November 2026 on 1,270 of those prompts, redacted first. The machine running
+Measured 3 and 4 November 2026 on 1,270 of those prompts, redacted first. The machine running
 opponents never held the outcomes. Predictions and each system's output were fixed before
-scoring. Each number is the same rank correlation; intervals run about ±0.08 at 40+
-characters and ±0.15 under 40.
+scoring. Each number is the same rank correlation; intervals run about ±0.08 at 40+ characters
+and ±0.15 under 40. **Later prompts** are the last 30% in each tool, 382 prompts: rows that learn
+from outcomes train only on the earlier ones, so this is the closest test of real use. The other
+columns test rows that learn from outcomes on whole projects they never saw.
 
-| Row | Size | All (1,270) | 40+ characters (887) | Under 40 (383) |
-| --- | --- | --- | --- | --- |
-| Hashed text, fit on unseen projects | about 130 KB of weights | +0.34 | +0.33 | +0.35 |
-| [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), frozen, ridge fit on the same folds | 133 MB | +0.34 | +0.32 | +0.31 |
-| [Clef-flash](https://huggingface.co/Cloudflare/clef-flash), one fixed `score` question | 19 GB | +0.24 | +0.39 | +0.07 |
-| [Laya](https://huggingface.co/convaiinnovations/laya) `multilingual`, Clef-flash's question | 644 MB | +0.24 | +0.21 | +0.24 |
-| [NVIDIA classifier](https://huggingface.co/nvidia/prompt-task-and-complexity-classifier), `prompt_complexity_score` | 736 MB | +0.18 | +0.22 | +0.21 |
-| Laya `typed-decisions`, tuned on other work, same question | 843 MB | +0.17 | +0.23 | +0.10 |
-| [NadirClaw DistilBERT](https://huggingface.co/nadirclaw/nadirclaw-distilbert), P(complex) | 268 MB | +0.13 | +0.27 | +0.01 |
-| Rules | none | +0.12 | +0.33 | -0.17 |
-| [Skala](https://huggingface.co/TakamaruAI/skala), calibrated complex score | 23 MB | +0.06 | +0.19 | -0.09 |
-| Prompt length | none | +0.06 | +0.25 | -0.23 |
+| Row | Size | All (1,270) | 40+ characters (887) | Under 40 (383) | Later (382) |
+| --- | --- | --- | --- | --- | --- |
+| Dev: Laya's 644 MB weights trained on outcomes, prompt alone | 644 MB | +0.36 | +0.37 | +0.32 | +0.34 |
+| Hashed text and session numbers | about 130 KB | +0.49 | +0.50 | +0.48 | +0.34 |
+| Dev: the same, with session numbers | 644 MB | +0.40 | +0.37 | +0.43 | +0.31 |
+| Hashed text, fit on unseen projects | about 130 KB | +0.34 | +0.33 | +0.35 | +0.29 |
+| [Clef-flash](https://huggingface.co/Cloudflare/clef-flash), one fixed `score` question | 19 GB | +0.24 | +0.39 | +0.07 | +0.29 |
+| [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), frozen, ridge on outcomes | 133 MB | +0.34 | +0.32 | +0.31 | +0.29 |
+| Laya `typed-decisions`, tuned on other work, Clef-flash's question | 843 MB | +0.17 | +0.23 | +0.10 | +0.29 |
+| [Laya](https://huggingface.co/convaiinnovations/laya) `multilingual`, untrained, same question | 644 MB | +0.24 | +0.21 | +0.24 | +0.22 |
+| Rules | none | +0.12 | +0.33 | -0.17 | +0.18 |
+| [NadirClaw DistilBERT](https://huggingface.co/nadirclaw/nadirclaw-distilbert), P(complex) | 268 MB | +0.13 | +0.27 | +0.01 | +0.15 |
+| [Skala](https://huggingface.co/TakamaruAI/skala), calibrated complex score | 23 MB | +0.06 | +0.19 | -0.09 | +0.14 |
+| Prompt length | none | +0.06 | +0.25 | -0.23 | +0.14 |
+| [NVIDIA classifier](https://huggingface.co/nvidia/prompt-task-and-complexity-classifier), `prompt_complexity_score` | 736 MB | +0.18 | +0.22 | +0.21 | +0.11 |
 
-- **Nothing clears hashed text on any split**, by a paired 95% interval that resamples whole
-  projects. On all prompts hashed text beats Clef-flash by 0.11 (+0.01 to +0.24). Better
-  embeddings add nothing: bge minus hashed is -0.00 (-0.05 to +0.06).
-- **Rules beat the three small purpose-built gauges at 40+ characters**: NVIDIA by 0.12, NadirClaw
-  by 0.07, Skala by 0.15, each with an interval above zero. Clef-flash's lead over rules there,
-  +0.05 (-0.04 to +0.15), is not established.
-- **The closest rival in size ties the largest on all prompts.** Laya's 644 MB build, untuned for
-  this work, matches Clef-flash at +0.24 (difference -0.00, -0.11 to +0.11) and beats it on short
-  prompts by 0.17 (+0.03 to +0.32). On 40+ characters it is clearly behind Clef-flash by 0.18 and
-  rules by 0.14. This is one question on one target, so it doesn't rank them generally.
-- **The bar for a 650 MB model** is the best row on each split: +0.39 at 40+ characters, +0.35
-  under 40, and +0.34 on all prompts. No row leads all three.
+"Clearly" below means a paired 95% interval that excludes 0, resampling whole projects.
+
+- **Training on real outcomes is the strongest lever found.** The same 644 MB weights go from
+  +0.24 untrained to +0.36 trained, clearly ahead (+0.12, +0.07 to +0.18), and they stay clearly
+  ahead on later prompts (+0.12, +0.02 to +0.29).
+- **A 644 MB model is level with or ahead of Clef-flash here.** With session numbers it is clearly
+  ahead on all prompts (+0.16, +0.03 to +0.30) and short prompts (+0.36, +0.23 to +0.46) and level
+  at 40+ characters (-0.02, -0.15 to +0.11). On later prompts neither dev row is clearly ahead of
+  it (prompt alone +0.05, -0.09 to +0.29). This row doesn't meet the written bar for rivaling Clef-flash, which needed
+  the best point estimate on all three original columns. It is built on open weights, so it is a
+  dev row and not LFG's own base model.
+- **Session numbers help less than the top row suggests.** No leak was found: no input comes from
+  after the prompt, and shuffling the previous-request numbers removes the gain (+0.36). But they
+  mostly separate heavy sessions from light ones. Inside one session they add +0.02 to hashed text,
+  and on later prompts +0.04 (-0.05 to +0.19). Previous-request tool calls alone, with no model,
+  reach +0.38 on all prompts and +0.16 on later ones.
+- **Scores across unseen projects run higher than scores on later prompts,** so report both. Most
+  rows bunch within noise on later prompts.
 - **Rules go negative on short prompts** because they read short as small. Median tool calls
-  under 40 characters against 40+ are 13 and 14 in Claude Code, 42 and 23 in Codex.
-- **The written decision applies:** stop adding text models to the effort output and put the
-  work into session and mid-run signals. LFG's own model hasn't been scored on this panel, and
-  this measures effort only, not intent or reasons.
+  under 40 characters against 40+ are 13 and 14 in Claude Code, 42 and 23 in Codex. Rules still
+  beat NVIDIA, NadirClaw and Skala at 40+ characters.
+- **Better frozen embeddings add nothing:** bge minus hashed text is -0.00 (-0.05 to +0.06).
 - **Audits:** random and shuffled rows sat within noise of 0, and a second implementation of
-  the metric agreed to 3 decimals. Of nine written predictions, five held.
+  the metric agreed to 3 decimals. Of 16 written predictions, 11 held. This measures effort only,
+  not intent or reasons.
 
-Limits: one person's logs, now seen, so not a held-out test. Ten rows on three splits with no
-correction for multiple comparisons. Confirm any gain on prompts logged after this date. Latency
-on a Spark, one prompt at a time, p50: Skala 2 ms on CPU, bge 9 ms on CPU, NadirClaw 11 ms on CPU,
-NVIDIA 20 ms on CPU, Laya 9 ms and 20 ms on GPU, Clef-flash 213 ms on GPU.
+Limits: one person's logs, now seen, so not a held-out test. The later-prompts column was chosen
+after the audit, and 13 rows on four columns get no correction for multiple comparisons. Confirm
+any gain on prompts logged after this date. Latency on a Spark, one prompt at a time, p50: Skala
+2 ms on CPU, Laya and the dev rows 8 to 10 ms on GPU, bge 9 ms on CPU, NadirClaw 11 ms on CPU,
+NVIDIA 20 ms on CPU, Laya `typed-decisions` 20 ms on GPU, Clef-flash 213 ms on GPU.
 
 **Locality has to be proven, not assumed.** ONNX Runtime 1.31.1 sends telemetry to
 `mobile.events.data.microsoft.com` by default, from native code, past a Python-level network
@@ -155,7 +167,7 @@ as proven.
 
 | Bet | Evidence so far | What settles it |
 | --- | --- | --- |
-| A 650 MB typed classifier rivals Clef-flash | [Laya](https://huggingface.co/convaiinnovations/laya) has a 644 MB, 322M build, and its 421M build went from 0.362 near chance to 0.766 after fine-tuning, on 2,000 decisions, by its own table. Untuned for this work, the 644 MB build [ties Clef-flash on all prompts](#opponent-panel) and loses on 40+ characters. [d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M), 587M, scored 15.95 against Clef-flash's 57.1 on a self-run Decision Index | A row at 650 MB or smaller that beats every opponent on unseen projects, on each split |
+| A 650 MB typed classifier rivals Clef-flash | [Laya](https://huggingface.co/convaiinnovations/laya) has a 644 MB, 322M build, and its 421M build went from 0.362 near chance to 0.766 after fine-tuning, on 2,000 decisions, by its own table. Trained on the owner's outcomes, the 644 MB build is [clearly ahead of Clef-flash on all and short prompts and level at 40+ characters and on later prompts](#opponent-panel). [d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M), 587M, scored 15.95 against Clef-flash's 57.1 on a self-run Decision Index | A row at 650 MB or smaller that beats every opponent on unseen projects, on each split |
 | 3–4B capability in 650 MB | Vendor numbers only | A scorecard row for a frozen low-bit base |
 | Adapter on a 1-bit base | A [ternary method](https://arxiv.org/abs/2608.24469) works on native ternary models, untested on Bonsai | Base against base plus adapter on unseen projects |
 | Per-project weights | Nothing shipped with published benefit; [Code2LoRA](https://arxiv.org/abs/2606.06492v2) on one language and task | Project learning curve against retrieval plus offset |

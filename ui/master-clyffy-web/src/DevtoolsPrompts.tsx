@@ -91,7 +91,7 @@ export function DevtoolsPrompts({ panel, onFollow }: { panel: Panel; onFollow: (
       <div className="card-heading"><div><h2>Every prompt, against what really happened</h2><p>If a predictor is good, dots climb from bottom left to top right. The white line is the typical real work at each rating, and it should climb too.</p></div></div>
       <div className="filter-row" role="group" aria-label="What to show">
         <label>Predictor <select value={rowId} onChange={(event) => setRowId(event.target.value)}>{panel.rows.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-        <label>Prompts <select value={split} onChange={(event) => setSplit(event.target.value as SplitId)}>{SPLITS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+        <label>Prompts <select value={split} onChange={(event) => setSplit(event.target.value as SplitId)}>{SPLITS.filter((item) => item.id !== 'later').map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
         <label>Tool <select value={tool} onChange={(event) => setTool(event.target.value)}><option value="all">Both tools</option>{tools.map((item) => <option key={item}>{item}</option>)}</select></label>
         <label>Project <select value={project} onChange={(event) => setProject(event.target.value)}><option value="all">All projects</option>{projects.map(([name, count]) => <option key={name} value={name}>{name} ({count})</option>)}</select></label>
         <p className="filter-result"><strong>{formatScore(correlation)}</strong><span>score in this view, {inView.length.toLocaleString()} prompts</span></p>

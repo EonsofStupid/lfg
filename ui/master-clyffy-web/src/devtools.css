@@ -43,7 +43,7 @@
 .devtools-connect input, .filter-row select { background: #020604; color: inherit; border: 1px solid var(--line); padding: .5rem .6rem; }
 .devtools-connect button, .primary-action { background: var(--lime); color: #071008 !important; border: 0; padding: .55rem .9rem; font-weight: 500; }
 
-.bar-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.bar-tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
 .bar-tiles > * { display: grid; gap: .1rem; align-content: start; text-align: left; background: var(--viz-surface); border: 0; padding: .9rem 1rem; border-top: 2px solid transparent; }
 .bar-tiles span { font: 500 .66rem 'IBM Plex Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .bar-tiles strong { font: 500 clamp(1.4rem, 2.5vw, 2.15rem) 'IBM Plex Mono', monospace; }
