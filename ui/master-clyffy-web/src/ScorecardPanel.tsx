@@ -139,8 +139,11 @@ function ReportView({ report, currentOwnedStatus }: { report: PairedReport; curr
 }
 
 function PathView({ name, summary, workerPath = false }: { name: string; summary: PathSummary; workerPath?: boolean }) {
-  const lifecycleAttempts = Object.values(summary.worker_lifecycle_counts).reduce((sum, count) => sum + count, 0)
-  const warmupLifecycleAttempts = Object.values(summary.warmup.worker_lifecycle_counts).reduce((sum, count) => sum + count, 0)
+  const observedLifecycleCount = (counts: Record<string, number>) =>
+    ['worker_not_started', 'worker_exit_observed_success', 'worker_exit_observed_failure']
+      .reduce((sum, category) => sum + (counts[category] ?? 0), 0)
+  const lifecycleAttempts = observedLifecycleCount(summary.worker_lifecycle_counts)
+  const warmupLifecycleAttempts = observedLifecycleCount(summary.warmup.worker_lifecycle_counts)
   return <section aria-label={`${name} measured summary`}>
     <h3>{name}</h3>
     <p>Measured: {summary.attempts} attempts, {summary.completed_responses} completed responses.</p>

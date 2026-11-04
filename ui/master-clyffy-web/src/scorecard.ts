@@ -171,7 +171,8 @@ export function parsePairedReport(value: unknown): PairedReport {
     && settings.declared_subscriptions_sent_to_deterministic.every((entry) => string(entry, 256)))
   assert(settings.owned_context === 'none' && settings.owned_request_text_matches_deterministic_text === true)
   assert(settings.order === 'single-flight alternating pairs; configured first path per pair cycle')
-  for (const key of ['client_timeout_seconds', 'owned_server_timeout_ms', 'client_timeout_overhead_ms',
+  assert(finite(settings.client_timeout_seconds) && settings.client_timeout_seconds > 0)
+  for (const key of ['owned_server_timeout_ms', 'client_timeout_overhead_ms',
     'max_input_bytes', 'max_request_bytes', 'max_response_bytes']) assert(integer(settings[key]))
 
   const scope = value.measurement_scope
@@ -327,7 +328,7 @@ export async function scanFeedbackJournal(token: string, options: {
       const outcomeStatus = object(record.outcome) ? record.outcome.status : undefined
       if (outcomeStatus === 'confirmed') operatorReportedObservations += 1
       else unknownOutcomes += 1
-      if (object(record.ownerCorrection) && Object.keys(record.ownerCorrection).length > 0) recordsWithCorrections += 1
+      if (object(record.ownerCorrection) && hasOwnerCorrection(record.ownerCorrection)) recordsWithCorrections += 1
       loadedRecords += 1
     }
     pagesLoaded += 1
@@ -342,4 +343,11 @@ export async function scanFeedbackJournal(token: string, options: {
   }
   return { loadedRecords, operatorReportedObservations, unknownOutcomes, recordsWithCorrections,
     pagesLoaded, scanCapReached: true, state: 'partial' }
+}
+
+function hasOwnerCorrection(value: JsonObject): boolean {
+  for (const field of ['note', 'intent', 'complexity', 'model']) {
+    if (typeof value[field] === 'string' && value[field].trim().length > 0) return true
+  }
+  return typeof value.agentCount === 'number' && Number.isFinite(value.agentCount)
 }

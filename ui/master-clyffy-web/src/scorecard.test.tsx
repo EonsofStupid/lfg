@@ -86,6 +86,18 @@ test('validates and preserves report source while displaying bounded measured ev
   expect(document.body.textContent).not.toContain('not a supported field')
 })
 
+test('unknown worker lifecycle categories remain unavailable for measured and warmup attempts', async () => {
+  const report = makeReport()
+  report.paths.owned.worker_lifecycle_counts = { unknown: 2 }
+  report.paths.owned.warmup.worker_lifecycle_counts = { unknown: 1 }
+  render(<ScorecardPanel maxBytes={100_000} maxFeedbackPages={2} maxFeedbackPageSize={10} currentOwnedStatus={null} />)
+  fireEvent.change(screen.getByLabelText(/Paired report JSON file/), {
+    target: { files: [new File([JSON.stringify(report)], 'report.json')] },
+  })
+  expect(await screen.findByText('Worker lifecycle observations: 0 of 2; 2 unknown or unavailable.')).toBeInTheDocument()
+  expect(screen.getByText('Warmup worker lifecycle observations: 0 of 1; 1 unknown or unavailable.')).toBeInTheDocument()
+})
+
 test('rejects unsupported or internally inconsistent report shapes', async () => {
   const invalidSchema = makeReport(); invalidSchema.schema_version = 'other'
   expect(() => parsePairedReport(invalidSchema)).toThrow(/unsupported or inconsistent/)
@@ -93,6 +105,14 @@ test('rejects unsupported or internally inconsistent report shapes', async () =>
   expect(() => parsePairedReport(invalidCounts)).toThrow(/unsupported or inconsistent/)
   const invalidWarmup = makeReport(); invalidWarmup.paths.owned.warmup.end_to_end_latency.denominator = 0
   expect(() => parsePairedReport(invalidWarmup)).toThrow(/unsupported or inconsistent/)
+})
+
+test('accepts the producer client timeout as a positive fractional number', () => {
+  const report = makeReport()
+  report.settings.client_timeout_seconds = 2.5
+  expect(parsePairedReport(report)).toBe(report)
+  report.settings.client_timeout_seconds = 0
+  expect(() => parsePairedReport(report)).toThrow(/unsupported or inconsistent/)
 })
 
 test('accepts an aborted partial report with unknown ending identity and real partial denominators', () => {
@@ -161,7 +181,7 @@ test('bounded feedback traversal counts claims and corrections but retains no re
       nextCursor: 'cursor-two', records: [
         { feedbackId: 'one', outcome: { status: 'confirmed', observation: privateText }, ownerCorrection: { note: privateText } },
         { feedbackId: 'two', outcome: { status: 'unknown' }, ownerCorrection: null },
-        { feedbackId: 'three', outcome: { status: 'success' }, ownerCorrection: {} },
+        { feedbackId: 'three', outcome: { status: 'success' }, ownerCorrection: { teacherProposal: 'extension only' } },
       ] }))
     .mockResolvedValueOnce(responseJson({ schemaVersion: 'lfg.feedback-list.v1', hasMore: false,
       nextCursor: null, records: [] }))
