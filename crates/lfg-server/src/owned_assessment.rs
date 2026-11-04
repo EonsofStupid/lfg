@@ -328,23 +328,25 @@ async fn infer(
 ) -> impl IntoResponse {
     let started = Instant::now();
     if let Err(code) = api.authorize(peer, &headers) {
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         return (
             code,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":started.elapsed().as_millis() as u64,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":auth_reason(code)}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":elapsed_ms,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":elapsed_ms,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":auth_reason(code)}),
             ),
         );
     }
     let Some(service) = api.service.as_ref() else {
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         return (
             StatusCode::OK,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":started.elapsed().as_millis() as u64,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":api.unavailable_reason.unwrap_or("unavailable")}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":elapsed_ms,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":elapsed_ms,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":api.unavailable_reason.unwrap_or("unavailable")}),
             ),
         );
     };
     if body.len() > service.config.max_http_body_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -356,7 +358,7 @@ async fn infer(
     let request: InferRequest = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "invalid_input",
                 Some(service.engine.clone()),
                 started,
@@ -367,7 +369,7 @@ async fn infer(
         }
     };
     if request.text.is_empty() || request.text.len() > service.config.max_request_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -384,7 +386,7 @@ async fn infer(
     ) {
         Ok(value) => value,
         Err(()) => {
-            return response(
+            return response_before_worker(
                 "invalid_input",
                 Some(service.engine.clone()),
                 started,
@@ -401,7 +403,7 @@ async fn infer(
         Ok(permit) => permit,
         Err(_) => {
             return add_context_digest(
-                response(
+                response_before_worker(
                     "busy",
                     Some(service.engine.clone()),
                     started,
@@ -460,7 +462,7 @@ async fn run_inference(
     let config = &service.config;
     let prompt = model_prompt(&service.system, &service.framing, &text);
     if prompt.len() > config.max_context_bytes {
-        return response(
+        return response_before_worker(
             "context_limit",
             Some(service.engine.clone()),
             started,
@@ -475,7 +477,7 @@ async fn run_inference(
             value
         }
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "inference_error",
                 Some(service.engine.clone()),
                 started,
@@ -486,7 +488,7 @@ async fn run_inference(
         }
     };
     if input.len() > service.runtime_line_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -498,7 +500,7 @@ async fn run_inference(
     let exe = match std::env::current_exe() {
         Ok(value) => value,
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "unavailable",
                 Some(service.engine.clone()),
                 started,
@@ -513,7 +515,7 @@ async fn run_inference(
     match service.backend {
         Backend::LegacyFullPrefix => {
             let Some(artifact) = config.artifact_directory.as_ref() else {
-                return response(
+                return response_before_worker(
                     "unavailable",
                     Some(service.engine.clone()),
                     started,
@@ -540,7 +542,7 @@ async fn run_inference(
             match config.artifact_mode {
                 ArtifactMode::Directory => {
                     let Some(artifact) = config.artifact_directory.as_ref() else {
-                        return response(
+                        return response_before_worker(
                             "unavailable",
                             Some(service.engine.clone()),
                             started,
@@ -650,113 +652,20 @@ async fn run_inference(
             );
         }
     };
-    let worker: Value = match serde_json::from_slice::<Value>(&raw) {
-        Ok(value) if value["schema_version"] == "lfg.owned-byte-generation.v1" => value,
-        _ => {
-            return add_worker_lifecycle(
-                response(
-                    "malformed_output",
-                    Some(service.engine.clone()),
-                    started,
-                    None,
-                    None,
-                    None,
-                ),
-                lifecycle,
-            );
-        }
-    };
-    let mut text = match worker["text"].as_str() {
-        Some(value) if value.len() <= config.max_generated_bytes => value.to_owned(),
-        _ => {
-            return add_worker_lifecycle(
-                response(
-                    "malformed_output",
-                    Some(service.engine.clone()),
-                    started,
-                    None,
-                    None,
-                    None,
-                ),
-                lifecycle,
-            );
-        }
-    };
-    if let Some(suffix) = text.strip_suffix(&service.framing.assistant_suffix) {
-        text = suffix.to_owned();
-    }
-    let stop_reason = worker["stop_reason"].as_str().map(str::to_owned);
-    let state = if stop_reason.as_deref() == Some("stop_sequence") {
-        "ok"
-    } else {
-        "truncated"
-    };
-    let status = if state == "ok" { "ok" } else { "truncated" };
-    if status == "truncated" {
-        return add_worker_lifecycle(
-            response(
-                status,
-                Some(service.engine.clone()),
-                started,
-                stop_reason,
-                Some(text),
-                None,
-            ),
-            lifecycle,
-        );
-    }
-    let parsed = match serde_json::from_str::<Value>(&text) {
-        Ok(value) => match validate_output(value, &config.required_output_fields) {
-            Ok(value) => value,
-            Err(OutputProblem::Incomplete(value)) => {
-                return add_worker_lifecycle(
-                    response(
-                        "incomplete_output",
-                        Some(service.engine.clone()),
-                        started,
-                        stop_reason,
-                        Some(text),
-                        Some(value),
-                    ),
-                    lifecycle,
-                );
-            }
-            Err(OutputProblem::Malformed) => {
-                return add_worker_lifecycle(
-                    response(
-                        "malformed_output",
-                        Some(service.engine.clone()),
-                        started,
-                        stop_reason,
-                        Some(text),
-                        None,
-                    ),
-                    lifecycle,
-                );
-            }
-        },
-        Err(_) => {
-            return add_worker_lifecycle(
-                response(
-                    "malformed_output",
-                    Some(service.engine.clone()),
-                    started,
-                    stop_reason,
-                    Some(text),
-                    None,
-                ),
-                lifecycle,
-            );
-        }
-    };
+    let interpreted = interpret_worker_response(
+        &raw,
+        config.max_generated_bytes,
+        &service.framing.assistant_suffix,
+        &config.required_output_fields,
+    );
     add_worker_lifecycle(
         response(
-            status,
+            interpreted.status,
             Some(service.engine.clone()),
             started,
-            stop_reason,
-            Some(text),
-            Some(parsed),
+            interpreted.stop_reason,
+            interpreted.output_text,
+            interpreted.output,
         ),
         lifecycle,
     )
@@ -766,6 +675,78 @@ async fn run_inference(
 enum OutputProblem {
     Incomplete(Value),
     Malformed,
+}
+
+struct InterpretedWorkerResponse {
+    status: &'static str,
+    stop_reason: Option<String>,
+    output_text: Option<String>,
+    output: Option<Value>,
+}
+
+fn interpret_worker_response(
+    raw: &[u8],
+    max_generated_bytes: usize,
+    assistant_suffix: &str,
+    required: &[RequiredField],
+) -> InterpretedWorkerResponse {
+    let malformed = || InterpretedWorkerResponse {
+        status: "malformed_output",
+        stop_reason: None,
+        output_text: None,
+        output: None,
+    };
+    let worker: Value = match serde_json::from_slice::<Value>(raw) {
+        Ok(value) if value["schema_version"] == "lfg.owned-byte-generation.v1" => value,
+        _ => return malformed(),
+    };
+    let Some(worker_text) = worker["text"].as_str() else {
+        return malformed();
+    };
+    if worker_text.len() > max_generated_bytes {
+        return malformed();
+    }
+    let text = worker_text
+        .strip_suffix(assistant_suffix)
+        .unwrap_or(worker_text)
+        .to_owned();
+    let stop_reason = worker["stop_reason"].as_str().map(str::to_owned);
+    if stop_reason.as_deref() != Some("stop_sequence") {
+        return InterpretedWorkerResponse {
+            status: "truncated",
+            stop_reason,
+            output_text: Some(text),
+            output: None,
+        };
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => match validate_output(value, required) {
+            Ok(output) => InterpretedWorkerResponse {
+                status: "ok",
+                stop_reason,
+                output_text: Some(text),
+                output: Some(output),
+            },
+            Err(OutputProblem::Incomplete(output)) => InterpretedWorkerResponse {
+                status: "incomplete_output",
+                stop_reason,
+                output_text: Some(text),
+                output: Some(output),
+            },
+            Err(OutputProblem::Malformed) => InterpretedWorkerResponse {
+                status: "malformed_output",
+                stop_reason,
+                output_text: Some(text),
+                output: None,
+            },
+        },
+        Err(_) => InterpretedWorkerResponse {
+            status: "malformed_output",
+            stop_reason,
+            output_text: Some(text),
+            output: None,
+        },
+    }
 }
 
 fn validate_output(value: Value, required: &[RequiredField]) -> Result<Value, OutputProblem> {
@@ -999,6 +980,23 @@ fn response(
         output,
     };
     (StatusCode::OK, Json(serde_json::to_value(response).unwrap_or_else(|_| json!({"schemaVersion":"lfg.owned-assessment.v1","status":"inference_error","engine":null,"elapsedMs":0}))))
+}
+
+fn response_before_worker(
+    status: &'static str,
+    engine: Option<Value>,
+    started: Instant,
+    stop_reason: Option<String>,
+    output_text: Option<String>,
+    output: Option<Value>,
+) -> (StatusCode, Json<Value>) {
+    add_worker_lifecycle(
+        response(status, engine, started, stop_reason, output_text, output),
+        WorkerLifecycle {
+            started: Some(false),
+            completed_successfully: Some(false),
+        },
+    )
 }
 
 fn add_worker_lifecycle(
@@ -1431,6 +1429,16 @@ mod tests {
             .unwrap()
     }
 
+    fn required_intent() -> Vec<RequiredField> {
+        vec![RequiredField {
+            name: "intent".into(),
+            value_type: OutputType::String,
+            non_empty: true,
+            min_integer: None,
+            max_integer: None,
+        }]
+    }
+
     #[tokio::test]
     async fn protected_routes_are_no_store_and_do_not_echo_private_request_bytes() {
         let (app, listener, peer, token) = protected_test_router();
@@ -1456,6 +1464,7 @@ mod tests {
             assert!(!text.contains("private project context"));
             if path.ends_with("/owned") {
                 let value: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["elapsedMs"], value["measurement"]["handlerElapsedMs"]);
                 assert_eq!(value["measurement"]["status"], "unavailable");
                 assert_eq!(value["measurement"]["workerStarted"], false);
                 assert_eq!(value["measurement"]["workerCompletedSuccessfully"], false);
@@ -1507,16 +1516,95 @@ mod tests {
             let request = owned_request(
                 listener,
                 peer,
-                "/api/lfg/assess/owned/status",
+                "/api/lfg/assess/owned",
                 &host,
                 origin.as_deref(),
                 token.as_deref(),
-                "",
+                r#"{"text":"private"}"#,
             );
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
             assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["elapsedMs"], value["measurement"]["handlerElapsedMs"]);
         }
+    }
+
+    #[tokio::test]
+    async fn enabled_service_status_remains_locally_authorized_and_no_store() {
+        let listener = "127.0.0.1:4318".parse().unwrap();
+        let peer = "127.0.0.1:51001".parse().unwrap();
+        let token = "abcdef0123456789abcdef0123456789".to_owned();
+        let config = Config {
+            schema_version: "lfg.owned-assessment-service.v1".into(),
+            enabled: true,
+            backend: Backend::LegacyFullPrefix,
+            artifact_mode: ArtifactMode::Directory,
+            artifact_directory: None,
+            expected_cached_manifest_sha256: None,
+            max_cached_graph_bytes: None,
+            max_cache_bytes: None,
+            framing_file: PathBuf::new(),
+            training_manifest_file: PathBuf::new(),
+            runtime_config_file: PathBuf::new(),
+            max_runtime_config_bytes: 1,
+            expected_model_sha256: "a".repeat(64),
+            expected_framing_sha256: "b".repeat(64),
+            max_metadata_bytes: 1,
+            required_output_fields: required_intent(),
+            max_http_body_bytes: 4096,
+            max_request_bytes: 1024,
+            max_context_bytes: 2048,
+            max_generated_bytes: 512,
+            max_worker_output_bytes: 4096,
+            timeout_ms: 1000,
+            max_concurrent: 1,
+            worker_threads: 1,
+        };
+        let service = Service {
+            config,
+            backend: Backend::LegacyFullPrefix,
+            engine: json!({"id":"enabled-test-engine","modelSha256":"a".repeat(64)}),
+            system: String::new(),
+            framing: Framing {
+                system_prefix: String::new(),
+                system_suffix: String::new(),
+                user_prefix: String::new(),
+                user_suffix: String::new(),
+                assistant_prefix: String::new(),
+                assistant_suffix: String::new(),
+            },
+            runtime_line_bytes: 4096,
+            runtime_sha256: "c".repeat(64),
+            runtime_max_bytes: 1,
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let api = Api {
+            listener,
+            token: Some(Arc::new(token.clone())),
+            allowed_hosts: Arc::new(Vec::new()),
+            allowed_origins: Arc::new(Vec::new()),
+            service: Some(Arc::new(service)),
+            unavailable_reason: None,
+        };
+        let app = owned_routes(api);
+        let request = owned_request(
+            listener,
+            peer,
+            "/api/lfg/assess/owned/status",
+            &listener.to_string(),
+            None,
+            Some(&token),
+            "",
+        );
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["engine"]["id"], "enabled-test-engine");
     }
 
     #[test]
@@ -1564,6 +1652,14 @@ mod tests {
             value["measurement"]["workerCompletedSuccessfully"],
             Value::Null
         );
+    }
+
+    #[test]
+    fn pre_worker_responses_report_the_known_absence_of_a_child() {
+        let (_, Json(value)) =
+            response_before_worker("busy", None, Instant::now(), None, None, None);
+        assert_eq!(value["measurement"]["workerStarted"], false);
+        assert_eq!(value["measurement"]["workerCompletedSuccessfully"], false);
     }
 
     #[test]
@@ -1922,23 +2018,29 @@ mod tests {
             .find(|line| line.starts_with('{'))
             .unwrap()
             .to_owned();
-        let worker: Value = serde_json::from_str(&worker_line).unwrap();
-        assert_eq!(worker["schema_version"], "lfg.owned-byte-generation.v1");
-        let text = worker["text"].as_str().unwrap();
-        assert_eq!(text, "caf\u{00e9}END");
-        let text = text.strip_suffix("END").unwrap().to_owned();
+        let interpreted =
+            interpret_worker_response(worker_line.as_bytes(), 4096, "END", &required_intent());
+        assert_eq!(interpreted.status, "ok");
+        assert_eq!(
+            interpreted.output_text.as_deref(),
+            Some("{\"intent\":\"caf\u{00e9}\"}")
+        );
+        let output_text_bytes = interpreted.output_text.as_ref().unwrap().len();
         let (_, Json(result)) = add_worker_lifecycle(
             response(
-                "ok",
+                interpreted.status,
                 Some(json!({"id":"test-engine"})),
                 Instant::now(),
-                worker["stop_reason"].as_str().map(str::to_owned),
-                Some(text),
-                Some(json!({"intent":"research"})),
+                interpreted.stop_reason,
+                interpreted.output_text,
+                interpreted.output,
             ),
             run.lifecycle,
         );
-        assert_eq!(result["measurement"]["outputTextUtf8Bytes"], 5);
+        assert_eq!(
+            result["measurement"]["outputTextUtf8Bytes"],
+            output_text_bytes
+        );
         assert_eq!(result["measurement"]["workerStarted"], true);
         assert_eq!(result["measurement"]["workerCompletedSuccessfully"], true);
     }
@@ -1975,23 +2077,18 @@ mod tests {
                 .lines()
                 .find(|line| line.starts_with('{') || *line == "NOT JSON")
                 .unwrap();
-            let (text, stop_reason) = if expected_text.is_some() {
-                let worker: Value = serde_json::from_str(worker_line).unwrap();
-                (
-                    worker["text"].as_str().map(str::to_owned),
-                    worker["stop_reason"].as_str().map(str::to_owned),
-                )
-            } else {
-                (None, None)
-            };
+            let interpreted =
+                interpret_worker_response(worker_line.as_bytes(), 4096, "END", &required_intent());
+            assert_eq!(interpreted.status, expected_status);
+            assert_eq!(interpreted.output_text.as_deref(), expected_text);
             let result = add_worker_lifecycle(
                 response(
-                    expected_status,
+                    interpreted.status,
                     Some(json!({"id":"test-engine"})),
                     Instant::now(),
-                    stop_reason,
-                    text,
-                    None,
+                    interpreted.stop_reason,
+                    interpreted.output_text,
+                    interpreted.output,
                 ),
                 run.lifecycle,
             );
@@ -2005,6 +2102,45 @@ mod tests {
     }
 
     #[test]
+    fn worker_interpreter_handles_invalid_schema_and_byte_limit_without_echoing_text() {
+        let fields = required_intent();
+        let cases = [
+            (
+                json!({"schema_version":"wrong","text":"private output","stop_reason":"stop_sequence"}),
+                100,
+            ),
+            (
+                json!({"schema_version":"lfg.owned-byte-generation.v1","text":"123456789","stop_reason":"stop_sequence"}),
+                8,
+            ),
+        ];
+        for (worker, max_bytes) in cases {
+            let interpreted = interpret_worker_response(
+                &serde_json::to_vec(&worker).unwrap(),
+                max_bytes,
+                "",
+                &fields,
+            );
+            assert_eq!(interpreted.status, "malformed_output");
+            assert_eq!(interpreted.output_text, None);
+            assert_eq!(interpreted.output, None);
+        }
+        let malformed_model_json = json!({
+            "schema_version":"lfg.owned-byte-generation.v1",
+            "text":"not json",
+            "stop_reason":"stop_sequence"
+        });
+        let interpreted = interpret_worker_response(
+            &serde_json::to_vec(&malformed_model_json).unwrap(),
+            100,
+            "",
+            &fields,
+        );
+        assert_eq!(interpreted.status, "malformed_output");
+        assert_eq!(interpreted.output_text.as_deref(), Some("not json"));
+    }
+
+    #[test]
     #[ignore]
     fn read_to_eof_child_helper() {
         let mut input = Vec::new();
@@ -2014,7 +2150,7 @@ mod tests {
                 "{}",
                 json!({
                     "schema_version": "lfg.owned-byte-generation.v1",
-                    "text": "caf\u{00e9}END",
+                "text": format!("{}END", json!({"intent":"caf\u{00e9}"})),
                     "stop_reason": "stop_sequence"
                 })
             ),
