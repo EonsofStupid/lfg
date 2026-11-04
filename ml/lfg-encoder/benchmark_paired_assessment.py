@@ -621,11 +621,14 @@ def validate_owned(payload: dict, expected_engine: dict) -> tuple[str, int | Non
                 or (started is False and completed is True)):
             return 'malformed_response', None, 'unknown'
         if started is False:
+            if status in ('ok', 'truncated', 'incomplete_output', 'malformed_output'):
+                return 'malformed_response', None, 'unknown'
             lifecycle = 'worker_not_started'
-        elif completed is True:
-            lifecycle = 'worker_exit_observed_success'
-        elif completed is False:
-            lifecycle = 'worker_exit_observed_failure'
+        elif started is True and completed is not None:
+            if status in ('ok', 'truncated', 'incomplete_output', 'malformed_output') and completed is not True:
+                return 'malformed_response', None, 'unknown'
+            lifecycle = ('worker_exit_observed_success' if completed
+                         else 'worker_exit_observed_failure')
         handler_ms = measurement['handlerElapsedMs']
     return status, handler_ms, lifecycle
 

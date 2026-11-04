@@ -467,6 +467,28 @@ class PairedBenchmarkTests(unittest.TestCase):
                 self.assertEqual(report['paths']['owned']['worker_lifecycle_counts'], {'unknown': 1})
                 FixtureHandler.requests = []
                 FixtureHandler.get_requests = []
+
+    def test_contradictory_worker_lifecycle_aborts_without_more_pairs(self):
+        cases = (
+            ('timeout', {'workerStarted': None, 'workerCompletedSuccessfully': False}),
+            ('ok', {'workerStarted': False, 'workerCompletedSuccessfully': None}),
+            ('ok', {'workerStarted': True, 'workerCompletedSuccessfully': False}),
+            ('truncated', {'workerStarted': True, 'workerCompletedSuccessfully': False}),
+            ('incomplete_output', {'workerStarted': True, 'workerCompletedSuccessfully': None}),
+            ('malformed_output', {'workerStarted': False, 'workerCompletedSuccessfully': False}),
+        )
+        for status, lifecycle in cases:
+            with self.subTest(status=status, lifecycle=lifecycle):
+                FixtureHandler.requests = []
+                FixtureHandler.get_requests = []
+                FixtureHandler.owned_status = status
+                FixtureHandler.owned_lifecycle = lifecycle
+                path, _ = self.make_config(warmups=0, rounds=3)
+                report = benchmark.run_benchmark(path)
+                self.assertFalse(report['complete'])
+                self.assertEqual(report['abort_code'], 'owned_worker_lifecycle_unknown')
+                self.assertEqual(report['paths']['owned']['attempts'], 1)
+                self.assertEqual(report['paths']['owned']['worker_lifecycle_counts'], {'unknown': 1})
                 FixtureHandler.post_counts = {}
 
     def test_observed_worker_exit_and_pre_spawn_failure_allow_next_pair(self):

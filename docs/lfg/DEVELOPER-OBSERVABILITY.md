@@ -124,13 +124,15 @@ without an additional fixed dataset-size ceiling, subject to platform-safe
 integer arithmetic. The config, screening policy, dataset, and screening
 manifest must be outside
 the repository. `dataset_path` names one explicit file; no directory or glob
-is expanded. Before reading the dataset or contacting the service, the tool
-validates the configured `lfg.private-corpus-screen-manifest.v1` manifest's
-train artifact SHA-256 and record count. It then requires the selected file's
-bytes and every row's `split` claim to match that train artifact. Only the
-configured dataset file and manifest are opened; validation/test outputs named
-by the manifest are not read. Dataset and manifest filenames do not establish
-split identity. The configured split must be `train`, `training`, `dev`, or
+is expanded. The configured `lfg.private-corpus-screen-manifest.v1` manifest
+binds a train artifact SHA-256 and record count, but contains no artifact path.
+The tool reads the configured dataset file to compute its digest and compares
+its bytes with the train digest before parsing rows or contacting the service;
+it also requires every parsed row to claim `split=train` and verifies the count.
+Only the configured dataset file and manifest are opened; validation/test
+outputs named by the manifest are not read. If the configured file is not the
+manifest-bound train artifact, the run aborts before parsing or sending rows.
+Dataset and manifest filenames do not establish split identity. The configured split must be `train`, `training`, `dev`, or
 `development`; validation and heldout split names are not accepted. Split and
 `dataset_source_ref` are operator claims, not independently verified. A
 development split claim is not a final-holdout classification or a quality
