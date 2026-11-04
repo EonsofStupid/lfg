@@ -33,6 +33,17 @@ test('runs only on request and displays the experimental output separately from 
   expect(api.assess).toHaveBeenCalledWith('owner request', 'test-token')
 })
 
+test('publishes connected engine identity to the Inspector scorecard and clears it on disconnect', async () => {
+  const api = client()
+  const onStatus = vi.fn()
+  const connected = await api.status('test-token')
+  render(<OwnedAssessmentPanel prompt="owner request" assessment={deterministic} client={api} onStatus={onStatus} />)
+  await connect()
+  expect(onStatus).toHaveBeenLastCalledWith(connected)
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
+  expect(onStatus).toHaveBeenLastCalledWith(null)
+})
+
 test('sends exact reviewed Unicode context bytes and accepts only the matching server digest', async () => {
   const api = client()
   const onResult = vi.fn()

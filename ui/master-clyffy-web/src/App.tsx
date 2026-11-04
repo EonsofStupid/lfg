@@ -6,8 +6,9 @@ import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
 import { FeedbackPanel } from './FeedbackPanel'
+import { ScorecardPanel } from './ScorecardPanel'
 import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
-import type { OwnedResult } from './ownedAssessmentApi'
+import type { OwnedResult, OwnedStatus } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
@@ -27,6 +28,7 @@ export default function App() {
   const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
   const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; subscriptionKey: string; result: OwnedResult } | null>(null)
+  const [ownedEngineStatus, setOwnedEngineStatus] = useState<OwnedStatus | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -146,8 +148,11 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={currentAssessment} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, subscriptionKey, result } : null)} />}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={currentAssessment} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, subscriptionKey, result } : null)} onStatus={setOwnedEngineStatus} />}
         {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={currentOwnedResult} assessment={currentAssessment} />}
+        {!publicEmbed && mode === 'inspector' && status && <ScorecardPanel maxBytes={status.operations.maxHttpBodyBytes}
+          maxFeedbackPages={status.operations.scorecardMaxFeedbackPages}
+          maxFeedbackPageSize={status.operations.scorecardMaxFeedbackPageSize} currentOwnedStatus={ownedEngineStatus} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">
           <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />

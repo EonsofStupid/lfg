@@ -216,6 +216,8 @@ export type RuntimeStatus = {
     maxHttpBodyBytes: number
     defaultSignalPageSize: number
     maxSignalPageSize: number
+    scorecardMaxFeedbackPages: number
+    scorecardMaxFeedbackPageSize: number
     eventBufferCapacity: number
     streamKeepaliveSeconds: number
     uiDebounceMs: number

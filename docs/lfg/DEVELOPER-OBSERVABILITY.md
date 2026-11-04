@@ -216,3 +216,41 @@ receive that additional context. The different framing is stated in the UI,
 and the comparison does not establish equivalent-input quality. Edits to the
 request, context, or subscription declarations clear the owned result and its
 feedback association. Owned outputs remain unverified proposals.
+
+## Inspector alpha scorecard
+
+The Inspector scorecard accepts an explicitly selected local paired report
+(`lfg.paired-http-assessment-benchmark.v1`). It reads at most the configured
+`operations.maxHttpBodyBytes` from the selected file, validates the report
+schema and the displayed counters, denominators, digests and latency summary
+ordering, and rejects inconsistent reports. The imported JSON is kept in
+component memory only. Unknown extension fields remain part of the in-memory
+source object but are ignored by rendering. The UI displays only known bounded
+provenance and aggregate evidence; it never shows selected record metadata,
+prompts, contexts, generated text, arbitrary extensions, raw source references,
+or filenames. The report's source and identity claims are supplied by its
+author, not independently attested.
+
+Measured attempts and warmups are displayed separately with their own
+denominators and status counts. Endpoint handler values remain distinct from
+end-to-end client timing. Null CPU, hardware-counter, memory, or binary identity
+fields remain unknown. The report has no per-request history or creation time,
+so the scorecard does not invent either. It states that the compared endpoints
+perform different work, and does not infer model quality, independent source
+verification, success rate, or promotion eligibility.
+
+Feedback is connected separately with the existing local feedback token. The
+token stays in browser component memory and is sent only in the authorization
+header. Each feedback status and page response is streamed under the
+`maxHttpBodyBytes` bound. Page size is the lower of the authenticated feedback
+service limit and `operations.scorecardMaxFeedbackPageSize`; total traversal is
+bounded by `operations.scorecardMaxFeedbackPages` (both bundled defaults are
+100 and are used when an older operations file omits either field). Update
+those typed operations fields to change page size or traversal limit. The
+scorecard discards each page after counting
+records, operator-reported confirmed observations, unknown outcomes, and
+records with a nonempty owner correction. It does not retain or display the
+record bodies. Page traversal is not a snapshot: the list can change while it
+is read. A page error or configured cap leaves the displayed count partial.
+Feedback counts remain separate from the imported report; older feedback
+records lack cached graph digests and are not joined to a benchmark run.

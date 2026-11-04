@@ -1,6 +1,6 @@
 {
   "schemaVersion": "lfg.operations.v1",
-  "revision": "baseline-1",
+  "revision": "baseline-2",
   "defaultListenAddress": "127.0.0.1:4317",
   "benchmarkDefaultIterations": 1000,
   "benchmarkMaxIterations": 1000000,
@@ -8,6 +8,8 @@
   "maxHttpBodyBytes": 2097152,
   "defaultSignalPageSize": 100,
   "maxSignalPageSize": 500,
+  "scorecardMaxFeedbackPages": 100,
+  "scorecardMaxFeedbackPageSize": 100,
   "eventBufferCapacity": 512,
   "streamKeepaliveSeconds": 15,
   "uiDebounceMs": 140,

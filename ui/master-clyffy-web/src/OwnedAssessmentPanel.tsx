@@ -37,11 +37,12 @@ function display(value: unknown): string {
   return JSON.stringify(value)
 }
 
-export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
+export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, onStatus, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
   prompt: string
   assessment: Assessment | null
   client?: OwnedAssessmentClient
   onResult?: (result: OwnedResult | null) => void
+  onStatus?: (status: OwnedStatus | null) => void
   declaredSubscriptions?: string[]
   loadKnowledge?: () => Promise<unknown>
 }) {
@@ -66,6 +67,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const connectionGeneration = useRef(0)
   const draftGeneration = useRef(0)
   const onResultRef = useRef(onResult)
+  const onStatusRef = useRef(onStatus)
   const promptRef = useRef(prompt)
   const projectContextRef = useRef(projectContext)
   const tokenInputRef = useRef(tokenInput)
@@ -73,6 +75,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const comparisonBinding = JSON.stringify([prompt, projectContext, declarationKey])
   const declarationRef = useRef(declarationKey)
   onResultRef.current = onResult
+  onStatusRef.current = onStatus
   promptRef.current = prompt
   projectContextRef.current = projectContext
   tokenInputRef.current = tokenInput
@@ -104,6 +107,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     connectionGeneration.current += 1
     draftGeneration.current += 1
     onResultRef.current?.(null)
+    onStatusRef.current?.(null)
   }, [])
 
   async function run(action: () => Promise<void>, request?: number) {
@@ -197,6 +201,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       const next = await client.status(submittedToken)
       if (connectionGeneration.current !== current || tokenInputRef.current !== submittedToken) return
       setStatus(next)
+      onStatusRef.current?.(next)
       setToken(submittedToken)
       setTokenInput('')
       tokenInputRef.current = ''
@@ -290,7 +295,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {bodyLimit === undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} UTF-8 bytes. The owned route HTTP body limit is not advertised; the server may reject this request.</p>}
       <div className="feedback-actions">
         <button type="button" disabled={running || appliedDraftStale || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : 'Run owned model'}</button>
-        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
+        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); onStatusRef.current?.(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
       </div>
       {requestTooLarge && <p role="alert">The request exceeds the model's configured UTF-8 input limit.</p>}
       {contextTooLarge && <p role="alert">The supplied context exceeds the model's configured context byte limit.</p>}
