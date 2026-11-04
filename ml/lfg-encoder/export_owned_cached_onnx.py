@@ -210,6 +210,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
            warmup: int = 1, repeats: int = 3) -> dict:
     import numpy as np
     import onnx
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
     import onnxruntime as ort
 
     config_raw = read_bounded(config_path, MAX_CONFIG_BYTES)
