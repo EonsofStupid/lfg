@@ -471,6 +471,7 @@ class PairedBenchmarkTests(unittest.TestCase):
     def test_contradictory_worker_lifecycle_aborts_without_more_pairs(self):
         cases = (
             ('timeout', {'workerStarted': None, 'workerCompletedSuccessfully': False}),
+            ('timeout', {'workerStarted': False, 'workerCompletedSuccessfully': False}),
             ('ok', {'workerStarted': False, 'workerCompletedSuccessfully': None}),
             ('ok', {'workerStarted': True, 'workerCompletedSuccessfully': False}),
             ('truncated', {'workerStarted': True, 'workerCompletedSuccessfully': False}),

@@ -621,7 +621,7 @@ def validate_owned(payload: dict, expected_engine: dict) -> tuple[str, int | Non
                 or (started is False and completed is True)):
             return 'malformed_response', None, 'unknown'
         if started is False:
-            if status in ('ok', 'truncated', 'incomplete_output', 'malformed_output'):
+            if status in ('ok', 'truncated', 'timeout', 'incomplete_output', 'malformed_output'):
                 return 'malformed_response', None, 'unknown'
             lifecycle = 'worker_not_started'
         elif started is True and completed is not None:
