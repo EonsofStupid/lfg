@@ -183,6 +183,20 @@ struct InferenceResponse {
     output_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<Value>,
+    measurement: OwnedRunMeasurement,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnedRunMeasurement {
+    schema_version: &'static str,
+    status: &'static str,
+    engine_id: Option<String>,
+    stop_reason: Option<String>,
+    handler_elapsed_ms: u64,
+    output_text_utf8_bytes: Option<usize>,
+    worker_started: Option<bool>,
+    worker_completed: Option<bool>,
 }
 
 pub(crate) fn routes(listener: SocketAddr) -> Router {
@@ -306,7 +320,7 @@ async fn infer(
         return (
             code,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"reason":auth_reason(code)}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":started.elapsed().as_millis() as u64,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompleted":false},"reason":auth_reason(code)}),
             ),
         );
     }
@@ -314,7 +328,7 @@ async fn infer(
         return (
             StatusCode::OK,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"reason":api.unavailable_reason.unwrap_or("unavailable")}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":started.elapsed().as_millis() as u64,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompleted":false},"reason":api.unavailable_reason.unwrap_or("unavailable")}),
             ),
         );
     };
@@ -860,12 +874,37 @@ fn response(
     output_text: Option<String>,
     output: Option<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let engine_id = engine
+        .as_ref()
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let response = InferenceResponse {
         schema_version: "lfg.owned-assessment.v1",
         status,
         engine,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        stop_reason,
+        elapsed_ms,
+        stop_reason: stop_reason.clone(),
+        measurement: OwnedRunMeasurement {
+            schema_version: "lfg.owned-run-measurement.v1",
+            status,
+            engine_id,
+            stop_reason,
+            handler_elapsed_ms: elapsed_ms,
+            output_text_utf8_bytes: output_text.as_ref().map(|text| text.len()),
+            // Worker lifecycle is only reported where the handler has direct evidence.
+            worker_started: match status {
+                "ok" | "truncated" | "incomplete_output" | "malformed_output" => Some(true),
+                "invalid_input" | "context_limit" | "busy" => Some(false),
+                _ => None,
+            },
+            worker_completed: match status {
+                "ok" | "truncated" | "incomplete_output" | "malformed_output" => Some(true),
+                "invalid_input" | "context_limit" | "busy" => Some(false),
+                _ => None,
+            },
+        },
         output_text,
         output,
     };
@@ -1244,6 +1283,40 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_response_reports_only_observed_timing_and_output_bytes() {
+        let (_, Json(value)) = response(
+            "ok",
+            Some(json!({"id":"engine"})),
+            Instant::now(),
+            Some("stop_sequence".into()),
+            Some("caf\u{00e9}".into()),
+            Some(json!({"intent":"build"})),
+        );
+        assert_eq!(
+            value["measurement"]["schemaVersion"],
+            "lfg.owned-run-measurement.v1"
+        );
+        assert_eq!(value["measurement"]["status"], "ok");
+        assert_eq!(value["measurement"]["engineId"], "engine");
+        assert_eq!(value["measurement"]["stopReason"], "stop_sequence");
+        assert_eq!(value["measurement"]["outputTextUtf8Bytes"], 5);
+        assert_eq!(value["measurement"]["workerStarted"], true);
+        assert_eq!(value["measurement"]["workerCompleted"], true);
+        assert!(value.get("cpuTimeMicros").is_none());
+    }
+
+    #[test]
+    fn unavailable_response_measurements_remain_unknown() {
+        let (_, Json(value)) = response("inference_error", None, Instant::now(), None, None, None);
+        assert_eq!(value["measurement"]["status"], "inference_error");
+        assert_eq!(value["measurement"]["engineId"], Value::Null);
+        assert_eq!(value["measurement"]["stopReason"], Value::Null);
+        assert_eq!(value["measurement"]["outputTextUtf8Bytes"], Value::Null);
+        assert_eq!(value["measurement"]["workerStarted"], Value::Null);
+        assert_eq!(value["measurement"]["workerCompleted"], Value::Null);
+    }
 
     #[test]
     fn framing_and_request_bounds_count_utf8_bytes() {

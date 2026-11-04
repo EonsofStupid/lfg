@@ -86,3 +86,25 @@ listen address is loopback; if configured to listen on a network, the operator
 must account for exposure of timing and activity metadata. No remote export,
 distributed tracing, profile comparison, automatic server-side persistence, or
 server-side configuration editor is implemented here.
+
+## Owned model run measurements
+
+The experimental owned-assessment route is separately protected by its
+loopback, peer, Host/Origin and session-token checks. Successful and handled
+failure responses may include `lfg.owned-run-measurement.v1`. Its
+The measurement object's status, engine ID, and stop reason repeat the bounded
+identifiers in the ordinary response. `handlerElapsedMs` is handler wall time and includes child-process startup and
+the owned work performed before response serialization; it is not CPU time or
+model-only latency. `outputTextUtf8Bytes` counts only output text present in the
+response. A `null` means that count is unavailable. Worker start/completion
+are reported only when the handler can determine them; `null` means unknown.
+The engine identities and raw proposal status remain in the ordinary owned
+response. No prompt, project context, output text, tokens, or private run
+history is added to `/api/lfg/dev-stats`.
+
+Inspector shows a side-by-side current-input proposal comparison. Deterministic
+rules use the request without optional project context; the owned model may
+receive that additional context. The different framing is stated in the UI,
+and the comparison does not establish equivalent-input quality. Edits to the
+request, context, or subscription declarations clear the owned result and its
+feedback association. Owned outputs remain unverified proposals.

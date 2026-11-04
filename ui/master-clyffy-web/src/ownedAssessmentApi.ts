@@ -25,6 +25,16 @@ export type OwnedResult = {
   outputText?: string | null
   output?: Record<string, unknown> | null
   projectContextSha256?: string | null
+  measurement?: {
+    schemaVersion: 'lfg.owned-run-measurement.v1'
+    status: string
+    engineId: string | null
+    stopReason: string | null
+    handlerElapsedMs: number
+    outputTextUtf8Bytes: number | null
+    workerStarted: boolean | null
+    workerCompleted: boolean | null
+  } | null
   [key: string]: unknown
 }
 
