@@ -33,7 +33,7 @@ export type OwnedResult = {
     handlerElapsedMs: number
     outputTextUtf8Bytes: number | null
     workerStarted: boolean | null
-    workerCompleted: boolean | null
+    workerCompletedSuccessfully: boolean | null
   } | null
   [key: string]: unknown
 }

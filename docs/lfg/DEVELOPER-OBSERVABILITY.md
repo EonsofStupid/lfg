@@ -92,17 +92,23 @@ server-side configuration editor is implemented here.
 The experimental owned-assessment route is separately protected by its
 loopback, peer, Host/Origin and session-token checks. Successful and handled
 failure responses may include `lfg.owned-run-measurement.v1`. Its
-The measurement object's status, engine ID, and stop reason repeat the bounded
-identifiers in the ordinary response. `handlerElapsedMs` is handler wall time and includes child-process startup and
-the owned work performed before response serialization; it is not CPU time or
-model-only latency. `outputTextUtf8Bytes` counts only output text present in the
-response. A `null` means that count is unavailable. Worker start/completion
-are reported only when the handler can determine them; `null` means unknown.
+measurement object's status, engine ID, and stop reason repeat the bounded
+identifiers in the ordinary response. `handlerElapsedMs` starts after Axum has
+extracted the request body and ends before response serialization and context
+digest attachment. It is handler wall time and may include child-process
+startup; it is not CPU time or model-only latency. Body-limit rejections made
+by the Axum extractor have no measurement. `outputTextUtf8Bytes` counts only
+output text present in the response. A `null` means that count is unavailable.
+Worker start and successful completion come from the actual child spawn/wait
+path. `workerCompletedSuccessfully: false` means the child did not successfully
+finish, including a killed timeout; `null` means unknown.
 The engine identities and raw proposal status remain in the ordinary owned
 response. No prompt, project context, output text, tokens, or private run
 history is added to `/api/lfg/dev-stats`.
 
-Inspector shows a side-by-side current-input proposal comparison. Deterministic
+Both owned routes set `Cache-Control: no-store`, including authorization and
+body extraction errors. Inspector shows a side-by-side current-input proposal
+comparison. Deterministic
 rules use the request without optional project context; the owned model may
 receive that additional context. The different framing is stated in the UI,
 and the comparison does not establish equivalent-input quality. Edits to the

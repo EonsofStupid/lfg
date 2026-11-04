@@ -7,7 +7,7 @@ import type { Assessment } from './types'
 const deterministic = { intent: { primary: 'build' }, complexity: { bracket: 'moderate' }, agents: { total: 2 } } as Assessment
 const client = (): OwnedAssessmentClient => ({
   status: vi.fn(async () => ({ enabled: true, status: 'ready' as const, engine: { id: 'owned-test', modelSha256: 'a'.repeat(64) }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: 10000, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } })),
-  assess: vi.fn(async () => ({ status: 'ok' as const, engine: { id: 'owned-test' }, elapsedMs: 120, stopReason: 'stop_sequence', measurement: { schemaVersion: 'lfg.owned-run-measurement.v1' as const, status: 'ok', engineId: 'owned-test', stopReason: 'stop_sequence', handlerElapsedMs: 120, outputTextUtf8Bytes: 51, workerStarted: true, workerCompleted: true }, output: { intent: 'research', complexity: 'simple', suggested_models: ['local-model'], agent_count: 1, reason: 'One task' } })),
+  assess: vi.fn(async () => ({ status: 'ok' as const, engine: { id: 'owned-test' }, elapsedMs: 120, stopReason: 'stop_sequence', measurement: { schemaVersion: 'lfg.owned-run-measurement.v1' as const, status: 'ok', engineId: 'owned-test', stopReason: 'stop_sequence', handlerElapsedMs: 120, outputTextUtf8Bytes: 51, workerStarted: true, workerCompletedSuccessfully: true }, output: { intent: 'research', complexity: 'simple', suggested_models: ['local-model'], agent_count: 1, reason: 'One task' } })),
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -27,7 +27,7 @@ test('runs only on request and displays the experimental output separately from 
   expect(await screen.findByText('research')).toBeInTheDocument()
   expect(screen.getByText('One task')).toBeInTheDocument()
   expect(screen.getByText(/It has not been verified/)).toBeInTheDocument()
-  expect(screen.getByText(/Observed handler wall time: 120 ms/)).toBeInTheDocument()
+  expect(screen.getByText(/Observed handler wall time: 120 ms \(may include child startup/)).toBeInTheDocument()
   expect(screen.getByRole('region', { name: 'Current input comparison' })).toHaveTextContent(/side-by-side proposal comparison/)
   expect(screen.getByRole('region', { name: 'Current input comparison' })).toHaveTextContent(/Rules: build intent/)
   expect(api.assess).toHaveBeenCalledWith('owner request', 'test-token')

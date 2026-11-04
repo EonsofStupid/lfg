@@ -56,6 +56,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
     if (path.endsWith('/api/lfg/assess/owned/status')) return new Response(JSON.stringify({ enabled: true, status: 'ready', engine: { id: 'owned-test' }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: ownedAssessmentBodyLimit, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } }))
+    if (path.endsWith('/api/lfg/feedback/status')) return new Response(JSON.stringify({ enabled: true, available: true }))
     if (path.endsWith('/api/lfg/assess/owned')) {
       const body = JSON.parse(String(init?.body))
       return new Response(JSON.stringify({ status: 'ok', elapsedMs: 3, engine: { id: 'owned-test' }, projectContextSha256: body.contextSha256, output: { intent: 'research' } }))
@@ -188,6 +189,24 @@ test('uses the owned route body cap even when it differs from the app operations
   expect(await screen.findByText(/server echoed the matching project context digest/i)).toBeInTheDocument()
   const ownedCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/lfg/assess/owned'))
   expect(JSON.parse(String(ownedCall?.[1]?.body))).toEqual({ text: 'Implement my feature and run tests', context, contextSha256: contextDigest })
+})
+
+test('subscription changes synchronously clear the owned feedback association', async () => {
+  render(<App />)
+  enterPrompt()
+  const subscription = await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  fireEvent.change(screen.getByLabelText('Local feedback token'), { target: { value: 'feedback-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect feedback' }))
+  await screen.findByText('Local feedback connected.')
+  fireEvent.change(screen.getByLabelText('Owned model token'), { target: { value: 'owned-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect owned model' }))
+  await screen.findByText(/Model status: ready/)
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  await screen.findByText('research')
+  expect(screen.getByLabelText('Assessment source')).toBeInTheDocument()
+  fireEvent.click(subscription)
+  expect(screen.queryByLabelText('Assessment source')).not.toBeInTheDocument()
 })
 
 test('rejects an oversized body against the owned route cap even below the app operations cap', async () => {

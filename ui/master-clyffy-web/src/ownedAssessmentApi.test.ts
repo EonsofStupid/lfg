@@ -16,7 +16,7 @@ test('sends exact context bytes with their digest and preserves response extensi
   const context = '  Projet\n🦊  '
   const digest = 'a'.repeat(64)
   const extension = { observed: true }
-  const measurement = { schemaVersion: 'lfg.owned-run-measurement.v1', status: 'ok', engineId: null, stopReason: null, handlerElapsedMs: 12, outputTextUtf8Bytes: null, workerStarted: null, workerCompleted: null }
+  const measurement = { schemaVersion: 'lfg.owned-run-measurement.v1', status: 'ok', engineId: null, stopReason: null, handlerElapsedMs: 12, outputTextUtf8Bytes: null, workerStarted: null, workerCompletedSuccessfully: null }
   const fetcher = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({
     status: 'ok', elapsedMs: 2, engine: null, projectContextSha256: digest, extension, measurement,
   })))
