@@ -549,7 +549,7 @@ def model_identity(value: object, *, owned: bool = False) -> dict | None:
 
 def validated_status_identity(base_url, token, cfg) -> tuple[dict, dict]:
     status_result = http_json(
-        base_url + '/status', method='GET', payload=None, token=None,
+        base_url + '/api/shippin/intelligence/lfg/status', method='GET', payload=None, token=None,
         timeout=cfg['client_timeout_seconds'], max_request_bytes=cfg['max_request_bytes'],
         max_response_bytes=cfg['max_response_bytes'])
     owned_result = http_json(

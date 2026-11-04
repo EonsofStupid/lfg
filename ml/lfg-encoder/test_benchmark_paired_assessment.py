@@ -28,6 +28,7 @@ ENGINE = {'id': 'fixture-engine', 'inferenceBackend': 'cached_onnx',
           'runtimeConfigSha256': '1' * 64, 'serviceConfigSha256': '2' * 64,
           'cachedManifestSha256': '3' * 64, 'contextBytes': 64}
 CONFIG_DIGEST = 'b' * 64
+ENCODER = {'id': 'fixture-encoder', 'version': '1', 'sha256': '9' * 64}
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -86,11 +87,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
             return
-        if self.path == '/status':
+        if self.path == '/api/shippin/intelligence/lfg/status':
             operations_digest = ('d' * 64 if self.identity_drift_after_first_status
-                                 and self.get_requests.count('/status') > 1 else 'c' * 64)
+                                 and self.get_requests.count('/api/shippin/intelligence/lfg/status') > 1 else 'c' * 64)
             return self.respond(200, {'phase': 'ready', 'operationsDigest': operations_digest,
-                                      'encoder': ENGINE})
+                                      'encoder': ENCODER})
         if self.path == '/api/lfg/assess/owned/status':
             if self.headers.get('X-LFG-Session-Token') != TOKEN:
                 return self.respond(401, {'error': 'unauthorized'})
@@ -305,7 +306,7 @@ class PairedBenchmarkTests(unittest.TestCase):
         self.assertEqual(len(FixtureHandler.requests), 2)
 
     def test_response_byte_limit_is_enforced_before_json_is_accepted(self):
-        result = benchmark.http_json(f'http://127.0.0.1:{self.server.server_port}/status',
+        result = benchmark.http_json(f'http://127.0.0.1:{self.server.server_port}/api/shippin/intelligence/lfg/status',
                                      method='GET', payload=None, token=None, timeout=1,
                                      max_request_bytes=128, max_response_bytes=16)
         self.assertEqual(result.response_code, 'response_too_large')
@@ -520,7 +521,7 @@ class PairedBenchmarkTests(unittest.TestCase):
         path, _ = self.make_config(warmups=0, rounds=1)
         with self.assertRaisesRegex(benchmark.BenchmarkError, 'service_identity_changed'):
             benchmark.run_benchmark(path)
-        self.assertEqual(FixtureHandler.get_requests.count('/status'), 2)
+        self.assertEqual(FixtureHandler.get_requests.count('/api/shippin/intelligence/lfg/status'), 2)
 
     def test_owned_identity_requires_backend_specific_artifact_hashes(self):
         self.assertIsNotNone(benchmark.model_identity(ENGINE, owned=True))
