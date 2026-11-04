@@ -36,6 +36,7 @@ REPORT_SCHEMA = 'lfg.paired-http-assessment-benchmark.v1'
 CONFIG_FIELDS = {
     'schema_version', 'target_base_url', 'owned_token_env', 'owned_token_file',
     'dataset_path', 'dataset_split', 'dataset_source_ref', 'selection_seed', 'screening_policy_path',
+    'source_manifest_path',
     'max_records', 'max_source_records', 'max_dataset_bytes', 'max_input_bytes',
     'max_request_bytes', 'max_response_bytes', 'max_report_bytes',
     'client_timeout_seconds', 'server_timeout_overhead_ms', 'warmup_rounds',
@@ -43,6 +44,8 @@ CONFIG_FIELDS = {
 }
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_SCREEN_POLICY_BYTES = 1024 * 1024
+MAX_SCREEN_MANIFEST_BYTES = 1024 * 1024
+SCREEN_MANIFEST_SCHEMA = 'lfg.private-corpus-screen-manifest.v1'
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$')
 ENV_RE = re.compile(r'^[A-Z][A-Z0-9_]{0,63}$')
 SHA_RE = re.compile(r'^[0-9a-f]{64}$')
@@ -60,6 +63,9 @@ ENGINE_ID_FIELDS = (
 # JSON extraction/size checks, peer/Host/Origin/token authorization, and route
 # matching reject before owned worker dispatch for these statuses.
 SAFE_REJECTION_HTTP_STATUSES = {400, 401, 403, 404, 413}
+OWNED_WORKER_RESULT_STATUSES = {
+    'ok', 'truncated', 'timeout', 'incomplete_output', 'malformed_output', 'inference_error',
+}
 
 
 class BenchmarkError(Exception):
@@ -255,6 +261,8 @@ def load_config(path: Path) -> tuple[dict, bytes, str]:
         raise BenchmarkError('invalid_config')
     if not isinstance(value.get('screening_policy_path'), str) or not value['screening_policy_path']:
         raise BenchmarkError('invalid_config')
+    if not isinstance(value.get('source_manifest_path'), str) or not value['source_manifest_path']:
+        raise BenchmarkError('invalid_config')
     if (not isinstance(value.get('declared_subscriptions'), list)
             or any(not isinstance(item, str) or not item for item in value['declared_subscriptions'])
             or len(set(value['declared_subscriptions'])) != len(value['declared_subscriptions'])):
@@ -332,10 +340,30 @@ exit 0
         raise BenchmarkError('private_output_permissions_unverified')
 
 
-def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, str]], str, str, str, dict, int]:
+def load_source_manifest(config: dict) -> tuple[Path, bytes, str, str, int]:
+    path = _resolve_outside_repo(config['source_manifest_path'], 'source_manifest_unavailable')
+    try:
+        raw = read_bounded(path, MAX_SCREEN_MANIFEST_BYTES, 'source_manifest_size_limit')
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise BenchmarkError('source_manifest_invalid') from None
+    if not isinstance(value, dict) or value.get('schema_version') != SCREEN_MANIFEST_SCHEMA:
+        raise BenchmarkError('source_manifest_invalid')
+    outputs = value.get('outputs')
+    counts = value.get('counts')
+    if (not isinstance(outputs, dict) or not isinstance(counts, dict)
+            or not isinstance(outputs.get('train'), str) or not SHA_RE.fullmatch(outputs['train'])
+            or not is_int(counts.get('train'), 1, sys.maxsize)):
+        raise BenchmarkError('source_manifest_train_missing')
+    _resolve_outside_repo(config['dataset_path'], 'dataset_unavailable')
+    if counts['train'] > config['max_source_records']:
+        raise BenchmarkError('dataset_record_limit')
+    return path, raw, digest(raw), outputs['train'], counts['train']
+
+
+def load_rows(config: dict, policy: dict, rules: list, manifest_train_sha: str,
+              manifest_train_count: int) -> tuple[list[dict[str, str]], str, str, str, dict, int]:
     path = _resolve_outside_repo(config['dataset_path'], 'dataset_unavailable')
-    if path.stem.lower() in {'validation', 'valid', 'test', 'heldout', 'holdout', 'final_holdout'}:
-        raise BenchmarkError('heldout_filename_rejected')
     try:
         info = path.stat()
         if info.st_size > config['max_dataset_bytes']:
@@ -344,6 +372,8 @@ def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, s
             raw = source.read(config['max_dataset_bytes'] + 1)
         if len(raw) > config['max_dataset_bytes']:
             raise BenchmarkError('dataset_size_limit')
+        if digest(raw) != manifest_train_sha:
+            raise BenchmarkError('manifest_train_artifact_mismatch')
         decoded = raw.decode('utf-8')
         parsed = []
         for line_index, line in enumerate(decoded.splitlines()):
@@ -355,17 +385,17 @@ def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, s
         raise BenchmarkError('dataset_invalid') from None
     if not parsed or len(parsed) > config['max_source_records']:
         raise BenchmarkError('dataset_record_limit')
+    if len(parsed) != manifest_train_count:
+        raise BenchmarkError('manifest_train_count_mismatch')
     rows: list[dict[str, str]] = []
     identifiers: set[str] = set()
-    canonical_split = {'train': 'train', 'training': 'train', 'dev': 'dev', 'development': 'dev'}
     for record, raw_line, line_number in parsed:
         if (not isinstance(record, dict) or not isinstance(record.get('id'), str)
                 or not record['id'].strip() or not isinstance(record.get('text'), str)
                 or not record['text'].strip() or record['id'] in identifiers):
             raise BenchmarkError('dataset_invalid')
         row_split = record.get('split')
-        if (row_split is not None and (not isinstance(row_split, str) or row_split not in canonical_split
-                or canonical_split[row_split] != canonical_split[config['dataset_split']])):
+        if not isinstance(row_split, str) or row_split != 'train':
             raise BenchmarkError('dataset_split_mismatch')
         upstream_hashes = {}
         for field in ('candidate_file_sha256', 'source_record_sha256', 'source_text_sha256',
@@ -489,11 +519,32 @@ def summarize(samples: list[int], denominator: int) -> dict:
     }
 
 
-def model_identity(value: object) -> dict | None:
-    if not isinstance(value, dict) or not isinstance(value.get('id'), str):
+def model_identity(value: object, *, owned: bool = False) -> dict | None:
+    if not isinstance(value, dict) or not isinstance(value.get('id'), str) or not value['id']:
         return None
-    return {key: value[key] for key in ENGINE_ID_FIELDS
-            if isinstance(value.get(key), str) or type(value.get(key)) in (int, bool)}
+    result = {key: value[key] for key in ENGINE_ID_FIELDS
+              if isinstance(value.get(key), str) or type(value.get(key)) in (int, bool)}
+    if not owned:
+        return result
+    backend = value.get('inferenceBackend')
+    identity_kind = value.get('modelIdentityKind')
+    if backend == 'cached_onnx' and identity_kind == 'source_weights_sha256':
+        required_sha = (
+            'modelSha256', 'modelManifestSha256', 'cachedManifestSha256',
+            'prefillOnnxSha256', 'decodeOnnxSha256', 'sourceWeightsSha256',
+            'trainingManifestSha256', 'framingSha256', 'runtimeConfigSha256',
+            'serviceConfigSha256',
+        )
+    elif backend == 'legacy_full_prefix' and identity_kind == 'onnx_graph_sha256':
+        required_sha = ('modelSha256', 'modelManifestSha256', 'trainingManifestSha256',
+                        'framingSha256', 'runtimeConfigSha256', 'serviceConfigSha256')
+    else:
+        return None
+    if (any(not isinstance(value.get(key), str) or not SHA_RE.fullmatch(value[key])
+            for key in required_sha)
+            or not is_int(value.get('contextBytes'), 1, sys.maxsize)):
+        return None
+    return result
 
 
 def validated_status_identity(base_url, token, cfg) -> tuple[dict, dict]:
@@ -511,10 +562,12 @@ def validated_status_identity(base_url, token, cfg) -> tuple[dict, dict]:
         raise BenchmarkError('owned_status_unavailable')
     server = status_result.payload
     owned = owned_result.payload
-    engine = model_identity(owned.get('engine'))
+    engine = model_identity(owned.get('engine'), owned=True)
     limits = owned.get('limits')
     if (owned.get('enabled') is not True or owned.get('status') != 'ready' or engine is None
             or not isinstance(limits, dict) or not is_int(limits.get('timeoutMs'), 1, sys.maxsize)):
+        if engine is None:
+            raise BenchmarkError('owned_identity_unavailable')
         raise BenchmarkError('owned_service_not_ready')
     required_timeout_ms = limits['timeoutMs'] + cfg['server_timeout_overhead_ms']
     if (required_timeout_ms > threading.TIMEOUT_MAX * 1000
@@ -546,22 +599,35 @@ def validate_assessment(payload: dict, session_id: str, revision: int, identity:
     return 'ok', next_identity, payload['durationMicros']
 
 
-def validate_owned(payload: dict, expected_engine: dict) -> tuple[str, int | None]:
+def validate_owned(payload: dict, expected_engine: dict) -> tuple[str, int | None, str]:
     status = payload.get('status')
     if (payload.get('schemaVersion') != 'lfg.owned-assessment.v1'
             or not isinstance(status, str) or status not in KNOWN_OWNED_STATUSES
             or 'projectContextSha256' in payload):
-        return 'malformed_response', None
-    if model_identity(payload.get('engine')) != expected_engine:
+        return 'malformed_response', None, 'unknown'
+    if model_identity(payload.get('engine'), owned=True) != expected_engine:
         raise BenchmarkError('owned_identity_changed')
     measurement = payload.get('measurement')
     handler_ms = None
+    lifecycle = 'unknown'
     if isinstance(measurement, dict) and measurement.get('schemaVersion') == 'lfg.owned-run-measurement.v1':
         if (measurement.get('status') != status or measurement.get('engineId') != expected_engine['id']
                 or not is_int(measurement.get('handlerElapsedMs'))):
-            return 'malformed_response', None
+            return 'malformed_response', None, 'unknown'
+        started = measurement.get('workerStarted')
+        completed = measurement.get('workerCompletedSuccessfully')
+        if ((started is not None and type(started) is not bool)
+                or (completed is not None and type(completed) is not bool)
+                or (started is False and completed is True)):
+            return 'malformed_response', None, 'unknown'
+        if started is False:
+            lifecycle = 'worker_not_started'
+        elif completed is True:
+            lifecycle = 'worker_exit_observed_success'
+        elif completed is False:
+            lifecycle = 'worker_exit_observed_failure'
         handler_ms = measurement['handlerElapsedMs']
-    return status, handler_ms
+    return status, handler_ms, lifecycle
 
 
 def safe_status(result: HttpResult) -> str:
@@ -575,17 +641,21 @@ def safe_status(result: HttpResult) -> str:
 def empty_path_stats() -> dict:
     def empty_phase() -> dict:
         return {'status_counts': Counter(), 'latency_ns': [],
-                'attempts': 0, 'completed_responses': 0}
+                'attempts': 0, 'completed_responses': 0,
+                'worker_lifecycle_counts': Counter()}
 
     return {**empty_phase(), 'handler_time_us': [], 'handler_missing': 0,
             'warmup': empty_phase()}
 
 
 def record_response(stats: dict, phase: str, status: str, result: HttpResult,
-                    handler_value: int | None, handler_scale: int) -> None:
+                    handler_value: int | None, handler_scale: int,
+                    worker_lifecycle: str | None = None) -> None:
     phase_stats = stats['warmup'] if phase == 'warmup' else stats
     phase_stats['attempts'] += 1
     phase_stats['status_counts'][status] += 1
+    if worker_lifecycle is not None:
+        phase_stats['worker_lifecycle_counts'][worker_lifecycle] += 1
     if result.status is not None:
         phase_stats['completed_responses'] += 1
         phase_stats['latency_ns'].append(result.elapsed_ns)
@@ -602,6 +672,7 @@ def public_stats(stats: dict) -> dict:
         'attempts': stats['attempts'],
         'completed_responses': stats['completed_responses'],
         'status_counts': dict(sorted(stats['status_counts'].items())),
+        'worker_lifecycle_counts': dict(sorted(stats['worker_lifecycle_counts'].items())),
         'end_to_end_latency': summarize(stats['latency_ns'], stats['completed_responses']),
         'server_handler_time_us': summarize(stats['handler_time_us'], stats['attempts']),
         'server_handler_time_missing': stats['handler_missing'],
@@ -609,6 +680,7 @@ def public_stats(stats: dict) -> dict:
             'attempts': warmup['attempts'],
             'completed_responses': warmup['completed_responses'],
             'status_counts': dict(sorted(warmup['status_counts'].items())),
+            'worker_lifecycle_counts': dict(sorted(warmup['worker_lifecycle_counts'].items())),
             'end_to_end_latency': summarize(warmup['latency_ns'], warmup['completed_responses']),
         },
     }
@@ -616,7 +688,8 @@ def public_stats(stats: dict) -> dict:
 
 def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
                       source_selected_hash: str, selected_hash: str, screening_changes: dict,
-                      policy_hash: str, source_record_count: int, rows: list[dict],
+                      policy_hash: str, manifest_hash: str, manifest_train_sha: str,
+                      manifest_train_count: int, source_record_count: int, rows: list[dict],
                       deterministic_id: dict, owned_id: dict) -> dict:
     return {
         'schema_version': REPORT_SCHEMA,
@@ -627,8 +700,13 @@ def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
         'quality_evaluated': False,
         'source': {
             'source_ref': cfg['dataset_source_ref'],
-            'split': cfg['dataset_split'],
-            'split_basis': 'operator_configured_development_claim; not independently verified; no holdout determination',
+            'split': 'train',
+            'operator_split_claim': cfg['dataset_split'],
+            'split_basis': 'selected artifact digest/count are bound to the manifest train output; underlying source split and independence remain unverified',
+            'manifest_schema_version': SCREEN_MANIFEST_SCHEMA,
+            'screen_manifest_sha256': manifest_hash,
+            'manifest_train_artifact_sha256': manifest_train_sha,
+            'manifest_train_record_count': manifest_train_count,
             'screening_policy_sha256': policy_hash,
             'screening': 'operator-supplied policy applied locally; does not verify prior screening or labels',
             'screening_changes': screening_changes,
@@ -686,28 +764,34 @@ def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
 
 def verify_run_inputs(dataset_path: Path, dataset_hash: str, config_path: Path,
                       config_raw: bytes, config_hash: str, policy_path: Path,
-                      policy_hash: str, cfg: dict) -> None:
+                      policy_hash: str, manifest_path: Path, manifest_hash: str,
+                      cfg: dict) -> None:
     dataset_raw = read_bounded(dataset_path, cfg['max_dataset_bytes'], 'benchmark_input_changed')
     final_config_raw = read_bounded(config_path, MAX_CONFIG_BYTES, 'benchmark_input_changed')
     policy_raw = read_bounded(policy_path, MAX_SCREEN_POLICY_BYTES, 'benchmark_input_changed')
+    manifest_raw = read_bounded(manifest_path, MAX_SCREEN_MANIFEST_BYTES, 'benchmark_input_changed')
     if (digest(dataset_raw) != dataset_hash or digest(final_config_raw) != config_hash
-            or final_config_raw != config_raw or digest(policy_raw) != policy_hash):
+            or final_config_raw != config_raw or digest(policy_raw) != policy_hash
+            or digest(manifest_raw) != manifest_hash):
         raise BenchmarkError('benchmark_input_changed')
 
 
 def run_benchmark(config_path: Path) -> dict:
     cfg, config_raw, config_hash = load_config(config_path)
     base_url = validate_loopback_url(cfg['target_base_url'])
+    manifest_path, manifest_raw, manifest_hash, manifest_train_sha, manifest_train_count = load_source_manifest(cfg)
     dataset_path = _resolve_outside_repo(cfg['dataset_path'], 'dataset_unavailable')
     policy_path = _resolve_outside_repo(cfg['screening_policy_path'], 'screening_policy_unavailable')
     token = load_token(cfg)
     policy, rules, policy_hash = load_screening_policy(cfg)
-    rows, dataset_hash, source_selected_hash, selected_hash, screening_changes, source_count = load_rows(cfg, policy, rules)
+    rows, dataset_hash, source_selected_hash, selected_hash, screening_changes, source_count = load_rows(
+        cfg, policy, rules, manifest_train_sha, manifest_train_count)
     deterministic_id, owned_id = validated_status_identity(base_url, token, cfg)
     deterministic_id_before = copy.deepcopy(deterministic_id)
     owned_id_before = copy.deepcopy(owned_id)
     report = build_report_base(cfg, config_hash, dataset_hash, source_selected_hash, selected_hash,
-                               screening_changes, policy_hash, source_count, rows, deterministic_id, owned_id)
+                               screening_changes, policy_hash, manifest_hash, manifest_train_sha,
+                               manifest_train_count, source_count, rows, deterministic_id, owned_id)
     stats = {'deterministic': empty_path_stats(), 'owned': empty_path_stats()}
     report['paths'] = stats
     session_id = 'paired-' + uuid.uuid4().hex
@@ -750,7 +834,8 @@ def run_benchmark(config_path: Path) -> dict:
                     report['abort_code'] = 'client_timeout_contamination_unknown'
                     report['contamination_state'] = 'unknown; no further requests issued'
                     result = HttpResult(None, None, error.elapsed_ns, 'client_timeout')
-                    record_response(stats[path_name], phase, 'client_timeout', result, None, 1)
+                    record_response(stats[path_name], phase, 'client_timeout', result, None, 1,
+                                    'unknown' if path_name == 'owned' else None)
                     report['paths'] = {name: public_stats(value) for name, value in stats.items()}
                     interrupted = True
                     break
@@ -759,13 +844,17 @@ def run_benchmark(config_path: Path) -> dict:
                         report['abort_code'] = 'http_transport_contamination_unknown'
                         report['contamination_state'] = 'unknown; no further requests issued'
                         result = HttpResult(None, None, 0, error.code)
-                        record_response(stats[path_name], phase, error.code, result, None, 1)
+                        record_response(stats[path_name], phase, error.code, result, None, 1,
+                                        'unknown' if path_name == 'owned' else None)
                         interrupted = True
                         break
                     result = HttpResult(None, None, 0, error.code)
                 handler_value = None
+                worker_lifecycle = None
                 if result.status != 200 or result.payload is None:
                     outcome = safe_status(result)
+                    if path_name == 'owned' and result.status == 200:
+                        worker_lifecycle = 'unknown'
                 elif path_name == 'deterministic':
                     outcome, next_identity, handler_value = validate_assessment(
                         result.payload, session_id, revision, assessment_identity)
@@ -775,18 +864,23 @@ def run_benchmark(config_path: Path) -> dict:
                     if outcome == 'malformed_response':
                         handler_value = None
                 else:
-                    outcome, handler_value = validate_owned(result.payload, owned_id['engine'])
+                    outcome, handler_value, worker_lifecycle = validate_owned(result.payload, owned_id['engine'])
                 if phase == 'measured':
                     record_response(stats[path_name], phase, outcome, result, handler_value,
-                                    1 if path_name == 'deterministic' else 1000)
+                                    1 if path_name == 'deterministic' else 1000, worker_lifecycle)
                 else:
-                    record_response(stats[path_name], phase, outcome, result, None, 1)
+                    record_response(stats[path_name], phase, outcome, result, None, 1, worker_lifecycle)
                 ambiguous_http = (result.status is not None and result.status != 200
                                   and result.status not in SAFE_REJECTION_HTTP_STATUSES)
                 owned_busy = path_name == 'owned' and result.status == 200 and outcome == 'busy'
-                if ambiguous_http or owned_busy:
-                    report['abort_code'] = ('owned_busy_contamination_unknown' if owned_busy
-                                            else 'http_response_contamination_unknown')
+                lifecycle_unknown = (path_name == 'owned' and result.status == 200
+                                     and worker_lifecycle == 'unknown'
+                                     and (outcome in OWNED_WORKER_RESULT_STATUSES
+                                          or outcome in ('malformed_response', 'response_too_large')))
+                if ambiguous_http or owned_busy or lifecycle_unknown:
+                    report['abort_code'] = ('owned_busy_contamination_unknown' if owned_busy else
+                                            'owned_worker_lifecycle_unknown' if lifecycle_unknown else
+                                            'http_response_contamination_unknown')
                     report['contamination_state'] = 'unknown; no further requests issued'
                     interrupted = True
                     break
@@ -796,7 +890,7 @@ def run_benchmark(config_path: Path) -> dict:
             break
     if interrupted:
         verify_run_inputs(dataset_path, dataset_hash, config_path, config_raw, config_hash,
-                          policy_path, policy_hash, cfg)
+                          policy_path, policy_hash, manifest_path, manifest_hash, cfg)
         report['paths'] = {name: public_stats(value) for name, value in stats.items()}
         return report
     deterministic_after, owned_after = validated_status_identity(base_url, token, cfg)
@@ -807,7 +901,7 @@ def run_benchmark(config_path: Path) -> dict:
         'owned': owned_after,
     }
     verify_run_inputs(dataset_path, dataset_hash, config_path, config_raw, config_hash,
-                      policy_path, policy_hash, cfg)
+                      policy_path, policy_hash, manifest_path, manifest_hash, cfg)
     report['paths'] = {name: public_stats(value) for name, value in stats.items()}
     report['complete'] = True
     return report

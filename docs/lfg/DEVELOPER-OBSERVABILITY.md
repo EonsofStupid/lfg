@@ -121,17 +121,22 @@ fields below; there are no implicit defaults. Unknown extension fields are
 accepted but ignored by benchmark behavior. The config document itself is
 limited to 64 KiB. Configured record, round, and byte limits are used directly
 without an additional fixed dataset-size ceiling, subject to platform-safe
-integer arithmetic. The config, screening policy, and dataset must be outside
+integer arithmetic. The config, screening policy, dataset, and screening
+manifest must be outside
 the repository. `dataset_path` names one explicit file; no directory or glob
-is expanded. The configured split must be
-`train`, `training`, `dev`, or `development`; validation and heldout split
-names are not accepted, and rows with split claims must match the configured
-development split. Validation, test, and heldout filename stems are rejected
-before contacting the service. Split and `dataset_source_ref` are operator claims,
-not independently verified. A development split claim is not a final-holdout
-classification or a quality evaluation. The tool applies the configured
-screening policy to selected rows before sending the same screened text to both
-paths. The report includes source and screened ID/text digests, selected line
+is expanded. Before reading the dataset or contacting the service, the tool
+validates the configured `lfg.private-corpus-screen-manifest.v1` manifest's
+train artifact SHA-256 and record count. It then requires the selected file's
+bytes and every row's `split` claim to match that train artifact. Only the
+configured dataset file and manifest are opened; validation/test outputs named
+by the manifest are not read. Dataset and manifest filenames do not establish
+split identity. The configured split must be `train`, `training`, `dev`, or
+`development`; validation and heldout split names are not accepted. Split and
+`dataset_source_ref` are operator claims, not independently verified. A
+development split claim is not a final-holdout classification or a quality
+evaluation. The tool applies the configured screening policy to selected rows
+before sending the same screened text to both paths. The report includes source
+and screened ID/text digests, selected line
 numbers, and hashes for row, family, project, group and upstream source fields
 when present; it does not include their raw values or text. The policy digest
 and replacement counts are recorded; screening matches are not proof that all sensitive data

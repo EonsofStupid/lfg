@@ -20,10 +20,10 @@ SPEC.loader.exec_module(benchmark)
 
 
 TOKEN = 'test-token-with-sufficient-entropy-0123456789'
-ENGINE = {'id': 'fixture-engine', 'inferenceBackend': 'fixture_backend',
-          'modelIdentityKind': 'fixture_digest', 'modelSha256': 'a' * 64,
+ENGINE = {'id': 'fixture-engine', 'inferenceBackend': 'cached_onnx',
+          'modelIdentityKind': 'source_weights_sha256', 'modelSha256': 'a' * 64,
           'modelManifestSha256': 'b' * 64, 'prefillOnnxSha256': 'c' * 64,
-          'decodeOnnxSha256': 'd' * 64, 'sourceWeightsSha256': None,
+          'decodeOnnxSha256': 'd' * 64, 'sourceWeightsSha256': '4' * 64,
           'trainingManifestSha256': 'e' * 64, 'framingSha256': 'f' * 64,
           'runtimeConfigSha256': '1' * 64, 'serviceConfigSha256': '2' * 64,
           'cachedManifestSha256': '3' * 64, 'contextBytes': 64}
@@ -40,6 +40,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     malformed_owned = False
     identity_drift_after_first_status = False
     owned_http_status = None
+    owned_identity_omit_field = None
+    owned_status = 'ok'
+    owned_lifecycle = {'workerStarted': True, 'workerCompletedSuccessfully': True}
 
     def log_message(self, _format, *_args):
         pass
@@ -54,6 +57,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+
+    def owned_engine(self):
+        engine = dict(ENGINE)
+        if self.owned_identity_omit_field is not None:
+            engine.pop(self.owned_identity_omit_field, None)
+        return engine
 
     def do_GET(self):
         self.get_requests.append(self.path)
@@ -85,7 +94,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if self.path == '/api/lfg/assess/owned/status':
             if self.headers.get('X-LFG-Session-Token') != TOKEN:
                 return self.respond(401, {'error': 'unauthorized'})
-            return self.respond(200, {'enabled': True, 'status': 'ready', 'engine': ENGINE,
+            return self.respond(200, {'enabled': True, 'status': 'ready', 'engine': self.owned_engine(),
                                       'limits': {'timeoutMs': 100}})
         return self.respond(404, {})
 
@@ -112,11 +121,14 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return self.respond(401, {'error': 'unauthorized'})
             if self.sleep_owned:
                 time.sleep(float(self.sleep_owned))
-            return self.respond(200, {'schemaVersion': ('invalid' if self.malformed_owned else 'lfg.owned-assessment.v1'), 'status': 'ok',
+            measurement = {'schemaVersion': 'lfg.owned-run-measurement.v1',
+                           'status': self.owned_status, 'engineId': ENGINE['id'],
+                           'handlerElapsedMs': 3}
+            if self.owned_lifecycle is not None:
+                measurement.update(self.owned_lifecycle)
+            return self.respond(200, {'schemaVersion': ('invalid' if self.malformed_owned else 'lfg.owned-assessment.v1'), 'status': self.owned_status,
                                       'engine': ENGINE,
-                                      'measurement': {'schemaVersion': 'lfg.owned-run-measurement.v1',
-                                                      'status': 'ok', 'engineId': ENGINE['id'],
-                                                      'handlerElapsedMs': 3},
+                                      'measurement': measurement,
                                       'outputText': 'private fixture output'})
         return self.respond(404, {})
 
@@ -132,6 +144,9 @@ class PairedBenchmarkTests(unittest.TestCase):
         FixtureHandler.malformed_owned = False
         FixtureHandler.identity_drift_after_first_status = False
         FixtureHandler.owned_http_status = None
+        FixtureHandler.owned_identity_omit_field = None
+        FixtureHandler.owned_status = 'ok'
+        FixtureHandler.owned_lifecycle = {'workerStarted': True, 'workerCompletedSuccessfully': True}
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FixtureHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -150,6 +165,12 @@ class PairedBenchmarkTests(unittest.TestCase):
                                        'project': 'fixture-project', 'project_group': 'fixture-group',
                                        'split': 'train', 'text': 'same multibyte text: café PRIVATE123'}) + '\n',
                            encoding='utf-8')
+        manifest_path = self.root / 'manifest.json'
+        manifest_path.write_text(json.dumps({
+            'schema_version': 'lfg.private-corpus-screen-manifest.v1',
+            'outputs': {'train': benchmark.digest(dataset.read_bytes()), 'validation': 'b' * 64},
+            'counts': {'train': 1, 'validation': 1},
+        }), encoding='utf-8')
         policy = {
             'schema_version': 'lfg.private-corpus-screen.v1', 'revision': 'fixture-policy-v1',
             'limits': {'max_policy_bytes': 65536, 'max_plan_bytes': 1000,
@@ -167,6 +188,7 @@ class PairedBenchmarkTests(unittest.TestCase):
             'owned_token_env': 'LFG_TEST_OWNED_TOKEN', 'owned_token_file': None,
             'dataset_path': str(dataset), 'dataset_split': 'train', 'dataset_source_ref': 'fixture:train',
             'screening_policy_path': str(policy_path),
+            'source_manifest_path': str(manifest_path),
             'selection_seed': 42, 'max_records': 5, 'max_source_records': 10,
             'max_dataset_bytes': 10000, 'max_input_bytes': 1000, 'max_request_bytes': 4000,
             'max_response_bytes': max_response, 'max_report_bytes': 100000,
@@ -178,6 +200,14 @@ class PairedBenchmarkTests(unittest.TestCase):
         path.write_text(json.dumps(config), encoding='utf-8')
         os.environ['LFG_TEST_OWNED_TOKEN'] = TOKEN
         return path, config
+
+    def update_manifest_train_artifact(self, config):
+        dataset = Path(config['dataset_path'])
+        manifest_path = Path(config['source_manifest_path'])
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        manifest['outputs']['train'] = benchmark.digest(dataset.read_bytes())
+        manifest['counts']['train'] = sum(bool(line.strip()) for line in dataset.read_text(encoding='utf-8').splitlines())
+        manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
 
     def test_loopback_url_requires_literal_loopback_without_redirect_components(self):
         self.assertTrue(benchmark.validate_loopback_url('http://[::1]:8080/') == 'http://[::1]:8080')
@@ -213,7 +243,10 @@ class PairedBenchmarkTests(unittest.TestCase):
         path, _ = self.make_config()
         report = benchmark.run_benchmark(path)
         self.assertTrue(report['complete'])
+        self.assertFalse((self.root / 'validation.jsonl').exists())
         self.assertEqual(report['source']['split'], 'train')
+        self.assertEqual(report['source']['manifest_train_record_count'], 1)
+        self.assertEqual(report['source']['manifest_train_artifact_sha256'], report['source']['dataset_sha256'])
         self.assertEqual(report['measurement_scope']['cpu'], None)
         self.assertEqual(report['source']['screening_changes'],
                          {'changed_records': 1, 'redaction_counts': {'fixture-marker': 1}})
@@ -314,28 +347,51 @@ class PairedBenchmarkTests(unittest.TestCase):
         dataset = Path(config['dataset_path'])
         dataset.write_text(json.dumps({'id': 'fixture-1', 'split': 'test',
                                        'text': 'synthetic heldout row'}) + '\n', encoding='utf-8')
+        self.update_manifest_train_artifact(config)
         with self.assertRaisesRegex(benchmark.BenchmarkError, 'dataset_split_mismatch'):
             benchmark.run_benchmark(path)
         self.assertEqual(FixtureHandler.get_requests, [])
         self.assertEqual(FixtureHandler.requests, [])
 
-    def test_holdout_named_file_is_rejected_even_with_train_claim(self):
+    def test_manifest_digest_allows_renamed_train_copy_at_configured_path(self):
         path, config = self.make_config(warmups=0, rounds=1)
         original = Path(config['dataset_path'])
-        heldout = original.with_name('validation.jsonl')
-        original.rename(heldout)
-        config['dataset_path'] = str(heldout)
+        alternate_directory = self.root / 'separate-private-location'
+        alternate_directory.mkdir(mode=0o700)
+        renamed_copy = alternate_directory / 'renamed-records.jsonl'
+        renamed_copy.write_bytes(original.read_bytes())
+        config['dataset_path'] = str(renamed_copy)
         path.write_text(json.dumps(config), encoding='utf-8')
-        with self.assertRaisesRegex(benchmark.BenchmarkError, 'heldout_filename_rejected'):
-            benchmark.run_benchmark(path)
-        self.assertEqual(FixtureHandler.get_requests, [])
-        self.assertEqual(FixtureHandler.requests, [])
+        report = benchmark.run_benchmark(path)
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['source']['manifest_train_artifact_sha256'],
+                         report['source']['dataset_sha256'])
 
-    def test_configured_split_must_match_each_row_claim(self):
+    def test_operator_split_label_remains_an_unverified_claim(self):
         path, config = self.make_config(warmups=0, rounds=1)
         config['dataset_split'] = 'development'
         path.write_text(json.dumps(config), encoding='utf-8')
-        with self.assertRaisesRegex(benchmark.BenchmarkError, 'dataset_split_mismatch'):
+        report = benchmark.run_benchmark(path)
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['source']['split'], 'train')
+        self.assertEqual(report['source']['operator_split_claim'], 'development')
+
+    def test_train_artifact_digest_mismatch_fails_before_service_contact(self):
+        path, config = self.make_config(warmups=0, rounds=1)
+        dataset = Path(config['dataset_path'])
+        dataset.write_text(json.dumps({'id': 'fixture-1', 'split': 'train',
+                                       'text': 'changed synthetic input'}) + '\n', encoding='utf-8')
+        with self.assertRaisesRegex(benchmark.BenchmarkError, 'manifest_train_artifact_mismatch'):
+            benchmark.run_benchmark(path)
+        self.assertEqual(FixtureHandler.get_requests, [])
+        self.assertEqual(FixtureHandler.requests, [])
+
+    def test_invalid_manifest_preflight_precedes_opening_missing_corpus(self):
+        path, config = self.make_config(warmups=0, rounds=1)
+        Path(config['source_manifest_path']).write_text(
+            json.dumps({'schema_version': 'unsupported'}), encoding='utf-8')
+        Path(config['dataset_path']).unlink()
+        with self.assertRaisesRegex(benchmark.BenchmarkError, 'source_manifest_invalid'):
             benchmark.run_benchmark(path)
         self.assertEqual(FixtureHandler.get_requests, [])
 
@@ -386,14 +442,55 @@ class PairedBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(benchmark.BenchmarkError, 'private_output_directory_invalid'):
             benchmark.verify_private_path(private_subdir)
 
-    def test_malformed_owned_schema_is_counted_with_missing_handler_time(self):
+    def test_malformed_owned_schema_aborts_with_unknown_worker_lifecycle(self):
         FixtureHandler.malformed_owned = True
         path, _ = self.make_config(warmups=0, rounds=2)
         report = benchmark.run_benchmark(path)
         owned = report['paths']['owned']
-        self.assertEqual(owned['status_counts'], {'malformed_response': 2})
-        self.assertEqual(owned['server_handler_time_missing'], 2)
-        self.assertEqual(owned['server_handler_time_us']['denominator'], 2)
+        self.assertFalse(report['complete'])
+        self.assertEqual(report['abort_code'], 'owned_worker_lifecycle_unknown')
+        self.assertEqual(owned['status_counts'], {'malformed_response': 1})
+        self.assertEqual(owned['worker_lifecycle_counts'], {'unknown': 1})
+        self.assertEqual(owned['server_handler_time_missing'], 1)
+        self.assertEqual(owned['server_handler_time_us']['denominator'], 1)
+
+    def test_timeout_with_missing_or_null_worker_lifecycle_aborts(self):
+        for lifecycle in ({}, {'workerStarted': True, 'workerCompletedSuccessfully': None}):
+            with self.subTest(lifecycle=lifecycle):
+                FixtureHandler.owned_status = 'timeout'
+                FixtureHandler.owned_lifecycle = lifecycle
+                path, _ = self.make_config(warmups=0, rounds=3)
+                report = benchmark.run_benchmark(path)
+                self.assertFalse(report['complete'])
+                self.assertEqual(report['abort_code'], 'owned_worker_lifecycle_unknown')
+                self.assertEqual(report['paths']['owned']['attempts'], 1)
+                self.assertEqual(report['paths']['owned']['worker_lifecycle_counts'], {'unknown': 1})
+                FixtureHandler.requests = []
+                FixtureHandler.get_requests = []
+                FixtureHandler.post_counts = {}
+
+    def test_observed_worker_exit_and_pre_spawn_failure_allow_next_pair(self):
+        FixtureHandler.owned_status = 'timeout'
+        FixtureHandler.owned_lifecycle = {
+            'workerStarted': True, 'workerCompletedSuccessfully': False}
+        path, _ = self.make_config(warmups=0, rounds=2)
+        timeout_report = benchmark.run_benchmark(path)
+        self.assertTrue(timeout_report['complete'])
+        self.assertEqual(timeout_report['paths']['owned']['attempts'], 2)
+        self.assertEqual(timeout_report['paths']['owned']['worker_lifecycle_counts'],
+                         {'worker_exit_observed_failure': 2})
+
+        FixtureHandler.requests = []
+        FixtureHandler.get_requests = []
+        FixtureHandler.post_counts = {}
+        FixtureHandler.owned_status = 'inference_error'
+        FixtureHandler.owned_lifecycle = {'workerStarted': False,
+                                          'workerCompletedSuccessfully': None}
+        path, _ = self.make_config(warmups=0, rounds=2)
+        error_report = benchmark.run_benchmark(path)
+        self.assertTrue(error_report['complete'])
+        self.assertEqual(error_report['paths']['owned']['worker_lifecycle_counts'],
+                         {'worker_not_started': 2})
 
     def test_end_status_identity_drift_rejects_the_run(self):
         FixtureHandler.identity_drift_after_first_status = True
@@ -401,6 +498,23 @@ class PairedBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(benchmark.BenchmarkError, 'service_identity_changed'):
             benchmark.run_benchmark(path)
         self.assertEqual(FixtureHandler.get_requests.count('/status'), 2)
+
+    def test_owned_identity_requires_backend_specific_artifact_hashes(self):
+        self.assertIsNotNone(benchmark.model_identity(ENGINE, owned=True))
+        legacy = {**ENGINE, 'inferenceBackend': 'legacy_full_prefix',
+                  'modelIdentityKind': 'onnx_graph_sha256',
+                  'prefillOnnxSha256': None, 'decodeOnnxSha256': None,
+                  'sourceWeightsSha256': None, 'cachedManifestSha256': None}
+        self.assertIsNotNone(benchmark.model_identity(legacy, owned=True))
+        incomplete = {**ENGINE, 'prefillOnnxSha256': None}
+        self.assertIsNone(benchmark.model_identity(incomplete, owned=True))
+
+    def test_missing_backend_identity_aborts_before_measurements(self):
+        FixtureHandler.owned_identity_omit_field = 'prefillOnnxSha256'
+        path, _ = self.make_config(warmups=0, rounds=1)
+        with self.assertRaisesRegex(benchmark.BenchmarkError, 'owned_identity_unavailable'):
+            benchmark.run_benchmark(path)
+        self.assertEqual(FixtureHandler.requests, [])
 
     def test_owned_server_error_aborts_pairs_and_marks_contamination_unknown(self):
         FixtureHandler.owned_http_status = 503
