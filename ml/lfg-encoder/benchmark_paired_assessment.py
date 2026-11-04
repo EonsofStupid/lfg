@@ -5,8 +5,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import copy
 import hashlib
 import http.client
+import io
 import ipaddress
 import json
 import math
@@ -17,13 +19,12 @@ import random
 import re
 import socket
 import statistics
+import stat
 import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,7 +33,6 @@ import screen_private_corpus as screening
 
 SCHEMA = 'lfg.paired-http-benchmark-config.v1'
 REPORT_SCHEMA = 'lfg.paired-http-assessment-benchmark.v1'
-REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FIELDS = {
     'schema_version', 'target_base_url', 'owned_token_env', 'owned_token_file',
     'dataset_path', 'dataset_split', 'dataset_source_ref', 'selection_seed', 'screening_policy_path',
@@ -53,8 +53,13 @@ KNOWN_OWNED_STATUSES = {
 ENGINE_ID_FIELDS = (
     'id', 'version', 'sha256', 'backend', 'modelSha256', 'modelManifestSha256',
     'trainingManifestSha256', 'framingSha256', 'runtimeConfigSha256',
-    'serviceConfigSha256', 'cachedManifestSha256',
+    'serviceConfigSha256', 'cachedManifestSha256', 'inferenceBackend',
+    'modelIdentityKind', 'prefillOnnxSha256', 'decodeOnnxSha256',
+    'sourceWeightsSha256', 'contextBytes',
 )
+# JSON extraction/size checks, peer/Host/Origin/token authorization, and route
+# matching reject before owned worker dispatch for these statuses.
+SAFE_REJECTION_HTTP_STATUSES = {400, 401, 403, 404, 413}
 
 
 class BenchmarkError(Exception):
@@ -79,6 +84,75 @@ class HttpResult:
     response_code: str | None = None
 
 
+class DeadlineSocket:
+    """Socket facade that reapplies a total request deadline on every I/O."""
+
+    def __init__(self, sock: socket.socket, deadline: float):
+        self._sock = sock
+        self._deadline = deadline
+
+    def _remaining(self) -> float:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout('deadline expired')
+        return remaining
+
+    def recv(self, size: int, flags: int = 0) -> bytes:
+        self._sock.settimeout(self._remaining())
+        return self._sock.recv(size, flags)
+
+    def sendall(self, data: bytes, flags: int = 0) -> None:
+        view = memoryview(data)
+        while view:
+            self._sock.settimeout(self._remaining())
+            sent = self._sock.send(view, flags)
+            if sent <= 0:
+                raise OSError('socket closed')
+            view = view[sent:]
+
+    def makefile(self, mode: str = 'r', buffering: int | None = None, *, encoding=None,
+                 errors=None, newline=None):
+        if 'r' not in mode or 'b' not in mode:
+            return self._sock.makefile(mode, buffering, encoding=encoding, errors=errors, newline=newline)
+        reader = DeadlineRawReader(DeadlineSocket(self._sock.dup(), self._deadline))
+        return io.BufferedReader(reader, buffer_size=io.DEFAULT_BUFFER_SIZE if buffering in (None, -1) else buffering)
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+class DeadlineRawReader(io.RawIOBase):
+    def __init__(self, sock: DeadlineSocket):
+        super().__init__()
+        self._deadline_sock = sock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        data = self._deadline_sock.recv(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+    def close(self) -> None:
+        self._deadline_sock.close()
+        super().close()
+
+
+class DeadlineHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, deadline: float, timeout=None):
+        self._deadline = deadline
+        super().__init__(host, timeout=timeout)
+
+    def connect(self):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout('deadline expired')
+        raw = socket.create_connection((self.host, self.port), timeout=remaining,
+                                       source_address=self.source_address)
+        self.sock = DeadlineSocket(raw, self._deadline)
+
+
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -98,23 +172,29 @@ def is_int(value: object, minimum: int = 0, maximum: int | None = None) -> bool:
     return type(value) is int and value >= minimum and (maximum is None or value <= maximum)
 
 
-def inside(path: Path, directory: Path) -> bool:
-    try:
-        path.relative_to(directory)
-        return True
-    except ValueError:
-        return False
-
-
 def _resolve_outside_repo(value: str, code: str) -> Path:
     path = Path(value).expanduser()
     try:
         resolved = path.resolve(strict=True)
     except OSError:
         raise BenchmarkError(code) from None
-    if inside(resolved, REPO_ROOT):
+    if in_git_worktree(resolved):
         raise BenchmarkError('private_input_inside_repository')
     return resolved
+
+
+def in_git_worktree(path: Path) -> bool:
+    probe = path if path.is_dir() else path.parent
+    if any(ancestor.name == '.git' or (ancestor / '.git').exists()
+           for ancestor in (probe, *probe.parents)):
+        return True
+    try:
+        result = subprocess.run(['git', '-C', str(probe), 'rev-parse', '--git-dir'],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        raise BenchmarkError('git_privacy_unverified') from None
+    return result.returncode == 0
 
 
 def validate_loopback_url(value: object) -> str:
@@ -254,6 +334,8 @@ exit 0
 
 def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, str]], str, str, str, dict, int]:
     path = _resolve_outside_repo(config['dataset_path'], 'dataset_unavailable')
+    if path.stem.lower() in {'validation', 'valid', 'test', 'heldout', 'holdout', 'final_holdout'}:
+        raise BenchmarkError('heldout_filename_rejected')
     try:
         info = path.stat()
         if info.st_size > config['max_dataset_bytes']:
@@ -263,7 +345,10 @@ def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, s
         if len(raw) > config['max_dataset_bytes']:
             raise BenchmarkError('dataset_size_limit')
         decoded = raw.decode('utf-8')
-        parsed = [json.loads(line) for line in decoded.splitlines() if line.strip()]
+        parsed = []
+        for line_index, line in enumerate(decoded.splitlines()):
+            if line.strip():
+                parsed.append((json.loads(line), line.encode('utf-8'), line_index + 1))
     except BenchmarkError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -272,13 +357,39 @@ def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, s
         raise BenchmarkError('dataset_record_limit')
     rows: list[dict[str, str]] = []
     identifiers: set[str] = set()
-    for record in parsed:
+    canonical_split = {'train': 'train', 'training': 'train', 'dev': 'dev', 'development': 'dev'}
+    for record, raw_line, line_number in parsed:
         if (not isinstance(record, dict) or not isinstance(record.get('id'), str)
                 or not record['id'].strip() or not isinstance(record.get('text'), str)
                 or not record['text'].strip() or record['id'] in identifiers):
             raise BenchmarkError('dataset_invalid')
+        row_split = record.get('split')
+        if (row_split is not None and (not isinstance(row_split, str) or row_split not in canonical_split
+                or canonical_split[row_split] != canonical_split[config['dataset_split']])):
+            raise BenchmarkError('dataset_split_mismatch')
+        upstream_hashes = {}
+        for field in ('candidate_file_sha256', 'source_record_sha256', 'source_text_sha256',
+                      'screen_policy_sha256', 'screened_text_sha256'):
+            field_value = record.get(field)
+            if field_value is not None:
+                if not isinstance(field_value, str) or not SHA_RE.fullmatch(field_value):
+                    raise BenchmarkError('dataset_invalid')
+                upstream_hashes[field] = field_value
         identifiers.add(record['id'])
-        rows.append({'id': record['id'], 'text': record['text']})
+        provenance = {
+            'source_line_number': line_number,
+            'dataset_record_sha256': digest(raw_line),
+            'record_id_sha256': digest(record['id'].encode('utf-8')),
+            'row_split_claim': row_split,
+        }
+        for field in ('family', 'project', 'project_group'):
+            value = record.get(field)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise BenchmarkError('dataset_invalid')
+                provenance[f'{field}_sha256'] = digest(value.encode('utf-8'))
+        provenance.update({f'upstream_{key}': value for key, value in upstream_hashes.items()})
+        rows.append({'id': record['id'], 'text': record['text'], 'provenance': provenance})
     if len(rows) > config['max_records']:
         rows = random.Random(config['selection_seed']).sample(rows, config['max_records'])
     source_selected_hash = digest(json.dumps(
@@ -300,6 +411,7 @@ def load_rows(config: dict, policy: dict, rules: list) -> tuple[list[dict[str, s
         redaction_counts.update(found)
         if len(screened.encode('utf-8')) > config['max_input_bytes']:
             raise BenchmarkError('screened_input_size_limit')
+        row['provenance']['screened_text_sha256'] = digest(screened.encode('utf-8'))
     selected_digest = digest(json.dumps(
         [{'id_sha256': digest(row['id'].encode()), 'text_sha256': digest(row['text'].encode('utf-8'))}
          for row in rows], sort_keys=True, separators=(',', ':')).encode())
@@ -315,53 +427,39 @@ def load_screening_policy(config: dict) -> tuple[dict, list, str]:
         raise BenchmarkError(f'screening_policy_{error}') from None
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def make_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-
-
-def http_json(opener: urllib.request.OpenerDirector, url: str, *, method: str,
+def http_json(url: str, *, method: str,
               payload: dict | None, token: str | None, timeout: float,
               max_request_bytes: int, max_response_bytes: int) -> HttpResult:
     body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if body is not None and len(body) > max_request_bytes:
         raise BenchmarkError('request_size_limit')
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        validate_loopback_url(f'{parsed.scheme}://{parsed.netloc}')
+    except (ValueError, BenchmarkError):
+        raise BenchmarkError('invalid_loopback_target') from None
+    if not parsed.path.startswith('/') or parsed.query or parsed.fragment:
+        raise BenchmarkError('invalid_loopback_target')
     headers = {'Accept': 'application/json', 'Cache-Control': 'no-store'}
     if body is not None:
         headers['Content-Type'] = 'application/json'
     if token is not None:
         headers['X-LFG-Session-Token'] = token
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    headers['Connection'] = 'close'
     started = time.perf_counter_ns()
+    deadline = time.monotonic() + timeout
+    connection = DeadlineHTTPConnection(parsed.netloc, deadline, timeout=timeout)
     try:
-        with opener.open(request, timeout=timeout) as response:
-            status = response.status
-            raw = response.read(max_response_bytes + 1)
-    except urllib.error.HTTPError as error:
-        try:
-            error.read(max_response_bytes + 1)
-        except (socket.timeout, TimeoutError):
-            raise ClientTimeout('client_timeout_contamination_unknown', time.perf_counter_ns() - started) from None
-        except (OSError, http.client.HTTPException):
-            raise BenchmarkError('http_transport_error') from None
-        finally:
-            error.close()
-        elapsed = time.perf_counter_ns() - started
-        return HttpResult(error.code, None, elapsed, f'http_{error.code}')
+        connection.request(method, parsed.path or '/', body=body, headers=headers)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read(max_response_bytes + 1)
     except (socket.timeout, TimeoutError):
         raise ClientTimeout('client_timeout_contamination_unknown', time.perf_counter_ns() - started) from None
-    except urllib.error.URLError as error:
-        if isinstance(error.reason, (socket.timeout, TimeoutError)):
-            raise ClientTimeout('client_timeout_contamination_unknown', time.perf_counter_ns() - started) from None
+    except (OSError, http.client.HTTPException):
         raise BenchmarkError('http_transport_error') from None
-    except OSError:
-        raise BenchmarkError('http_transport_error') from None
-    except http.client.HTTPException:
-        raise BenchmarkError('http_transport_error') from None
+    finally:
+        connection.close()
     elapsed = time.perf_counter_ns() - started
     if len(raw) > max_response_bytes:
         return HttpResult(status, None, elapsed, 'response_too_large')
@@ -398,13 +496,13 @@ def model_identity(value: object) -> dict | None:
             if isinstance(value.get(key), str) or type(value.get(key)) in (int, bool)}
 
 
-def validated_status_identity(opener, base_url, token, cfg) -> tuple[dict, dict]:
+def validated_status_identity(base_url, token, cfg) -> tuple[dict, dict]:
     status_result = http_json(
-        opener, base_url + '/status', method='GET', payload=None, token=None,
+        base_url + '/status', method='GET', payload=None, token=None,
         timeout=cfg['client_timeout_seconds'], max_request_bytes=cfg['max_request_bytes'],
         max_response_bytes=cfg['max_response_bytes'])
     owned_result = http_json(
-        opener, base_url + '/api/lfg/assess/owned/status', method='GET', payload=None, token=token,
+        base_url + '/api/lfg/assess/owned/status', method='GET', payload=None, token=token,
         timeout=cfg['client_timeout_seconds'], max_request_bytes=cfg['max_request_bytes'],
         max_response_bytes=cfg['max_response_bytes'])
     if status_result.status != 200 or status_result.payload is None:
@@ -416,10 +514,11 @@ def validated_status_identity(opener, base_url, token, cfg) -> tuple[dict, dict]
     engine = model_identity(owned.get('engine'))
     limits = owned.get('limits')
     if (owned.get('enabled') is not True or owned.get('status') != 'ready' or engine is None
-            or not isinstance(limits, dict) or not is_int(limits.get('timeoutMs'), 1, 600000)):
+            or not isinstance(limits, dict) or not is_int(limits.get('timeoutMs'), 1, sys.maxsize)):
         raise BenchmarkError('owned_service_not_ready')
-    required_timeout = limits['timeoutMs'] / 1000 + cfg['server_timeout_overhead_ms'] / 1000
-    if cfg['client_timeout_seconds'] <= required_timeout:
+    required_timeout_ms = limits['timeoutMs'] + cfg['server_timeout_overhead_ms']
+    if (required_timeout_ms > threading.TIMEOUT_MAX * 1000
+            or cfg['client_timeout_seconds'] * 1000 <= required_timeout_ms):
         raise BenchmarkError('client_timeout_not_longer_than_server_bound')
     deterministic_identity = {
         'phase': server.get('phase') if isinstance(server.get('phase'), str) else None,
@@ -474,18 +573,22 @@ def safe_status(result: HttpResult) -> str:
 
 
 def empty_path_stats() -> dict:
-    return {'status_counts': Counter(), 'warmup_status_counts': Counter(),
-            'latency_ns': [], 'handler_time_us': [], 'handler_missing': 0,
-            'attempts': 0, 'completed_responses': 0}
+    def empty_phase() -> dict:
+        return {'status_counts': Counter(), 'latency_ns': [],
+                'attempts': 0, 'completed_responses': 0}
+
+    return {**empty_phase(), 'handler_time_us': [], 'handler_missing': 0,
+            'warmup': empty_phase()}
 
 
 def record_response(stats: dict, phase: str, status: str, result: HttpResult,
                     handler_value: int | None, handler_scale: int) -> None:
-    stats['attempts'] += 1
-    (stats['warmup_status_counts'] if phase == 'warmup' else stats['status_counts'])[status] += 1
+    phase_stats = stats['warmup'] if phase == 'warmup' else stats
+    phase_stats['attempts'] += 1
+    phase_stats['status_counts'][status] += 1
     if result.status is not None:
-        stats['completed_responses'] += 1
-        stats['latency_ns'].append(result.elapsed_ns)
+        phase_stats['completed_responses'] += 1
+        phase_stats['latency_ns'].append(result.elapsed_ns)
     if phase == 'measured':
         if handler_value is None:
             stats['handler_missing'] += 1
@@ -494,14 +597,20 @@ def record_response(stats: dict, phase: str, status: str, result: HttpResult,
 
 
 def public_stats(stats: dict) -> dict:
+    warmup = stats['warmup']
     return {
         'attempts': stats['attempts'],
         'completed_responses': stats['completed_responses'],
         'status_counts': dict(sorted(stats['status_counts'].items())),
-        'warmup_status_counts': dict(sorted(stats['warmup_status_counts'].items())),
         'end_to_end_latency': summarize(stats['latency_ns'], stats['completed_responses']),
         'server_handler_time_us': summarize(stats['handler_time_us'], stats['attempts']),
         'server_handler_time_missing': stats['handler_missing'],
+        'warmup': {
+            'attempts': warmup['attempts'],
+            'completed_responses': warmup['completed_responses'],
+            'status_counts': dict(sorted(warmup['status_counts'].items())),
+            'end_to_end_latency': summarize(warmup['latency_ns'], warmup['completed_responses']),
+        },
     }
 
 
@@ -528,6 +637,7 @@ def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
             'screened_selected_id_text_digest': selected_hash,
             'source_records': source_record_count,
             'selected_records': len(rows),
+            'selected_record_provenance': [row['provenance'] for row in rows],
             'selection': 'seeded sample without replacement' if len(rows) < source_record_count else 'all bounded source records',
             'selection_seed': cfg['selection_seed'],
         },
@@ -535,6 +645,7 @@ def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
             'target': cfg['target_base_url'],
             'deterministic': deterministic_id,
             'owned': owned_id,
+            'identity_after': None,
             'server_binary_sha256': None,
             'server_binary_identity_basis': 'not attested by the HTTP contracts',
         },
@@ -592,8 +703,9 @@ def run_benchmark(config_path: Path) -> dict:
     token = load_token(cfg)
     policy, rules, policy_hash = load_screening_policy(cfg)
     rows, dataset_hash, source_selected_hash, selected_hash, screening_changes, source_count = load_rows(cfg, policy, rules)
-    opener = make_opener()
-    deterministic_id, owned_id = validated_status_identity(opener, base_url, token, cfg)
+    deterministic_id, owned_id = validated_status_identity(base_url, token, cfg)
+    deterministic_id_before = copy.deepcopy(deterministic_id)
+    owned_id_before = copy.deepcopy(owned_id)
     report = build_report_base(cfg, config_hash, dataset_hash, source_selected_hash, selected_hash,
                                screening_changes, policy_hash, source_count, rows, deterministic_id, owned_id)
     stats = {'deterministic': empty_path_stats(), 'owned': empty_path_stats()}
@@ -631,7 +743,7 @@ def run_benchmark(config_path: Path) -> dict:
                     request_token = token
                 try:
                     result = http_json(
-                        opener, endpoint, method='POST', payload=payload, token=request_token,
+                        endpoint, method='POST', payload=payload, token=request_token,
                         timeout=cfg['client_timeout_seconds'], max_request_bytes=cfg['max_request_bytes'],
                         max_response_bytes=cfg['max_response_bytes'])
                 except ClientTimeout as error:
@@ -669,6 +781,15 @@ def run_benchmark(config_path: Path) -> dict:
                                     1 if path_name == 'deterministic' else 1000)
                 else:
                     record_response(stats[path_name], phase, outcome, result, None, 1)
+                ambiguous_http = (result.status is not None and result.status != 200
+                                  and result.status not in SAFE_REJECTION_HTTP_STATUSES)
+                owned_busy = path_name == 'owned' and result.status == 200 and outcome == 'busy'
+                if ambiguous_http or owned_busy:
+                    report['abort_code'] = ('owned_busy_contamination_unknown' if owned_busy
+                                            else 'http_response_contamination_unknown')
+                    report['contamination_state'] = 'unknown; no further requests issued'
+                    interrupted = True
+                    break
             if interrupted:
                 break
         if interrupted:
@@ -678,6 +799,13 @@ def run_benchmark(config_path: Path) -> dict:
                           policy_path, policy_hash, cfg)
         report['paths'] = {name: public_stats(value) for name, value in stats.items()}
         return report
+    deterministic_after, owned_after = validated_status_identity(base_url, token, cfg)
+    if deterministic_after != deterministic_id_before or owned_after != owned_id_before:
+        raise BenchmarkError('service_identity_changed')
+    report['service']['identity_after'] = {
+        'deterministic': deterministic_after,
+        'owned': owned_after,
+    }
     verify_run_inputs(dataset_path, dataset_hash, config_path, config_raw, config_hash,
                       policy_path, policy_hash, cfg)
     report['paths'] = {name: public_stats(value) for name, value in stats.items()}
@@ -691,7 +819,7 @@ def verify_private_path(path: Path) -> Path:
         info = resolved.stat()
     except OSError:
         raise BenchmarkError('private_output_directory_unavailable') from None
-    if not resolved.is_dir() or inside(resolved, REPO_ROOT):
+    if not resolved.is_dir() or in_git_worktree(resolved):
         raise BenchmarkError('private_output_directory_invalid')
     if os.name == 'posix':
         if info.st_uid != os.geteuid() or info.st_mode & 0o077:
@@ -703,24 +831,69 @@ def verify_private_path(path: Path) -> Path:
     return resolved
 
 
+def open_private_output_directory(path: Path) -> tuple[Path, int | None]:
+    resolved = verify_private_path(path)
+    if os.name != 'posix':
+        return resolved, None
+    if (not hasattr(os, 'O_DIRECTORY') or not hasattr(os, 'O_NOFOLLOW')
+            or os.open not in os.supports_dir_fd):
+        raise BenchmarkError('private_output_permissions_unverified')
+    descriptor = None
+    try:
+        expected = resolved.stat()
+        parts = resolved.parts
+        descriptor = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for index, component in enumerate(parts[1:], start=1):
+            next_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                       dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+            info = os.fstat(descriptor)
+            leaf = index == len(parts) - 1
+            if not stat.S_ISDIR(info.st_mode):
+                raise BenchmarkError('private_output_directory_invalid')
+            if leaf:
+                if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise BenchmarkError('private_output_permissions_unverified')
+                if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
+                    raise BenchmarkError('private_output_directory_changed')
+            elif (info.st_uid not in (0, os.geteuid())
+                  or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))):
+                raise BenchmarkError('private_output_ancestor_unsafe')
+        return resolved, descriptor
+    except BenchmarkError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise BenchmarkError('private_output_permissions_unverified') from None
+
+
 def write_report(path: Path, report: dict, max_bytes: int) -> None:
-    parent = verify_private_path(path.parent)
-    target = parent / path.name
-    if target.resolve(strict=False) != target or target.name in ('', '.', '..'):
+    target_name = path.name
+    if target_name in ('', '.', '..') or Path(target_name).name != target_name:
         raise BenchmarkError('private_output_path_invalid')
     raw = (json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
     if len(raw) > max_bytes:
         raise BenchmarkError('report_size_limit')
+    parent, directory_fd = open_private_output_directory(path.parent)
+    target = parent / target_name
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, 'O_BINARY'):
         flags |= os.O_BINARY
+    if os.name == 'posix':
+        flags |= os.O_NOFOLLOW
+    fd = None
     try:
-        fd = os.open(target, flags, 0o600)
-    except FileExistsError:
-        raise BenchmarkError('report_already_exists') from None
-    except OSError:
-        raise BenchmarkError('report_create_failed') from None
-    try:
+        try:
+            fd = (os.open(target_name, flags, 0o600, dir_fd=directory_fd)
+                  if directory_fd is not None else os.open(target, flags, 0o600))
+        except FileExistsError:
+            raise BenchmarkError('report_already_exists') from None
+        except OSError:
+            raise BenchmarkError('report_create_failed') from None
         if os.name == 'posix':
             os.fchmod(fd, 0o600)
             info = os.fstat(fd)
@@ -733,24 +906,35 @@ def write_report(path: Path, report: dict, max_bytes: int) -> None:
             output.flush()
             os.fsync(fd)
     except BenchmarkError:
-        os.close(fd)
-        try:
-            target.unlink()
-        except OSError:
-            pass
+        if fd is not None:
+            os.close(fd)
+            try:
+                if directory_fd is not None:
+                    os.unlink(target_name, dir_fd=directory_fd)
+                else:
+                    target.unlink()
+            except OSError:
+                pass
         raise
     except OSError:
-        os.close(fd)
-        try:
-            target.unlink()
-        except OSError:
-            pass
+        if fd is not None:
+            os.close(fd)
+            try:
+                if directory_fd is not None:
+                    os.unlink(target_name, dir_fd=directory_fd)
+                else:
+                    target.unlink()
+            except OSError:
+                pass
         raise BenchmarkError('report_write_failed') from None
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def main(argv: list[str] | None = None) -> int:

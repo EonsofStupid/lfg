@@ -125,12 +125,16 @@ integer arithmetic. The config, screening policy, and dataset must be outside
 the repository. `dataset_path` names one explicit file; no directory or glob
 is expanded. The configured split must be
 `train`, `training`, `dev`, or `development`; validation and heldout split
-names are not accepted. Split and `dataset_source_ref` are operator claims,
+names are not accepted, and rows with split claims must match the configured
+development split. Validation, test, and heldout filename stems are rejected
+before contacting the service. Split and `dataset_source_ref` are operator claims,
 not independently verified. A development split claim is not a final-holdout
-classification or a quality evaluation. The tool applies the configured screening policy to selected rows
-before sending the same screened text to both paths. The source and screened
-ID/text digests and redaction counts are reported without the text. The policy
-digest is recorded; screening matches are not proof that all sensitive data
+classification or a quality evaluation. The tool applies the configured
+screening policy to selected rows before sending the same screened text to both
+paths. The report includes source and screened ID/text digests, selected line
+numbers, and hashes for row, family, project, group and upstream source fields
+when present; it does not include their raw values or text. The policy digest
+and replacement counts are recorded; screening matches are not proof that all sensitive data
 was removed. The tracked `ml/lfg-encoder/private-corpus-screen.example.json`
 is a starting point to copy and review into a private policy file. Use reviewed
 patterns because Python regular expressions do not provide hard per-match CPU
@@ -172,8 +176,19 @@ an existing, private directory outside the repository; creation is exclusive
 and permissions are checked. Reports contain status counts and denominators,
 latency summaries, request settings, digests, and service identities, but no
 prompt text, project context, response text, tokens, or raw response bodies.
-Client timeout or ambiguous transport failure aborts further measurement and
-marks contamination unknown.
+The configured client timeout is a monotonic wall deadline across connection,
+request send, status/header parsing and bounded body reads. Client timeout or
+ambiguous transport failure aborts further measurement and
+marks contamination unknown. An owned `busy` response and non-200 responses
+outside the known pre-dispatch rejection statuses (400, 401, 403, 404, 413)
+also stop the run; the report retains the status and marks contamination
+unknown. Those statuses cover request extraction/size, authorization, and route
+rejections before worker dispatch. Complete runs compare service identities at
+start, in each response, and at end. Aborted runs do not send an extra status
+request after a timeout or ambiguous worker result; their ending identity is
+unknown.
+Warmup attempts, statuses, completions, and end-to-end latency have their own
+report section and never enter measured latency or handler denominators.
 
 End-to-end timing starts immediately before opening the HTTP request, after
 request JSON and headers are prepared, and ends after reading a bounded
