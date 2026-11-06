@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import classifier_comparison as comparison
+import screen_private_corpus
 
 
 def _encoded(value):
@@ -14,16 +15,24 @@ def _encoded(value):
 
 
 class ComparisonTests(unittest.TestCase):
-    def _corpus(self, root: Path, include_test: bool = False):
+    def _corpus(self, root: Path, include_test: bool = False, same_project_across_splits: bool = False,
+                extra_screened_validation: bool = False):
         root.mkdir(parents=True)
         tax = {"schema_version": "lfg.encoder-evaluation-taxonomy.v1",
                "intents": ["build", "verify"], "capabilities": ["write"], "risks": ["sensitive"]}
         (root / "taxonomy.json").write_bytes(_encoded(tax))
+        policy = {"schema_version": screen_private_corpus.POLICY_VERSION, "revision": "test-policy-v1",
+                  "limits": {key: 100000 for key in screen_private_corpus.LIMITS},
+                  "rules": [{"id": "test-secret", "pattern": "SCREEN-SECRET-123", "replacement": "[REDACTED]"}]}
+        policy_path = root / "policy.json"
+        policy_raw = _encoded(policy)
+        policy_path.write_bytes(policy_raw)
+        policy, rules, policy_sha = screen_private_corpus.load_policy_bytes(policy_raw, len(policy_raw))
         rows = {
             "train": [
                 {"id": "a", "family": "fa", "text": "screened train text alpha", "intents": ["build", "verify"],
                  "capabilities": ["write"], "risks": [], "verified": False, "source": {"project": "train-project"}},
-                {"id": "b", "family": "fb", "text": "screened train text beta", "intents": ["build"],
+                {"id": "b", "family": "fb", "text": "SCREEN-SECRET-123 train text beta", "intents": ["build"],
                  "capabilities": ["write"], "risks": [], "verified": False, "source": {"project": "train-project"}},
             ],
             "validation": [
@@ -31,29 +40,41 @@ class ComparisonTests(unittest.TestCase):
                  "capabilities": [], "risks": [], "verified": False, "source": {"project": "validation-project"}},
             ],
         }
-        sources, output_digests, output_counts = [], {}, {}
+        sources, output_digests, output_counts, source_counts = [], {}, {}, {}
+        matched_records = 0
         for split in ("train", "validation"):
             source_bytes, filtered = bytearray(), []
             group = f"{split}-group"
             for item in rows[split]:
+                if same_project_across_splits and split == "validation":
+                    item["source"]["project"] = "train-project"
                 line = _encoded(item)
                 source_bytes.extend(line + b"\n")
+                screened_text, matches = screen_private_corpus._screen(item["text"], rules, policy["limits"])
                 filtered.append({"schema_version": "lfg.screened-text-candidate.v1", "id": item["id"],
                                  "family": item["family"], "project": item["source"]["project"],
                                  "project_group": group, "split": split, "text": item["text"],
                                  "candidate_file_sha256": "a" * 64,
                                  "source_record_sha256": hashlib.sha256(line).hexdigest(),
-                                 "screened_text_sha256": hashlib.sha256(item["text"].encode()).hexdigest(),
-                                 "screen_policy_sha256": "b" * 64, "redaction_counts": {},
+                                 "source_text_sha256": hashlib.sha256(item["text"].encode()).hexdigest(),
+                                 "screened_text_sha256": hashlib.sha256(screened_text.encode()).hexdigest(),
+                                 "screen_policy_sha256": policy_sha, "redaction_counts": dict(matches),
                                  "review_status": "unreviewed", "redaction_complete": False})
+                filtered[-1]["text"] = screened_text
+                matched_records += int(bool(matches))
             source_file = root / f"source-{split}.jsonl"
             source_file.write_bytes(source_bytes)
+            source_counts[split] = len(rows[split])
             source_sha = hashlib.sha256(source_bytes).hexdigest()
             for record in filtered:
                 record["candidate_file_sha256"] = source_sha
-            sources.append({"project": f"{split}-project", "project_group": group, "split": split,
+            sources.append({"project": rows[split][0]["source"]["project"], "project_group": group, "split": split,
                             "path": source_file.name})
             screened_bytes = b"".join(_encoded(x) + b"\n" for x in filtered)
+            if extra_screened_validation and split == "validation":
+                extra = dict(filtered[0], id="extra", source_record_sha256="d" * 64)
+                screened_bytes += _encoded(extra) + b"\n"
+                filtered.append(extra)
             (root / f"{split}.jsonl").write_bytes(screened_bytes)
             output_digests[split] = hashlib.sha256(screened_bytes).hexdigest()
             output_counts[split] = len(filtered)
@@ -66,31 +87,38 @@ class ComparisonTests(unittest.TestCase):
         plan_path = root / "plan.json"
         plan_path.write_bytes(plan_raw)
         manifest = {"schema_version": "lfg.private-corpus-screen-manifest.v1",
-                    "plan_sha256": hashlib.sha256(plan_raw).hexdigest(), "policy_sha256": "b" * 64,
-                    "screen_code_sha256": "c" * 64,
+                    "plan_sha256": hashlib.sha256(plan_raw).hexdigest(), "policy_sha256": policy_sha,
+                    "screen_code_sha256": comparison.sha(Path(screen_private_corpus.__file__).read_bytes()),
+                    "helper_sha256": {Path(module.__file__).name: comparison.sha(Path(module.__file__).read_bytes())
+                                      for module in (screen_private_corpus.assessment_distill,
+                                                     screen_private_corpus.corpus_audit,
+                                                     screen_private_corpus.review_corpus)},
                     "source_snapshots": [{"sha256": hashlib.sha256((root / s["path"]).read_bytes()).hexdigest(),
-                                          "records": output_counts[s["split"]]} for s in sources if s["split"] != "test"],
-                    "counts": output_counts, "matched_records": 0,
+                                          "records": source_counts[s["split"]]} for s in sources if s["split"] != "test"],
+                    "counts": output_counts, "matched_records": matched_records,
                     "claims": {"redaction_complete": False, "human_reviewed": False,
                                "original_source_verified": False, "independent_split_verified": False,
                                "promotion_eligible": False}, "outputs": output_digests}
         (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
-        return plan_path
+        return plan_path, policy_path
 
-    def _config(self, corpus: Path, plan: Path, **extra):
+    def _config(self, corpus: Path, plan: Path, policy: Path, **extra):
         return {"schema_version": comparison.SCHEMA, "revision": "test-1", "screened_corpus": str(corpus),
-                "label_plan": str(plan), "target_field": "intents", "selected_labels": ["build", "verify"],
+                "label_plan": str(plan), "screen_policy": str(policy),
+                "target_field": "intents", "selected_labels": ["build", "verify"],
                 "seed": 17, "max_rows": 100, "max_text_bytes": 1024, "max_source_bytes": 4096,
                 "max_total_source_bytes": 8192,
                 "max_manifest_bytes": 4096, "max_screened_file_bytes": 8192, "max_features": 100,
                 "knn_neighbors": 1, "tree_max_depth": None, "tfidf_ngram_range": [1, 1],
                 "logistic_c": 1.0, "logistic_max_iter": 200, "knn_weights": "uniform", "knn_p": 2,
-                "tree_criterion": "gini", "near_duplicate_similarity": 0.9, **extra}
+                "tree_criterion": "gini", "near_duplicate_similarity": 0.9,
+                "max_near_duplicate_pairs": 100, "max_near_duplicate_work": 1_000_000,
+                "max_policy_bytes": 65536, "constant_target_behavior": "abstain", **extra}
 
     def test_load_config_accepts_inert_extension_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            path.write_text(json.dumps(self._config(Path(tmp), Path(tmp), extension_note={"future": True})))
+            path.write_text(json.dumps(self._config(Path(tmp), Path(tmp), Path(tmp), extension_note={"future": True})))
             config, digest = comparison.load_config(path, 65536)
             self.assertEqual(config["extension_note"], {"future": True})
             self.assertEqual(len(digest), 64)
@@ -98,26 +126,118 @@ class ComparisonTests(unittest.TestCase):
     def test_test_source_rejected_before_source_file_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "screened"
-            plan = self._corpus(root, include_test=True)
+            plan, policy = self._corpus(root, include_test=True)
             with self.assertRaisesRegex(ValueError, "non-development source"):
-                comparison.load_screened_corpus(root, plan, 100, 1024, 4096, 8192, 4096, 8192, 0.9)
+                self._load(root, plan, policy)
 
     def test_complete_multilabel_arrays_preserved_and_missing_rejected(self):
         taxonomy = {"intents": {"build", "verify"}}
         rows = [{"intents": ["build", "verify"], "labels_pending": False, "verified": False},
                 {"intents": [], "labels_pending": False, "verified": False}]
-        encoder, matrix = comparison._matrix(rows, "intents", ["build", "verify"], taxonomy)
+        encoder, matrix, observed = comparison._matrix(rows, "intents", ["build", "verify"], taxonomy)
         self.assertEqual(list(encoder.classes_), ["build", "verify"])
         self.assertEqual(matrix.tolist(), [[1, 1], [0, 0]])
-        with self.assertRaisesRegex(ValueError, "target arrays"):
-            comparison._matrix([{"verified": False}], "intents", ["build"], taxonomy)
+        self.assertEqual(observed, [True, False])
+        _, explicit_empty, explicit_observed = comparison._matrix(
+            [{"intents": [], "verified": False, "target_completeness": {"intents": True}}],
+            "intents", ["build"], taxonomy)
+        self.assertEqual(explicit_empty.tolist(), [[0]])
+        self.assertEqual(explicit_observed, [True])
+        _, missing, missing_observed = comparison._matrix([{"verified": False}], "intents", ["build"], taxonomy)
+        self.assertEqual(missing.tolist(), [[0]])
+        self.assertEqual(missing_observed, [False])
+
+    def test_constant_target_fallback_is_consistent_for_all_positive_and_negative(self):
+        import numpy as np
+        for value in (0, 1):
+            training = np.full((3, 1), value, dtype=int)
+            variable, constant = comparison._target_partition(training)
+            self.assertEqual(variable, [])
+            self.assertEqual(constant, [0])
+            abstain = comparison._constant_fallbacks(training, ["x"], 2, "abstain")
+            fallback = comparison._constant_fallbacks(training, ["x"], 2, "majority_class")
+            self.assertEqual(abstain.tolist(), [[-1], [-1]])
+            self.assertEqual(fallback.tolist(), [[value], [value]])
+
+    def test_constant_target_majority_behavior_is_shared_by_all_estimators(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(self._config(root, plan, policy, selected_labels=["build"],
+                                                            constant_target_behavior="majority_class")))
+            output = Path(tmp) / "report"
+            report = comparison.run(config_path, output)
+            for result in report["algorithms"].values():
+                self.assertEqual(result["status"], "constant_target_fallback_only")
+                self.assertEqual(result["metrics"]["labels"]["build"]["predicted_positive"], 1)
+                self.assertEqual(result["metrics"]["labels"]["build"]["fp"], 1)
+
+    def test_abstains_on_zero_variance_target_in_normal_model_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(self._config(root, plan, policy)))
+            report = comparison.run(config_path, Path(tmp) / "report")
+            for result in report["algorithms"].values():
+                metric = result["metrics"]["labels"]["build"]
+                self.assertEqual(metric["unknown_predictions"], 1)
+                self.assertEqual(metric["predicted_positive"], 0)
+
+    def test_report_path_rejects_git_worktree_even_when_ignored(self):
+        repo = Path(__file__).resolve().parents[2]
+        with self.assertRaisesRegex(ValueError, "outside every Git worktree"):
+            comparison.require_private_report_path(repo / "target" / "ignored-private-report.json")
+
+    def test_same_project_cannot_cross_splits_even_with_consistent_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root, same_project_across_splits=True)
+            with self.assertRaisesRegex(ValueError, "project is assigned"):
+                self._load(root, plan, policy)
+
+    def test_unmatched_screened_row_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root, extra_screened_validation=True)
+            with self.assertRaisesRegex(ValueError, "sets do not match exactly"):
+                self._load(root, plan, policy)
+
+    def test_screened_text_must_match_recomputed_policy_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            rows = [json.loads(line) for line in (root / "validation.jsonl").read_text().splitlines()]
+            rows[0]["text"] = "forged screened text"
+            rows[0]["screened_text_sha256"] = hashlib.sha256(rows[0]["text"].encode()).hexdigest()
+            raw = b"".join(_encoded(row) + b"\n" for row in rows)
+            (root / "validation.jsonl").write_bytes(raw)
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest["outputs"]["validation"] = hashlib.sha256(raw).hexdigest()
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "recomputed policy output"):
+                self._load(root, plan, policy)
+
+    def test_near_duplicate_work_budget_is_enforced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            config = self._config(root, plan, policy, max_near_duplicate_work=1)
+            with self.assertRaisesRegex(ValueError, "work budget"):
+                comparison.load_screened_corpus(root, plan, config["max_rows"], config["max_text_bytes"],
+                    config["max_source_bytes"], config["max_total_source_bytes"], config["max_manifest_bytes"],
+                    config["max_screened_file_bytes"], config["near_duplicate_similarity"],
+                    config["max_near_duplicate_pairs"], config["max_near_duplicate_work"], policy,
+                    config["max_policy_bytes"])
 
     def test_end_to_end_writes_metrics_without_raw_text_or_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "screened"
-            plan = self._corpus(root)
+            plan, policy = self._corpus(root)
             config_path = Path(tmp) / "config.json"
-            config_path.write_text(json.dumps(self._config(root, plan)))
+            config_path.write_text(json.dumps(self._config(root, plan, policy)))
             output = Path(tmp) / "report"
             report = comparison.run(config_path, output)
             self.assertEqual(set(report["algorithms"]), {"logistic_regression", "knn", "decision_tree"})
@@ -130,8 +250,19 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(report["algorithms"]["knn"]["persisted_model_artifact_bytes"], 0)
             encoded = (output / "comparison-report.json").read_text()
             self.assertNotIn("screened train text", encoded)
+            self.assertNotIn("SCREEN-SECRET-123", encoded)
             self.assertNotIn('"id": "a"', encoded)
+            self.assertTrue(report["data"]["screening_recomputed_with_local_code"])
             self.assertFalse(report["promotion_eligible"])
+            comparison.require_private_report_path(output / "comparison-report.json", require_existing=True)
+
+    def _load(self, root, plan, policy):
+        config = self._config(root, plan, policy)
+        return comparison.load_screened_corpus(root, plan, config["max_rows"], config["max_text_bytes"],
+            config["max_source_bytes"], config["max_total_source_bytes"], config["max_manifest_bytes"],
+            config["max_screened_file_bytes"], config["near_duplicate_similarity"],
+            config["max_near_duplicate_pairs"], config["max_near_duplicate_work"], policy,
+            config["max_policy_bytes"])
 
 
 if __name__ == "__main__":
