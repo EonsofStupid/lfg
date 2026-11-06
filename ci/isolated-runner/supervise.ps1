@@ -14,7 +14,19 @@ if ($settings.schema_version -ne 'lfg.isolated-runner-supervisor.v1' -or
     throw 'Invalid isolated runner supervisor configuration.'
 }
 
+# A pull request from a fork can edit a workflow to request this runner's label,
+# so register runners only for a repository that is private right now.
+function Assert-PrivateRepository {
+    $private = & gh api ("repos/$($settings.repository)") --jq '.private'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the repository visibility.' }
+    if ($private -ne 'true') {
+        throw "Refusing to register a self-hosted runner: $($settings.repository) is not private, so pull requests from forks could run code on this host."
+    }
+}
+
+Assert-PrivateRepository
 while ($true) {
+    Assert-PrivateRepository
     $runnerName = 'lfg-jit-' + [guid]::NewGuid().ToString('N')
     $runnerId = $null
     $request = @{name = $runnerName; runner_group_id = [int]$settings.runner_group_id;

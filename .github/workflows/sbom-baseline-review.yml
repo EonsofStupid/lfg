@@ -32,7 +32,7 @@ jobs:
       BUILD_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_version || format('pr-{0}', github.event.pull_request.number) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Reclaim unused SDK space on the disposable hosted runner
         shell: bash
@@ -53,7 +53,7 @@ jobs:
             -t ${{ env.IMAGE_TAG }} .
 
       - name: Generate review SBOM (SPDX JSON)
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ${{ env.IMAGE_TAG }}
           format: spdx-json
@@ -75,7 +75,7 @@ jobs:
 
       - name: Post PR SBOM baseline summary
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const fs = require('fs');
@@ -117,7 +117,7 @@ jobs:
             }
 
       - name: Upload review artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom-baseline-review
           path: |
