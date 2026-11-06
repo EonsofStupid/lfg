@@ -37,6 +37,7 @@ The configuration is a private JSON file with schema version
 - `revision`, `screened_corpus`, `label_plan`, `target_field`, `selected_labels`
 - `screen_policy`, `constant_target_behavior` (`abstain` or `majority_class`)
 - `review_ledger`, `max_ledger_bytes`
+- `rejected_label_handling` (`exclude` or explicit `include_exploratory`)
 - `validation_group_use_claim` (`previously_used`, `reported_unused`, or `unknown`)
 - `seed`, `max_rows`, `max_text_bytes`, `max_source_bytes`,
   `max_total_source_bytes`,
@@ -50,11 +51,15 @@ Set all bounds and model parameters explicitly for the corpus and available
 machine. Unknown extension fields are accepted but inert. Constant targets
 either abstain or use one configured majority-class fallback across all three
 algorithms; ties select negative. Empty or missing labels never enter training
-or validation as negatives. The report records
+or validation as negatives. Rejected ledger rows are excluded by default;
+`include_exploratory` is an explicit opt-in and is recorded in the report.
+Pending rows remain fit eligible, with review state reported as a claim. The report records
 the config digest, input/output digests, taxonomy digest, train/validation
 counts and group claims, source label uncertainty, parameters, environment,
 per-target positive/negative/unknown support and confusion counts, covered-only
-macro/micro precision, recall and F1. Standard macro precision includes labels
+macro/micro precision, recall and F1. Metrics with no scored denominator are
+null, and macro values average defined labels while reporting their coverage.
+Standard macro precision includes labels
 with false-positive predictions even when they have no positive truth support;
 a separate supported-label macro is also reported. The report records
 fit/vectorize/predict elapsed time and

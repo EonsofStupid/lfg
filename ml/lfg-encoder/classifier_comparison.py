@@ -62,7 +62,7 @@ def load_config(path: Path, max_bytes: int) -> tuple[dict[str, Any], str]:
                 "tfidf_ngram_range", "logistic_c", "logistic_max_iter", "knn_weights", "knn_p",
                 "tree_criterion", "near_duplicate_similarity", "max_near_duplicate_pairs",
                 "max_near_duplicate_work", "max_policy_bytes", "constant_target_behavior",
-                "validation_group_use_claim", "max_ledger_bytes"}
+                "validation_group_use_claim", "max_ledger_bytes", "rejected_label_handling"}
     if (not isinstance(config, dict) or not required <= set(config) or config.get("schema_version") != SCHEMA
             or not isinstance(config.get("revision"), str) or not config["revision"].strip()
             or not isinstance(config.get("screened_corpus"), str) or not config["screened_corpus"].strip()
@@ -99,6 +99,8 @@ def load_config(path: Path, max_bytes: int) -> tuple[dict[str, Any], str]:
         raise ValueError("invalid constant_target_behavior")
     if config["validation_group_use_claim"] not in ("previously_used", "reported_unused", "unknown"):
         raise ValueError("invalid validation_group_use_claim")
+    if config["rejected_label_handling"] not in ("exclude", "include_exploratory"):
+        raise ValueError("invalid rejected_label_handling")
     return config, sha(raw)
 
 
@@ -567,9 +569,9 @@ def _metrics(y_true, y_pred, target_known, labels: list[str]) -> dict[str, Any]:
         unknown_prediction_count = int((target_mask & (y_pred[:, index] < 0)).sum())
         unknown_positive_count = int((target_mask & (y_true[:, index] == 1) & (y_pred[:, index] < 0)).sum())
         precision_denom, recall_denom, f1_denom = tp + fp, tp + fn, 2 * tp + fp + fn
-        precision = tp / precision_denom if precision_denom else 0.0
-        recall = tp / recall_denom if recall_denom else 0.0
-        f1 = 2 * tp / f1_denom if f1_denom else 0.0
+        precision = tp / precision_denom if precision_denom else None
+        recall = tp / recall_denom if recall_denom else None
+        f1 = 2 * tp / f1_denom if f1_denom else None
         support = int((target_mask & (y_true[:, index] == 1)).sum())
         negative_support = int((target_mask & (y_true[:, index] == 0)).sum())
         by_label[label] = {"support": support,
@@ -581,8 +583,9 @@ def _metrics(y_true, y_pred, target_known, labels: list[str]) -> dict[str, Any]:
                            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
                            "precision": precision, "recall": recall, "f1": f1}
         for name, value in (("precision", precision), ("recall", recall), ("f1", f1)):
-            standard_values[name].append(value)
-            if support > 0:
+            if value is not None:
+                standard_values[name].append(value)
+            if support > 0 and value is not None:
                 supported_values[name].append(value)
         aggregate.update(tp=tp, fp=fp, fn=fn, tn=tn,
                          unknown_predictions=unknown_prediction_count,
@@ -595,20 +598,24 @@ def _metrics(y_true, y_pred, target_known, labels: list[str]) -> dict[str, Any]:
     micro_f_denom = 2 * aggregate["tp"] + aggregate["fp"] + aggregate["fn"]
     fully_scored = np.all(target_known & (y_pred >= 0), axis=1)
     subset = float(accuracy_score(y_true[fully_scored], y_pred[fully_scored])) if fully_scored.any() else None
+    macro = {name: (sum(values) / len(values) if values else None)
+             for name, values in standard_values.items()}
+    macro_supported = {name: (sum(values) / len(values) if values else None)
+                       for name, values in supported_values.items()}
     return {"examples": int(y_true.shape[0]), "subset_accuracy_on_fully_scored": subset,
             "scored_label_predictions": known_count, "total_label_predictions": total_predictions,
             "target_coverage": known_targets / total_predictions if total_predictions else None,
             "prediction_coverage_on_known_targets": known_count / known_targets if known_targets else None,
             "overall_coverage": known_count / total_predictions if total_predictions else None,
-            "macro_precision": sum(standard_values["precision"]) / len(labels),
-            "macro_recall": sum(standard_values["recall"]) / len(labels),
-            "macro_f1": sum(standard_values["f1"]) / len(labels),
-            "macro_precision_supported_labels": (sum(supported_values["precision"]) / len(supported_values["precision"])
-                                                 if supported_values["precision"] else None),
-            "macro_recall_supported_labels": (sum(supported_values["recall"]) / len(supported_values["recall"])
-                                              if supported_values["recall"] else None),
-            "macro_f1_supported_labels": (sum(supported_values["f1"]) / len(supported_values["f1"])
-                                           if supported_values["f1"] else None),
+            "macro_precision": macro["precision"],
+            "macro_recall": macro["recall"],
+            "macro_f1": macro["f1"],
+            "macro_precision_supported_labels": macro_supported["precision"],
+            "macro_recall_supported_labels": macro_supported["recall"],
+            "macro_f1_supported_labels": macro_supported["f1"],
+            "macro_metric_label_coverage": {
+                name: {"defined_labels": len(standard_values[name]), "total_labels": len(labels)}
+                for name in standard_values},
             "micro_precision_on_covered": aggregate["tp"] / micro_p_denom if micro_p_denom else None,
             "micro_recall_on_covered": aggregate["tp"] / micro_r_denom if micro_r_denom else None,
             "micro_f1_on_covered": 2 * aggregate["tp"] / micro_f_denom if micro_f_denom else None,
@@ -678,9 +685,18 @@ def run(config_path: Path, output: Path, config_limit: int = 65_536) -> dict[str
     labels = sorted(selected)
     _, y_train, train_known = _matrix(train_rows, field, selected, taxonomy)
     _, y_validation, validation_known = _matrix(validation_rows, field, selected, taxonomy)
+    if config["rejected_label_handling"] == "exclude":
+        train_rejected = [review_ledger[row["id"]] == "rejected" for row in train_rows]
+        validation_rejected = [review_ledger[row["id"]] == "rejected" for row in validation_rows]
+        train_known[train_rejected, :] = False
+        validation_known[validation_rejected, :] = False
+    else:
+        train_rejected = [False] * len(train_rows)
+        validation_rejected = [False] * len(validation_rows)
     if not labels:
         raise ValueError("no selected targets")
-    train_rows_with_labels = [row for row, known in zip(train_rows, train_known, strict=True) if known.any()]
+    train_row_mask = train_known.any(axis=1)
+    train_rows_with_labels = [row for row, known in zip(train_rows, train_row_mask, strict=True) if known]
     if not train_rows_with_labels:
         raise ValueError("no train rows have any known selected target")
     variable_targets, constant_targets, unsupported_targets = _target_partition(y_train, train_known)
@@ -704,13 +720,14 @@ def run(config_path: Path, output: Path, config_limit: int = 65_536) -> dict[str
                                      "negative": int(len(known_validation_values) - known_validation_values.sum()),
                                      "unknown_rows": int((~validation_known[:, i]).sum())}
     text_train = [row["text"] for row, known in zip(train_rows, train_known, strict=True) if known.any()]
+    y_fit, known_fit = y_train[train_row_mask], train_known[train_row_mask]
     text_val = [row["text"] for row in validation_rows]
     import time
     for algorithm, (vectorizer, _) in _estimators(config).items():
         start = time.perf_counter_ns()
         try:
             import numpy as np
-            y_pred = _constant_fallbacks(y_train, train_known, labels, len(validation_rows),
+            y_pred = _constant_fallbacks(y_fit, known_fit, labels, len(validation_rows),
                                          config["constant_target_behavior"])
             x_train = vectorizer.fit_transform(text_train)
             x_validation = vectorizer.transform(text_val)
@@ -718,8 +735,8 @@ def run(config_path: Path, output: Path, config_limit: int = 65_536) -> dict[str
             knn_index_bytes = knn_target_bytes = knn_rows = 0
             knn_indexes = 0
             for index, label in enumerate(labels):
-                target_mask = train_known[:, index]
-                target_values = y_train[target_mask, index]
+                target_mask = known_fit[:, index]
+                target_values = y_fit[target_mask, index]
                 if not len(target_values) or len(set(target_values.tolist())) < 2:
                     continue
                 estimator = _estimator(algorithm, config, int(target_mask.sum()))
@@ -791,6 +808,9 @@ def run(config_path: Path, output: Path, config_limit: int = 65_536) -> dict[str
                                               "validation": _label_review_state(validation_rows, field)},
                        "review_ledger_sha256": review_ledger_digest,
                        "review_ledger_decisions": review_decisions,
+                       "rejected_label_handling": config["rejected_label_handling"],
+                       "rejected_rows_excluded": {"train": sum(train_rejected),
+                                                  "validation": sum(validation_rejected)},
                        "validation_group_use_claim": config["validation_group_use_claim"],
                        "validation_group_use_claim_verified": False,
                        "screening_redaction_complete": False,
@@ -816,7 +836,8 @@ def run(config_path: Path, output: Path, config_limit: int = 65_536) -> dict[str
                                "empty_or_missing_target": "unknown unless a present empty array has target_completeness[field] true",
                                "partial_target": "explicit positive labels remain known; omitted labels remain unknown",
                                "legacy_nonempty_array": "treated as complete under source schema when no field-level completeness flag exists; not independently verified",
-                               "macro_precision": "standard macro includes predicted-only labels with zero-division value 0",
+                               "macro_precision": "standard macro includes predicted-only labels with false positives; zero-denominator metrics are null and excluded from macro means",
+                               "macro_metric_coverage": "defined label counts and total labels are reported for each macro metric",
                                "constant_training_target": config["constant_target_behavior"]}}
     encoded = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
     output.mkdir(mode=0o700)

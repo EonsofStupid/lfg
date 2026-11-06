@@ -16,7 +16,7 @@ def _encoded(value):
 
 class ComparisonTests(unittest.TestCase):
     def _corpus(self, root: Path, include_test: bool = False, same_project_across_splits: bool = False,
-                extra_screened_validation: bool = False):
+                extra_screened_validation: bool = False, fully_unknown_train_row: bool = False):
         root.mkdir(parents=True)
         tax = {"schema_version": "lfg.encoder-evaluation-taxonomy.v1",
                "intents": ["build", "verify"], "capabilities": ["write"], "risks": ["sensitive"]}
@@ -40,6 +40,10 @@ class ComparisonTests(unittest.TestCase):
                  "capabilities": [], "risks": [], "verified": False, "source": {"project": "validation-project"}},
             ],
         }
+        if fully_unknown_train_row:
+            rows["train"].append({"id": "unknown", "family": "funknown", "text": "screened train unknown",
+                                  "capabilities": [], "risks": [], "verified": False,
+                                  "source": {"project": "train-project"}})
         sources, output_digests, output_counts, source_counts = [], {}, {}, {}
         matched_records = 0
         for split in ("train", "validation"):
@@ -118,7 +122,7 @@ class ComparisonTests(unittest.TestCase):
                 "tree_criterion": "gini", "near_duplicate_similarity": 0.9,
                 "max_near_duplicate_pairs": 100, "max_near_duplicate_work": 1_000_000,
                 "max_policy_bytes": 65536, "constant_target_behavior": "abstain",
-                "validation_group_use_claim": "unknown", **extra}
+                "validation_group_use_claim": "unknown", "rejected_label_handling": "exclude", **extra}
 
     def test_load_config_accepts_inert_extension_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +195,46 @@ class ComparisonTests(unittest.TestCase):
         metrics = comparison._metrics(true, pred, known, ["observed", "predicted-only"])
         self.assertEqual(metrics["macro_precision"], 0.5)
         self.assertEqual(metrics["macro_precision_supported_labels"], 1.0)
+
+    def test_unscored_metrics_are_null_and_measured_false_positive_remains_zero(self):
+        import numpy as np
+        true = np.array([[0]])
+        unknown_prediction = np.array([[-1]])
+        known = np.array([[True]])
+        unscored = comparison._metrics(true, unknown_prediction, known, ["negative-only"])
+        self.assertEqual(unscored["scored_label_predictions"], 0)
+        self.assertIsNone(unscored["labels"]["negative-only"]["precision"])
+        self.assertIsNone(unscored["labels"]["negative-only"]["recall"])
+        self.assertIsNone(unscored["labels"]["negative-only"]["f1"])
+        self.assertIsNone(unscored["macro_precision"])
+        self.assertEqual(unscored["macro_metric_label_coverage"]["precision"],
+                         {"defined_labels": 0, "total_labels": 1})
+        measured_fp = comparison._metrics(true, np.array([[1]]), known, ["negative-only"])
+        self.assertEqual(measured_fp["labels"]["negative-only"]["precision"], 0.0)
+        self.assertIsNone(measured_fp["labels"]["negative-only"]["recall"])
+        self.assertEqual(measured_fp["labels"]["negative-only"]["f1"], 0.0)
+
+    def test_rejected_labels_are_excluded_while_pending_labels_remain_fit_eligible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            ledger = root / "reviews.jsonl"
+            rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+            for row in rows:
+                if row["id"] == "b":
+                    row["decision"] = "rejected"
+            ledger.write_bytes(b"".join(_encoded(row) + b"\n" for row in rows))
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(self._config(root, plan, policy, selected_labels=["build"])))
+            report = comparison.run(config_path, Path(tmp) / "report")
+            self.assertEqual(report["data"]["review_ledger_decisions"],
+                             {"pending": 2, "approved": 0, "rejected": 1})
+            self.assertEqual(report["data"]["rejected_rows_excluded"], {"train": 1, "validation": 0})
+            self.assertEqual(report["data"]["rejected_label_handling"], "exclude")
+            for result in report["algorithms"].values():
+                self.assertEqual(result["fit_rows"], 1)
+                self.assertEqual(result["training_label_support"]["build"]["positive"], 1)
+                self.assertEqual(result["training_label_support"]["build"]["unknown_rows"], 1)
 
     def test_constant_target_fallback_is_consistent_for_all_positive_and_negative(self):
         import numpy as np
@@ -302,6 +346,18 @@ class ComparisonTests(unittest.TestCase):
             self.assertTrue(report["data"]["screening_recomputed_with_local_code"])
             self.assertFalse(report["promotion_eligible"])
             comparison.require_private_report_path(output / "comparison-report.json", require_existing=True)
+
+    def test_end_to_end_excludes_fully_unknown_training_rows_from_features_and_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root, fully_unknown_train_row=True)
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(self._config(root, plan, policy)))
+            report = comparison.run(config_path, Path(tmp) / "report")
+            self.assertEqual(report["data"]["train_rows"], 3)
+            for result in report["algorithms"].values():
+                self.assertNotEqual(result["status"], "failed", msg=json.dumps(result))
+                self.assertEqual(result["fit_rows"], 2)
 
     def _load(self, root, plan, policy):
         config = self._config(root, plan, policy)
