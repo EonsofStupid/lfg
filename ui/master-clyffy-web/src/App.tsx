@@ -6,8 +6,9 @@ import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
 import { FeedbackPanel } from './FeedbackPanel'
+import { ScorecardPanel } from './ScorecardPanel'
 import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
-import type { OwnedResult } from './ownedAssessmentApi'
+import type { OwnedResult, OwnedStatus } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
@@ -26,7 +27,8 @@ export default function App() {
   const [revision, setRevision] = useState(1)
   const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
-  const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; result: OwnedResult } | null>(null)
+  const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; subscriptionKey: string; result: OwnedResult } | null>(null)
+  const [ownedEngineStatus, setOwnedEngineStatus] = useState<OwnedStatus | null>(null)
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -48,6 +50,10 @@ export default function App() {
   const promptTooLarge = status !== null && promptBytes > status.operations.maxPromptBytes
   const debounceMs = debounceOverride ?? status?.operations.uiDebounceMs
   const historyLimit = historyOverride ?? status?.operations.uiTimingHistorySamples
+  const subscriptionKey = JSON.stringify([...new Set(activeSubscriptions)].sort())
+  const currentAssessment = assessment?.revision === revision && assessmentSubscriptions === subscriptionKey ? assessment : null
+  const currentOwnedResult = ownedSnapshot?.revision === revision && ownedSnapshot.subscriptionKey === subscriptionKey
+    ? ownedSnapshot.result : null
 
   useEffect(() => { void getStatus().then(setStatus).catch((value: Error) => setError(value.message)) }, [])
 
@@ -57,11 +63,11 @@ export default function App() {
     if (!status || !debounceMs || !text.trim() || promptTooLarge) { setAssessment(null); return }
     const timer = window.setTimeout(() => {
       void assess(SESSION_ID, revision, text, activeSubscriptions).then((value) => {
-        if (requestRevision.current === current) { setAssessment(value); setAssessmentSubscriptions(JSON.stringify(activeSubscriptions)) }
+        if (requestRevision.current === current) { setAssessment(value); setAssessmentSubscriptions(subscriptionKey) }
       }).catch((value: Error) => setError(value.message))
     }, debounceMs)
     return () => window.clearTimeout(timer)
-  }, [prompt, revision, activeSubscriptions, status, promptTooLarge, debounceMs])
+  }, [prompt, revision, activeSubscriptions, subscriptionKey, status, promptTooLarge, debounceMs])
 
   useEffect(() => {
     const current = ++classifyRevision.current
@@ -142,8 +148,11 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
-        {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={ownedSnapshot?.revision === revision ? ownedSnapshot.result : null} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={currentAssessment} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, subscriptionKey, result } : null)} onStatus={setOwnedEngineStatus} />}
+        {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={currentOwnedResult} assessment={currentAssessment} />}
+        {!publicEmbed && mode === 'inspector' && status && <ScorecardPanel maxBytes={status.operations.maxHttpBodyBytes}
+          maxFeedbackPages={status.operations.scorecardMaxFeedbackPages}
+          maxFeedbackPageSize={status.operations.scorecardMaxFeedbackPageSize} currentOwnedStatus={ownedEngineStatus} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">
           <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />

@@ -16,8 +16,9 @@ test('sends exact context bytes with their digest and preserves response extensi
   const context = '  Projet\n🦊  '
   const digest = 'a'.repeat(64)
   const extension = { observed: true }
+  const measurement = { schemaVersion: 'lfg.owned-run-measurement.v1', status: 'ok', engineId: null, stopReason: null, handlerElapsedMs: 12, outputTextUtf8Bytes: null, workerStarted: null, workerCompletedSuccessfully: null }
   const fetcher = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({
-    status: 'ok', elapsedMs: 2, engine: null, projectContextSha256: digest, extension,
+    status: 'ok', elapsedMs: 2, engine: null, projectContextSha256: digest, extension, measurement,
   })))
   vi.stubGlobal('fetch', fetcher)
   const result = await ownedAssessmentClient.assess('request', 'local-token', {
@@ -26,6 +27,7 @@ test('sends exact context bytes with their digest and preserves response extensi
   expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({ text: 'request', context, contextSha256: digest, requestExtension: extension })
   expect(result.projectContextSha256).toBe(digest)
   expect(result.extension).toEqual(extension)
+  expect(result.measurement).toEqual(measurement)
 })
 
 test('legacy request payload remains exactly text-only and SHA helper emits lowercase UTF-8 digest', async () => {
