@@ -37,6 +37,154 @@ pub struct AssessmentConfig {
     pub knowledge_scan: KnowledgeScanLimits,
     pub subscriptions: Vec<SubscriptionDefinition>,
     pub published_models: Vec<PublishedModel>,
+    /// When the text is a JSON object with these fields, such as the task an
+    /// RRFlow engine sends, assess only their values. Absent means the text is
+    /// assessed as given. Present only when configured, so older digests hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_input: Option<StructuredInput>,
+    /// A trained model whose work level chooses the bracket. Its manifest digest
+    /// is part of this configuration, so pinning this digest also pins the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_score: Option<ModelScoreBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructuredInput {
+    /// Fields read in this order; values that are not non-empty strings are skipped.
+    pub json_fields: Vec<String>,
+    pub separator: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelScoreBinding {
+    pub id: String,
+    /// SHA-256 of the model directory's `manifest.json`, which pins every file.
+    pub manifest_sha256: String,
+    /// The bracket for each model level, lowest first.
+    pub level_brackets: Vec<String>,
+    /// Ascending expected-level thresholds: the level is the number reached.
+    pub level_cut_points: Vec<f64>,
+}
+
+/// One run of the trained model: probabilities for each level, lowest first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelOutput {
+    pub probabilities: Vec<f64>,
+    pub elapsed_micros: u64,
+    /// True when the prompt was longer than the model reads.
+    pub truncated: bool,
+}
+
+/// What the trained model contributed, reported beside the rule result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelScore {
+    /// `available`, `unavailable` or `invalid_output`.
+    pub status: String,
+    pub id: String,
+    pub manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_level: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probabilities: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<usize>,
+    /// The bracket the model chose, which the assessment then uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bracket: Option<String>,
+    /// The bracket the rules alone would have chosen.
+    pub rules_bracket: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
+impl ModelScoreBinding {
+    fn validate(&self, brackets: &[Bracket]) -> Result<(), String> {
+        let digest_ok = self.manifest_sha256.len() == 64
+            && self
+                .manifest_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let id_ok = !self.id.is_empty()
+            && self.id.len() <= 128
+            && self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        let known = |id: &String| brackets.iter().any(|bracket| &bracket.id == id);
+        let ascending = self
+            .level_cut_points
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+        if !digest_ok
+            || !id_ok
+            || self.level_brackets.len() < 2
+            || !self.level_brackets.iter().all(known)
+            || self.level_cut_points.len() + 1 != self.level_brackets.len()
+            || self.level_cut_points.iter().any(|cut| !cut.is_finite())
+            || !ascending
+        {
+            return Err("invalid model score binding".into());
+        }
+        Ok(())
+    }
+
+    /// Expected level, level and bracket index for valid probabilities.
+    fn choose(&self, brackets: &[Bracket], probabilities: &[f64]) -> Option<(f64, usize, usize)> {
+        let total: f64 = probabilities.iter().sum();
+        if probabilities.len() != self.level_brackets.len()
+            || probabilities
+                .iter()
+                .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+            || (total - 1.0).abs() > 1e-3
+        {
+            return None;
+        }
+        let expected: f64 = probabilities
+            .iter()
+            .enumerate()
+            .map(|(index, p)| index as f64 * p)
+            .sum();
+        let level = self
+            .level_cut_points
+            .iter()
+            .filter(|cut| expected >= **cut)
+            .count();
+        let bracket = brackets
+            .iter()
+            .position(|bracket| bracket.id == self.level_brackets[level])?;
+        Some((expected, level, bracket))
+    }
+}
+
+/// The text the rules and the model assess: the configured fields of a JSON
+/// object when present, otherwise the text as given.
+pub fn scored_text<'a>(config: &AssessmentConfig, text: &'a str) -> std::borrow::Cow<'a, str> {
+    let Some(structured) = &config.structured_input else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    if !text.trim_start().starts_with('{') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str::<serde_json::Value>(text)
+    else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let parts: Vec<&str> = structured
+        .json_fields
+        .iter()
+        .filter_map(|field| object.get(field).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if parts.is_empty() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(parts.join(&structured.separator))
+    }
 }
 
 /// Operator-selected resource limits for local provider history discovery.
@@ -271,6 +419,20 @@ impl AssessmentConfig {
                 return Err("invalid published model".into());
             }
         }
+        if let Some(structured) = &self.structured_input {
+            let mut seen = BTreeSet::new();
+            if structured.json_fields.is_empty()
+                || structured
+                    .json_fields
+                    .iter()
+                    .any(|field| field.trim().is_empty() || !seen.insert(field))
+            {
+                return Err("invalid structured input fields".into());
+            }
+        }
+        if let Some(binding) = &self.model_score {
+            binding.validate(&self.brackets)?;
+        }
         Ok(())
     }
 }
@@ -386,6 +548,9 @@ pub struct Assessment {
     pub rules: Vec<String>,
     pub advisory: bool,
     pub confidence: Option<f64>,
+    /// Present only when the configuration binds a trained model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_score: Option<ModelScore>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -606,6 +771,10 @@ struct Scored {
     terms: Vec<FormulaTerm>,
     score: f64,
     bracket: usize,
+}
+
+fn round4(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0 + 0.0
 }
 
 fn round2(value: f64) -> f64 {
@@ -1071,9 +1240,65 @@ pub fn assess(
     knowledge: &Knowledge,
     checks: &BTreeMap<String, SubscriptionCheck>,
 ) -> Assessment {
+    assess_with_model(config, rules, request, knowledge, checks, None)
+}
+
+/// [`assess`], with the trained model's output when the configuration binds one.
+/// The model then chooses the bracket, and so the agents, role and effort; the
+/// rule score is still reported in rule points. Without an output the rules
+/// choose, and `modelScore.status` says the model was unavailable.
+pub fn assess_with_model(
+    config: &AssessmentConfig,
+    rules: &PreflightRuleConfig,
+    request: &AssessRequest,
+    knowledge: &Knowledge,
+    checks: &BTreeMap<String, SubscriptionCheck>,
+    model: Option<&ModelOutput>,
+) -> Assessment {
     let started = Instant::now();
-    let scored = score_prompt(config, rules, &request.text);
-    let bracket = &config.brackets[scored.bracket];
+    let text = scored_text(config, &request.text);
+    let structured = matches!(text, std::borrow::Cow::Owned(_));
+    let scored = score_prompt(config, rules, &text);
+    let rules_bracket = config.brackets[scored.bracket].id.clone();
+    let (chosen, model_score) = match (&config.model_score, model) {
+        (None, _) => (scored.bracket, None),
+        (Some(binding), output) => {
+            let base = ModelScore {
+                status: "unavailable".into(),
+                id: binding.id.clone(),
+                manifest_sha256: binding.manifest_sha256.clone(),
+                expected_level: None,
+                probabilities: Vec::new(),
+                level: None,
+                bracket: None,
+                rules_bracket: rules_bracket.clone(),
+                elapsed_micros: output.map(|o| o.elapsed_micros),
+                truncated: output.map(|o| o.truncated),
+            };
+            match output.map(|o| (o, binding.choose(&config.brackets, &o.probabilities))) {
+                Some((output, Some((expected, level, index)))) => (
+                    index,
+                    Some(ModelScore {
+                        status: "available".into(),
+                        expected_level: Some(round2(expected)),
+                        probabilities: output.probabilities.iter().map(|p| round4(*p)).collect(),
+                        level: Some(level),
+                        bracket: Some(config.brackets[index].id.clone()),
+                        ..base
+                    }),
+                ),
+                Some((_, None)) => (
+                    scored.bracket,
+                    Some(ModelScore {
+                        status: "invalid_output".into(),
+                        ..base
+                    }),
+                ),
+                None => (scored.bracket, Some(base)),
+            }
+        }
+    };
+    let bracket = &config.brackets[chosen];
 
     let tasks = scored.tasks.len();
     let total = tasks.max(1).clamp(bracket.min_agents, bracket.max_agents);
@@ -1096,7 +1321,7 @@ pub fn assess(
         .map(|s| s.id.clone())
         .collect();
     let models = known_models(config, knowledge);
-    let mut ranked = rank_models(config, &models, &usable, scored.bracket);
+    let mut ranked = rank_models(config, &models, &usable, chosen);
     let usual_model = ranked
         .iter()
         .filter(|model| model.prompts_in_bracket > 0)
@@ -1146,6 +1371,16 @@ pub fn assess(
             .iter()
             .map(|term| format!("points:{}={}", term.id, term.points)),
     );
+    if structured {
+        fired.push("input:structured".into());
+    }
+    if let Some(score) = &model_score {
+        fired.push(format!("score-model:{}", score.status));
+        if let Some(level) = score.level {
+            fired.push(format!("score-model-level:{level}"));
+            fired.push("bracket-source:model".into());
+        }
+    }
     fired.push(format!("bracket:{}", bracket.id));
     fired.push(format!("agents:{total}"));
     fired.push(format!("role:{}", bracket.role));
@@ -1178,7 +1413,7 @@ pub fn assess(
             characters: scored.characters,
             words: scored.words,
             tasks: scored.tasks,
-            scoring_truncated: request.text.len() > config.max_scored_bytes,
+            scoring_truncated: text.len() > config.max_scored_bytes,
         },
         intent: IntentResult {
             primary,
@@ -1201,7 +1436,7 @@ pub fn assess(
                     id: step.id.clone(),
                     label: step.label.clone(),
                     min_score: step.min_score,
-                    current: index == scored.bracket,
+                    current: index == chosen,
                 })
                 .collect(),
         },
@@ -1230,6 +1465,7 @@ pub fn assess(
         rules: fired,
         advisory: true,
         confidence: None,
+        model_score,
     }
 }
 
@@ -1679,5 +1915,203 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(result.prompt.scoring_truncated);
+    }
+
+    fn bound(config: &mut AssessmentConfig) {
+        config.model_score = Some(ModelScoreBinding {
+            id: "lfg-dev-text-test".into(),
+            manifest_sha256: "a".repeat(64),
+            level_brackets: ["trivial", "simple", "moderate", "complex", "major"]
+                .map(String::from)
+                .to_vec(),
+            level_cut_points: vec![0.5, 1.5, 2.5, 3.5],
+        });
+    }
+
+    fn output(probabilities: &[f64]) -> ModelOutput {
+        ModelOutput {
+            probabilities: probabilities.to_vec(),
+            elapsed_micros: 1234,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn optional_sections_leave_the_pinned_baseline_digest_unchanged() {
+        let config = AssessmentConfig::default_alpha();
+        assert_eq!(
+            config.digest(),
+            "8f89f5f4a3e7815a5ebb2fab0994c31c169cf217a82efef6cb54b02ae868ab19"
+        );
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("modelScore").is_none() && value.get("structuredInput").is_none());
+        let mut bound_config = config.clone();
+        bound(&mut bound_config);
+        assert_ne!(bound_config.digest(), config.digest());
+    }
+
+    #[test]
+    fn structured_input_assesses_configured_fields_only() {
+        let mut config = AssessmentConfig::default_alpha();
+        config.structured_input = Some(StructuredInput {
+            json_fields: vec!["title".into(), "goal".into()],
+            separator: "\n".into(),
+        });
+        let task = serde_json::json!({"scope": "s", "task_id": "t-1", "title": "Fix login",
+            "goal": "Make logout clear the session", "task_sha256": "f".repeat(64), "known_at_cursor": 7})
+        .to_string();
+        assert_eq!(
+            scored_text(&config, &task),
+            "Fix login\nMake logout clear the session"
+        );
+        assert_eq!(scored_text(&config, "plain words"), "plain words");
+        assert_eq!(scored_text(&config, "{not json"), "{not json");
+        assert_eq!(scored_text(&config, r#"{"other":"x"}"#), r#"{"other":"x"}"#);
+        let structured = assess(
+            &config,
+            &rules(),
+            &request(&task, &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+        );
+        let plain = assess(
+            &config,
+            &rules(),
+            &request("Fix login\nMake logout clear the session", &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(structured.complexity.score, plain.complexity.score);
+        assert!(structured.rules.contains(&"input:structured".to_string()));
+        assert!(!plain.rules.contains(&"input:structured".to_string()));
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["structuredInput"]["jsonFields"] = serde_json::json!(["goal", "goal"]);
+        assert!(AssessmentConfig::from_json_str(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn model_binding_is_validated() {
+        let mut config = AssessmentConfig::default_alpha();
+        bound(&mut config);
+        let good = serde_json::to_value(&config).unwrap();
+        assert!(AssessmentConfig::from_json_str(&good.to_string()).is_ok());
+        for (field, bad) in [
+            ("manifestSha256", serde_json::json!("A".repeat(64))),
+            ("levelBrackets", serde_json::json!(["trivial", "nope"])),
+            ("levelCutPoints", serde_json::json!([0.5, 1.5, 2.5])),
+            ("levelCutPoints", serde_json::json!([0.5, 2.5, 1.5, 3.5])),
+            ("id", serde_json::json!("has space")),
+        ] {
+            let mut value = good.clone();
+            value["modelScore"][field] = bad;
+            assert!(
+                AssessmentConfig::from_json_str(&value.to_string()).is_err(),
+                "{field} accepted"
+            );
+        }
+        let mut value = good.clone();
+        value["modelScore"]["unexpected"] = serde_json::json!(1);
+        assert!(AssessmentConfig::from_json_str(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn model_level_chooses_the_bracket_and_what_follows() {
+        let mut config = AssessmentConfig::default_alpha();
+        bound(&mut config);
+        let text = "fix typo";
+        let rules_only = assess(
+            &AssessmentConfig::default_alpha(),
+            &rules(),
+            &request(text, &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+        );
+        let result = assess_with_model(
+            &config,
+            &rules(),
+            &request(text, &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+            Some(&output(&[0.0, 0.0, 0.1, 0.8, 0.1])),
+        );
+        let complex = config.brackets.iter().find(|b| b.id == "complex").unwrap();
+        let score = result.model_score.as_ref().unwrap();
+        assert_eq!(score.status, "available");
+        assert_eq!(score.expected_level, Some(3.0));
+        assert_eq!(score.level, Some(3));
+        assert_eq!(score.bracket.as_deref(), Some("complex"));
+        assert_eq!(score.rules_bracket, rules_only.complexity.bracket);
+        assert_eq!(result.complexity.bracket, "complex");
+        assert_eq!(result.complexity.score, rules_only.complexity.score);
+        assert_eq!(result.models.role, complex.role);
+        assert_eq!(result.models.effort, complex.effort);
+        assert!(result.agents.total >= complex.min_agents);
+        assert!(result.rules.contains(&"bracket-source:model".to_string()));
+        assert!(result.rules.contains(&"bracket:complex".to_string()));
+        assert!(result.confidence.is_none());
+        // Cut points are inclusive at the threshold.
+        let edge = assess_with_model(
+            &config,
+            &rules(),
+            &request(text, &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+            Some(&output(&[0.5, 0.5, 0.0, 0.0, 0.0])),
+        );
+        assert_eq!(edge.complexity.bracket, "simple");
+    }
+
+    #[test]
+    fn missing_or_invalid_model_output_is_reported_not_hidden() {
+        let mut config = AssessmentConfig::default_alpha();
+        bound(&mut config);
+        let missing = assess_with_model(
+            &config,
+            &rules(),
+            &request("fix typo", &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(missing.model_score.as_ref().unwrap().status, "unavailable");
+        assert!(
+            missing
+                .rules
+                .contains(&"score-model:unavailable".to_string())
+        );
+        assert!(!missing.rules.contains(&"bracket-source:model".to_string()));
+        for bad in [
+            vec![0.5, 0.5],
+            vec![0.2, 0.2, 0.2, 0.2, 0.1],
+            vec![f64::NAN, 0.0, 0.0, 0.0, 1.0],
+            vec![-0.5, 0.5, 0.5, 0.25, 0.25],
+        ] {
+            let result = assess_with_model(
+                &config,
+                &rules(),
+                &request("fix typo", &[]),
+                &Knowledge::disabled(),
+                &BTreeMap::new(),
+                Some(&output(&bad)),
+            );
+            let score = result.model_score.unwrap();
+            assert_eq!(score.status, "invalid_output");
+            assert_eq!(result.complexity.bracket, score.rules_bracket);
+        }
+        let unbound = assess_with_model(
+            &AssessmentConfig::default_alpha(),
+            &rules(),
+            &request("fix typo", &[]),
+            &Knowledge::disabled(),
+            &BTreeMap::new(),
+            Some(&output(&[0.0, 0.0, 0.0, 0.0, 1.0])),
+        );
+        assert!(unbound.model_score.is_none());
+        assert!(
+            serde_json::to_value(&unbound)
+                .unwrap()
+                .get("modelScore")
+                .is_none()
+        );
     }
 }

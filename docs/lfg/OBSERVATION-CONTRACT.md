@@ -1,18 +1,22 @@
 # LFG integration observation v1
 
-This local developer interface projects the same deterministic assessment used
-by `POST /api/lfg/assess` into a bounded, advisory-only response. It is an LFG
-interface, not RRFlow admission, SWAG selection, MCP, a trained model, provider
-dispatch, or proof of authorization. It does not read local provider histories,
+This local developer interface projects the same assessment used by
+`POST /api/lfg/assess` into a bounded, advisory-only response. It is an LFG
+interface, not RRFlow admission, SWAG selection, MCP, provider dispatch, or
+proof of authorization. By default the assessment is deterministic rules; an
+operator can bind a trained model to choose the bracket, as described in
+[trained level score](TRAINED-LEVEL-SCORE.md). It does not read local provider histories,
 sign-in checks or subscription declarations. It returns a role and effort, not
 a selected provider/model or permission to use one.
 
 ## Discover and submit
 
 `GET /api/lfg/observations/capabilities` returns the request and response schema
-names, `deterministic-rules` analyzer identifier, effective assessment and
+names, the analyzer identifier (`deterministic-rules`, or
+`rules-and-trained-model` when the configuration binds a model), effective assessment and
 preflight-rule revision and SHA-256 digests, configured input and response byte
-limits, and the scoring-prefix byte limit. Both digests are required on a call
+limits, the scoring-prefix byte limit and, when bound, the model's `id` and
+`manifestSha256`. Both digests are required on a call
 so a changed configuration is reported as a conflict instead of silently
 producing a different answer. Digests use LFG's `digest_value`: recursively
 sort JSON object keys, preserve array order, serialize compact UTF-8 JSON with
@@ -60,26 +64,59 @@ including extra fields, remains subject to the configured body limit.
 The response uses `lfg.observation.v1`, carries the request ID/revision, input
 and configuration hashes, analyzer kind, numeric rule-point score, complexity
 bracket, agent range and suggestion, role, effort and configured reason IDs.
-`status: partial` means scoring used only the configured prefix; `intent.status:
-inconclusive` means the general intent fallback fired. A score is not a
+`status: partial` means scoring used only the configured prefix, or the bound
+model read only part of the text; `intent.status: inconclusive` means the
+general intent fallback fired. A score is not a
 probability, `confidence` is null, and `advisory` is always true. Hashes of
 predictable prompt text can still disclose information by guessing and must be
 treated as sensitive metadata. Input text and extension values are not echoed.
 
+### Optional trained model and structured input
+
+These change behaviour only when the assessment configuration sets them, and
+each is part of the assessment digest, so a pinned `expectedAssessmentSha256`
+also pins them.
+
+- `structuredInput` (`jsonFields`, `separator`): when `text` is a JSON object
+  with any of those fields as non-empty strings, LFG assesses only their values,
+  joined in order. RRFlow's engine sends its task projection as JSON, so
+  `["title", "goal"]` keeps IDs, digests and cursors out of the assessment. The
+  reason IDs then include `input:structured`. `inputSha256` still covers the
+  exact `text` sent.
+- `modelScore` (`id`, `manifestSha256`, `levelBrackets`, `levelCutPoints`): the
+  model's expected level picks the bracket, which then sets the agent range,
+  role and effort. `complexity.score` stays the rule score in
+  `configured-rule-points`, and `confidence` stays null. The response gains a
+  `modelScore` object with `status`, `id`, `manifestSha256`, `expectedLevel`,
+  `probabilities`, `level`, `bracket`, `rulesBracket`, `elapsedMicros` and
+  `truncated`. The reason IDs include `score-model:available`,
+  `score-model-level:<n>` and `bracket-source:model`. A configuration that binds
+  a model never answers from the rules alone: without a valid model output the
+  observation fails with `model_unavailable`, `model_busy`, `model_failed` or
+  `model_output_invalid` (HTTP 503). Request and digest checks run first, so a
+  stale or invalid request never costs a model run.
+
+Clients that ignore unknown response fields, as RRFlow's decoder does, keep
+working; they see the model's choice through the bracket, role and effort.
+
 The server reports `unsupported_schema`, `invalid_input`,
-`input_digest_mismatch`, `configuration_changed`, `deadline_expired`, or
-`response_limit_exceeded` or `nonfinite_score` where applicable. Error responses contain static codes,
+`input_digest_mismatch`, `configuration_changed`, `deadline_expired`,
+`response_limit_exceeded`, `nonfinite_score` or one of the model codes above,
+where applicable. Error responses contain static codes,
 not prompt content. Normal HTTP size and JSON parsing errors can also occur.
 Capability and successful observation responses have `Cache-Control: no-store`.
 
 ## Integration boundary and limits
 
-The current RRFlow `EndpointSelectionRequest` has a different, strict schema;
-this endpoint does not change that request or feed an observation to the engine.
-The engine must define its own authenticated observation admission, bind the
-actual task/source identity, and authorize any later proposal or effect. Caller
+RRFlow's draft engine integration (`rrflow-development` PR #249) calls this
+endpoint over literal loopback, checkpoints the validated advisory in the task
+attempt, and passes intent, role, effort and reason IDs to endpoint selection.
+It ignores the complexity score, agent counts and unknown fields, and it pins
+both digests in its endpoint profile. The engine remains responsible for
+admission, binding the actual task identity, and authorizing any later
+proposal or effect. Caller
 IDs and hashes supplied to LFG are claims. This interface currently has no
-authenticated hosted mode, model artifact identity, hard CPU/memory isolation,
+authenticated hosted mode, hard CPU/memory isolation,
 project-profile binding, context reference, persistence, distributed tracing or
 cross-process conformance guarantee. Keep it on a trusted local boundary until
 those capabilities exist and have been verified.
