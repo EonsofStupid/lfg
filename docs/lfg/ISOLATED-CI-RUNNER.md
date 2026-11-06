@@ -6,6 +6,16 @@ explicitly labeled same-repository pull requests it is allowed to merge. Without
 `ubuntu-latest`. The ordinary CI, release and SBOM workflows remain on their
 existing runners; configuring this runner does not make those checks pass.
 
+**Private repositories only.** LFG became public on 2026-11-06, and its checked
+merges now run on `ubuntu-latest`. In a public repository, a pull request from
+a fork can edit a workflow to request this runner's label, and GitHub
+[recommends against self-hosted runners in public repositories](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners#self-hosted-runner-security).
+So the checked-merge workflow selects the configured runner only while
+`github.event.repository.private` is true. The supervisor checks the
+repository's visibility before every registration and stops if it isn't
+private. These checks don't make the runner safe for a public repository.
+Fork workflows also need approval from a maintainer before they run.
+
 `ci/isolated-runner` contains an image and a Windows PowerShell supervisor for
 one-job, repository-scoped just-in-time runners. The supervisor obtains its
 short-lived configuration through the locally authenticated GitHub CLI, sends
