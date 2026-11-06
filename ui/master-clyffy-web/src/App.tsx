@@ -6,8 +6,8 @@ import { layoutGraph } from './graph'
 import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
 import { FeedbackPanel } from './FeedbackPanel'
-import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
-import type { OwnedResult } from './ownedAssessmentApi'
+import { DEV_MODEL_COPY, OwnedAssessmentPanel } from './OwnedAssessmentPanel'
+import { devModelClient, type OwnedResult } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { IntakePanel } from './IntakePanel'
@@ -27,6 +27,7 @@ export default function App() {
   const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
   const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; result: OwnedResult } | null>(null)
+  const [comparedModel, setComparedModel] = useState<'owned' | 'dev'>('owned')
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -142,7 +143,8 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
+        {!publicEmbed && mode === 'inspector' && <label className="compared-model">Model to compare <select value={comparedModel} onChange={(event) => { setComparedModel(event.target.value === 'dev' ? 'dev' : 'owned'); setOwnedSnapshot(null) }}><option value="owned">Experimental owned model</option><option value="dev">Dev model (open model)</option></select></label>}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel key={comparedModel} {...(comparedModel === 'dev' ? { client: devModelClient, copy: DEV_MODEL_COPY } : {})} prompt={prompt} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, result } : null)} />}
         {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={ownedSnapshot?.revision === revision ? ownedSnapshot.result : null} assessment={assessment?.revision === revision && assessmentSubscriptions === JSON.stringify(activeSubscriptions) ? assessment : null} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">

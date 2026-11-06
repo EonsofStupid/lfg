@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
-import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
+import { DEV_MODEL_COPY, OwnedAssessmentPanel } from './OwnedAssessmentPanel'
 import type { OwnedAssessmentClient, OwnedResult, OwnedStatus } from './ownedAssessmentApi'
 import type { Assessment } from './types'
 
@@ -375,4 +375,37 @@ test('a changed knowledge snapshot invalidates an applied context without overwr
   expect(screen.getByRole('button', { name: 'Run owned model' })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Append draft to project context' })).toBeDisabled()
   expect(onResult).toHaveBeenLastCalledWith(null)
+})
+
+test('the dev model panel names an open model and never presents it as LFG\'s own', async () => {
+  const api: OwnedAssessmentClient = {
+    status: vi.fn(async () => ({ enabled: true, status: 'ready' as const, engine: { id: 'lfg-dev-open-model', label: 'Small model (open model, dev only)', modelSha256: 'a'.repeat(64) }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: 10000, maxContextBytes: 5000, maxGeneratedTokens: 512, timeoutMs: 1000, maxConcurrent: 1 } })),
+    assess: vi.fn(async () => ({ status: 'unavailable' as const, engine: { id: 'lfg-dev-open-model' }, elapsedMs: 5 })),
+  }
+  const view = render(<OwnedAssessmentPanel prompt="owner request" assessment={deterministic} client={api} copy={DEV_MODEL_COPY} />)
+  expect(view.container.textContent).not.toMatch(/owned model/i)
+  expect(screen.getByRole('region', { name: 'Dev open model' })).toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('Dev model token'), { target: { value: 'test-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect dev model' }))
+  await screen.findByText(/Model status: ready/)
+  expect(screen.getByText(/Small model \(open model, dev only\) · lfg-dev-open-model/)).toBeInTheDocument()
+  expect(screen.getByText(/512 output tokens/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Run dev model' }))
+  expect(await screen.findByText(/could not be reached/)).toBeInTheDocument()
+  expect(view.container.textContent).not.toMatch(/owned model/i)
+})
+
+test('names the model did not get from the list are shown apart from its suggestions', async () => {
+  const api: OwnedAssessmentClient = {
+    status: vi.fn(async () => ({ enabled: true, status: 'ready' as const, engine: { id: 'lfg-dev-open-model' }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: 10000, maxContextBytes: 5000, maxGeneratedTokens: 512, timeoutMs: 1000, maxConcurrent: 1 } })),
+    assess: vi.fn(async () => ({ status: 'ok' as const, engine: { id: 'lfg-dev-open-model' }, elapsedMs: 5, output: { intent: 'build', complexity: 'low', suggested_models: ['real-model'], agent_count: 1, reasons: ['small'], unlisted_models: ['made-up-model'] } })),
+  }
+  render(<OwnedAssessmentPanel prompt="owner request" assessment={deterministic} client={api} copy={DEV_MODEL_COPY} />)
+  fireEvent.change(screen.getByLabelText('Dev model token'), { target: { value: 'test-token' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Connect dev model' }))
+  await screen.findByText(/Model status: ready/)
+  fireEvent.click(screen.getByRole('button', { name: 'Run dev model' }))
+  expect(await screen.findByText('["real-model"]')).toBeInTheDocument()
+  expect(screen.getByText('Names not on the model list')).toBeInTheDocument()
+  expect(screen.getByText('["made-up-model"]')).toBeInTheDocument()
 })

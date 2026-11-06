@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { ownedAssessmentClient, ownedAssessmentBody, sha256Utf8 } from './ownedAssessmentApi'
+import { devModelClient, ownedAssessmentClient, ownedAssessmentBody, sha256Utf8 } from './ownedAssessmentApi'
 
 afterEach(() => { vi.unstubAllGlobals() })
 
@@ -44,4 +44,12 @@ test('legacy request payload remains exactly text-only and SHA helper emits lowe
 test('refuses context hashing when Web Crypto is unavailable', async () => {
   vi.stubGlobal('crypto', undefined)
   await expect(sha256Utf8('private context')).rejects.toThrow(/secure local browser context/)
+})
+
+test('the dev model client uses its own routes', async () => {
+  const fetcher = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ status: 'ok', elapsedMs: 1, engine: null })))
+  vi.stubGlobal('fetch', fetcher)
+  await devModelClient.status('local-token')
+  await devModelClient.assess('private request', 'local-token')
+  expect(fetcher.mock.calls.map(call => call[0])).toEqual(['/api/lfg/assess/dev-model/status', '/api/lfg/assess/dev-model'])
 })
