@@ -10,9 +10,13 @@ The runner requires a screening manifest and the exact development plan used
 to create it. It joins screened text to the original explicit target arrays by
 source-record digest, requires a one-to-one match, checks project, group, family,
 and normalized-text separation, and recomputes each screened string with the
-configured policy and current screening code. An empty or missing target array
-is unknown unless the row carries an explicit `target_completeness[field]: true`
-attestation. Intent arrays stay multilabel. Select the target field and label
+configured policy and current screening code. A missing target array is always
+unknown. An empty array is unknown unless the row carries an explicit
+`target_completeness[field]: true` attestation. When completeness is explicitly
+false, present positive labels remain known and omitted labels stay unknown.
+Legacy nonempty arrays without a field-level completeness flag are treated as
+complete under the source schema; this remains a claim, not independent
+verification. Intent arrays stay multilabel. Select the target field and label
 set in a local configuration file. Selected labels outside the taxonomy fail.
 Screened text is used for fitting, while source target arrays remain unchanged.
 Any redaction can affect label meaning; screening does not certify that text is
@@ -32,6 +36,8 @@ The configuration is a private JSON file with schema version
 
 - `revision`, `screened_corpus`, `label_plan`, `target_field`, `selected_labels`
 - `screen_policy`, `constant_target_behavior` (`abstain` or `majority_class`)
+- `review_ledger`, `max_ledger_bytes`
+- `validation_group_use_claim` (`previously_used`, `reported_unused`, or `unknown`)
 - `seed`, `max_rows`, `max_text_bytes`, `max_source_bytes`,
   `max_total_source_bytes`,
   `max_manifest_bytes`, `max_screened_file_bytes`, `max_policy_bytes`, `max_features`
@@ -48,8 +54,13 @@ or validation as negatives. The report records
 the config digest, input/output digests, taxonomy digest, train/validation
 counts and group claims, source label uncertainty, parameters, environment,
 per-target positive/negative/unknown support and confusion counts, covered-only
-macro/micro precision, recall and F1, fit/vectorize/predict elapsed time, and
-classifier status. The timer excludes loading, imports, metric calculation, and
+macro/micro precision, recall and F1. Standard macro precision includes labels
+with false-positive predictions even when they have no positive truth support;
+a separate supported-label macro is also reported. The report records
+fit/vectorize/predict elapsed time and
+classifier status. It binds the review ledger digest, checks that the ledger
+covers exactly selected rows, and reports per-split review and target-array
+states. The timer excludes loading, imports, metric calculation, and
 report writing; it is not per-request latency.
 KNN's retained sparse feature-array and target-array bytes are measured
 separately. Model artifacts are not persisted, so persisted model artifact
@@ -69,9 +80,10 @@ Run it with a new owner-private output directory:
   --output C:\Users\USER\AppData\Local\LFG\private-exports\NEW-COMPARISON
 ```
 
-The output is descriptive exploratory evidence. Unreviewed or teacher-proposed
-labels remain unverified. Previous use of a validation group prevents a claim
-of independent final evaluation. No quality threshold, promotion, model
+The output is descriptive exploratory evidence. It records per-partition
+`verified`, `labels_pending`, and target-completeness flags, without treating
+those claims as independent verification. The configured validation-use claim
+is also explicitly unverified. No quality threshold, promotion, model
 qualification, or verified outcome follows from this comparison. LFG and
 owned-model results are reported unavailable unless captured separately by
 their actual local prediction paths using matching task and input semantics.

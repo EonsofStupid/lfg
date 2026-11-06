@@ -86,6 +86,9 @@ class ComparisonTests(unittest.TestCase):
         plan_raw = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
         plan_path = root / "plan.json"
         plan_path.write_bytes(plan_raw)
+        ledger_rows = [{"schema_version": "lfg.encoder-review.v1", "id": item["id"], "decision": "pending"}
+                       for split_rows in rows.values() for item in split_rows]
+        (root / "reviews.jsonl").write_bytes(b"".join(_encoded(item) + b"\n" for item in ledger_rows))
         manifest = {"schema_version": "lfg.private-corpus-screen-manifest.v1",
                     "plan_sha256": hashlib.sha256(plan_raw).hexdigest(), "policy_sha256": policy_sha,
                     "screen_code_sha256": comparison.sha(Path(screen_private_corpus.__file__).read_bytes()),
@@ -105,6 +108,7 @@ class ComparisonTests(unittest.TestCase):
     def _config(self, corpus: Path, plan: Path, policy: Path, **extra):
         return {"schema_version": comparison.SCHEMA, "revision": "test-1", "screened_corpus": str(corpus),
                 "label_plan": str(plan), "screen_policy": str(policy),
+                "review_ledger": str(corpus / "reviews.jsonl"), "max_ledger_bytes": 65536,
                 "target_field": "intents", "selected_labels": ["build", "verify"],
                 "seed": 17, "max_rows": 100, "max_text_bytes": 1024, "max_source_bytes": 4096,
                 "max_total_source_bytes": 8192,
@@ -113,7 +117,8 @@ class ComparisonTests(unittest.TestCase):
                 "logistic_c": 1.0, "logistic_max_iter": 200, "knn_weights": "uniform", "knn_p": 2,
                 "tree_criterion": "gini", "near_duplicate_similarity": 0.9,
                 "max_near_duplicate_pairs": 100, "max_near_duplicate_work": 1_000_000,
-                "max_policy_bytes": 65536, "constant_target_behavior": "abstain", **extra}
+                "max_policy_bytes": 65536, "constant_target_behavior": "abstain",
+                "validation_group_use_claim": "unknown", **extra}
 
     def test_load_config_accepts_inert_extension_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,25 +142,67 @@ class ComparisonTests(unittest.TestCase):
         encoder, matrix, observed = comparison._matrix(rows, "intents", ["build", "verify"], taxonomy)
         self.assertEqual(list(encoder.classes_), ["build", "verify"])
         self.assertEqual(matrix.tolist(), [[1, 1], [0, 0]])
-        self.assertEqual(observed, [True, False])
+        self.assertEqual(observed.tolist(), [[True, True], [False, False]])
         _, explicit_empty, explicit_observed = comparison._matrix(
             [{"intents": [], "verified": False, "target_completeness": {"intents": True}}],
             "intents", ["build"], taxonomy)
         self.assertEqual(explicit_empty.tolist(), [[0]])
-        self.assertEqual(explicit_observed, [True])
+        self.assertEqual(explicit_observed.tolist(), [[True]])
         _, missing, missing_observed = comparison._matrix([{"verified": False}], "intents", ["build"], taxonomy)
         self.assertEqual(missing.tolist(), [[0]])
-        self.assertEqual(missing_observed, [False])
+        self.assertEqual(missing_observed.tolist(), [[False]])
+
+    def test_false_completeness_keeps_positives_and_omitted_labels_unknown(self):
+        taxonomy = {"intents": {"build", "verify"}}
+        row = {"intents": ["build"], "target_completeness": {"intents": False}, "verified": False}
+        _, matrix, known = comparison._matrix([row], "intents", ["build", "verify"], taxonomy)
+        self.assertEqual(matrix.tolist(), [[1, 0]])
+        self.assertEqual(known.tolist(), [[True, False]])
+
+    def test_labels_pending_integer_is_rejected_and_verified_state_is_preserved(self):
+        taxonomy = {"intents": {"build"}}
+        with self.assertRaisesRegex(ValueError, "labels_pending"):
+            comparison._matrix([{"intents": ["build"], "verified": False, "labels_pending": 1}],
+                               "intents", ["build"], taxonomy)
+        self.assertEqual(comparison._label_review_state(
+            [{"intents": ["build"], "verified": True, "labels_pending": False}], "intents")["verified_true"], 1)
+        state = comparison._label_review_state(
+            [{"intents": ["build"], "labels_pending": False}, {"intents": ["build"]}], "intents")
+        self.assertEqual(state["labels_pending_false"], 1)
+        self.assertEqual(state["labels_pending_absent"], 1)
+
+    def test_review_ledger_must_bind_exact_selected_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "screened"
+            plan, policy = self._corpus(root)
+            ledger = root / "reviews.jsonl"
+            lines = ledger.read_bytes().splitlines(keepends=True)
+            ledger.write_bytes(b"".join(lines[:-1]))
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps(self._config(root, plan, policy)))
+            with self.assertRaisesRegex(ValueError, "cover exactly"):
+                comparison.run(config_path, Path(tmp) / "report")
+
+    def test_macro_precision_counts_predicted_only_labels(self):
+        import numpy as np
+        true = np.array([[1, 0], [1, 0]])
+        pred = np.array([[1, 1], [1, 1]])
+        known = np.ones_like(true, dtype=bool)
+        metrics = comparison._metrics(true, pred, known, ["observed", "predicted-only"])
+        self.assertEqual(metrics["macro_precision"], 0.5)
+        self.assertEqual(metrics["macro_precision_supported_labels"], 1.0)
 
     def test_constant_target_fallback_is_consistent_for_all_positive_and_negative(self):
         import numpy as np
         for value in (0, 1):
             training = np.full((3, 1), value, dtype=int)
-            variable, constant = comparison._target_partition(training)
+            known = np.ones_like(training, dtype=bool)
+            variable, constant, unsupported = comparison._target_partition(training, known)
             self.assertEqual(variable, [])
             self.assertEqual(constant, [0])
-            abstain = comparison._constant_fallbacks(training, ["x"], 2, "abstain")
-            fallback = comparison._constant_fallbacks(training, ["x"], 2, "majority_class")
+            self.assertEqual(unsupported, [])
+            abstain = comparison._constant_fallbacks(training, known, ["x"], 2, "abstain")
+            fallback = comparison._constant_fallbacks(training, known, ["x"], 2, "majority_class")
             self.assertEqual(abstain.tolist(), [[-1], [-1]])
             self.assertEqual(fallback.tolist(), [[value], [value]])
 
@@ -246,7 +293,7 @@ class ComparisonTests(unittest.TestCase):
                 self.assertEqual(item["fit_rows"], 2)
                 self.assertEqual(item["prediction_rows"], 1)
                 self.assertEqual(item["metrics"]["examples"], 1)
-            self.assertGreater(report["algorithms"]["knn"]["retained_training_features"]["sparse_storage_bytes"], 0)
+            self.assertGreater(report["algorithms"]["knn"]["retained_training_features"]["sparse_storage_bytes_across_indexes"], 0)
             self.assertEqual(report["algorithms"]["knn"]["persisted_model_artifact_bytes"], 0)
             encoded = (output / "comparison-report.json").read_text()
             self.assertNotIn("screened train text", encoded)
