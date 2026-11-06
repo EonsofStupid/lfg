@@ -265,3 +265,18 @@ ui/master-clyffy-web/   the visualizer (React + @xyflow/react)
 ml/lfg-encoder/         offline ONNX training lane (not yet wired)
 docs/lfg/, fixtures/lfg/  shadow-parity gate vs GoClyffy
 ```
+
+## License
+
+LFG is source-available under the [Business Source License 1.1](LICENSE). It
+is not an open-source license yet.
+
+- You may read, copy, modify and redistribute the code, and use it in
+  production for yourself or within your own organization.
+- You may not offer LFG, or a product or service built mainly on it, to others
+  on a paid basis as a hosted, managed or embedded offering without a
+  commercial license from Jesse Hades Hall.
+- Each version becomes available under the Apache License, Version 2.0, four
+  years after it is first publicly released.
+
+The [LICENSE](LICENSE) file is the authoritative text.
