@@ -238,6 +238,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         .0,
         400
     );
+    // Codex runs are off without LFG_CODEX_RUNS_TOKEN, before any input is read.
     assert_eq!(
         http_response(
             port,
@@ -246,7 +247,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
             oversized
         )
         .0,
-        400
+        503
     );
     assert_eq!(
         http_response(
