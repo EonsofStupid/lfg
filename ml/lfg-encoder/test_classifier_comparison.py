@@ -16,7 +16,8 @@ def _encoded(value):
 
 class ComparisonTests(unittest.TestCase):
     def _corpus(self, root: Path, include_test: bool = False, same_project_across_splits: bool = False,
-                extra_screened_validation: bool = False, fully_unknown_train_row: bool = False):
+                extra_screened_validation: bool = False, fully_unknown_train_row: bool = False,
+                sensitive_metadata_field: str | None = None):
         root.mkdir(parents=True)
         tax = {"schema_version": "lfg.encoder-evaluation-taxonomy.v1",
                "intents": ["build", "verify"], "capabilities": ["write"], "risks": ["sensitive"]}
@@ -44,11 +45,17 @@ class ComparisonTests(unittest.TestCase):
             rows["train"].append({"id": "unknown", "family": "funknown", "text": "screened train unknown",
                                   "capabilities": [], "risks": [], "verified": False,
                                   "source": {"project": "train-project"}})
+        if sensitive_metadata_field in ("id", "family"):
+            rows["train"][0][sensitive_metadata_field] = "SCREEN-SECRET-123"
+        elif sensitive_metadata_field == "project":
+            for item in rows["train"]:
+                item["source"]["project"] = "SCREEN-SECRET-123"
         sources, output_digests, output_counts, source_counts = [], {}, {}, {}
         matched_records = 0
         for split in ("train", "validation"):
             source_bytes, filtered = bytearray(), []
-            group = f"{split}-group"
+            group = ("SCREEN-SECRET-123" if split == "train" and sensitive_metadata_field == "project_group"
+                     else f"{split}-group")
             for item in rows[split]:
                 if same_project_across_splits and split == "validation":
                     item["source"]["project"] = "train-project"
@@ -138,6 +145,17 @@ class ComparisonTests(unittest.TestCase):
             plan, policy = self._corpus(root, include_test=True)
             with self.assertRaisesRegex(ValueError, "non-development source"):
                 self._load(root, plan, policy)
+
+    def test_sensitive_identity_metadata_is_rejected_without_echoing_marker(self):
+        for metadata_field in ("id", "family", "project", "project_group"):
+            with self.subTest(field=metadata_field), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "screened"
+                plan, policy = self._corpus(root, sensitive_metadata_field=metadata_field)
+                config_path = Path(tmp) / "config.json"
+                config_path.write_text(json.dumps(self._config(root, plan, policy)))
+                with self.assertRaisesRegex(ValueError, "sensitive .* metadata") as caught:
+                    comparison.run(config_path, Path(tmp) / "report")
+                self.assertNotIn("SCREEN-SECRET-123", str(caught.exception))
 
     def test_complete_multilabel_arrays_preserved_and_missing_rejected(self):
         taxonomy = {"intents": {"build", "verify"}}

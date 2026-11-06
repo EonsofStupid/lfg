@@ -114,6 +114,10 @@ def _read_bounded(path: Path, limit: int, name: str) -> bytes:
     return raw
 
 
+def _sensitive_metadata(value: str, rules) -> bool:
+    return any(pattern.search(value) is not None for _, pattern, _ in rules)
+
+
 def _require_outside_git_worktrees(path: Path) -> Path:
     """Resolve the path and reject every Git worktree, including linked worktrees."""
     if path.is_symlink():
@@ -267,6 +271,8 @@ def load_screened_corpus(directory: Path, plan_path: Path, max_rows: int,
         group = source.get("project_group", project)
         if any(not isinstance(value, str) or not value.strip() for value in (project, group)):
             raise ValueError("source project/group is invalid")
+        if any(_sensitive_metadata(value, screen_rules) for value in (project, group)):
+            raise ValueError("sensitive source metadata detected")
         if project in projects and projects[project] != (group, split):
             raise ValueError("project is assigned to multiple groups or splits")
         if group in groups and groups[group] != split:
@@ -296,6 +302,11 @@ def load_screened_corpus(directory: Path, plan_path: Path, max_rows: int,
             row = _json_bytes(line.encode("utf-8"), "screened row")
             if not isinstance(row, dict) or row.get("schema_version") != screen_private_corpus.OUTPUT_VERSION:
                 raise ValueError("unsupported screened row")
+            metadata_values = [row.get(key) for key in ("id", "family", "project", "project_group")]
+            if any(not isinstance(value, str) or not value.strip() for value in metadata_values):
+                raise ValueError("screened row metadata is invalid")
+            if any(_sensitive_metadata(value, screen_rules) for value in metadata_values):
+                raise ValueError("sensitive screened metadata detected")
             text = row.get("text")
             if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > max_text_bytes:
                 raise ValueError("invalid or oversized screened text")
@@ -354,6 +365,14 @@ def load_screened_corpus(directory: Path, plan_path: Path, max_rows: int,
             identifier = source_record.get("id") if isinstance(source_record, dict) else None
             if not isinstance(identifier, str) or not identifier.strip():
                 raise ValueError("label source record lacks ID")
+            record_source = source_record.get("source")
+            metadata_values = [identifier, source_record.get("family"),
+                               record_source.get("project") if isinstance(record_source, dict) else None,
+                               source.get("project"), source.get("project_group", source.get("project"))]
+            if any(not isinstance(value, str) or not value.strip() for value in metadata_values):
+                raise ValueError("label source metadata is invalid")
+            if any(_sensitive_metadata(value, screen_rules) for value in metadata_values):
+                raise ValueError("sensitive label source metadata detected")
             record_hash = sha(line.encode("utf-8"))
             screen_row = screened_by_id[split].get(identifier)
             if (screen_row is None or identifier in matched_ids[split]
