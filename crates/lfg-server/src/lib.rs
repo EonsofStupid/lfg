@@ -39,6 +39,7 @@ mod feedback_windows;
 mod embedded_node {
     include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
 }
+mod devtools;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]
@@ -404,6 +405,7 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
     router(state)
         .merge(feedback::FeedbackApi::for_listener(listener).routes())
+        .merge(devtools::DevtoolsApi::for_listener(listener).routes())
         .merge(owned_assessment::routes(listener))
 }
 

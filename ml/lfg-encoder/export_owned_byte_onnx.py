@@ -61,6 +61,7 @@ def reject_external(message, onnx):
 def export(checkpoint: Path, config_path: Path, source_path: Path, output: Path) -> dict:
     import numpy as np
     import onnx
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
     import onnxruntime as ort
     import torch
     from safetensors.torch import load_file

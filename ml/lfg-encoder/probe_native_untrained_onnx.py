@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def main():
     if manifest.get('probe_only') is not True or manifest.get('promotion_eligible') is not False:
         raise SystemExit('this tool requires an explicitly untrained probe artifact')
     import numpy as np
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
     import onnxruntime as ort
     from transformers import AutoTokenizer
 
