@@ -18,6 +18,19 @@ TEST_MODEL = "fixture/model:development-tag"
 
 
 class ComparisonAdapterTests(unittest.TestCase):
+    def test_remote_snapshot_fails_closed_when_models_are_loaded(self):
+        config = {"server_binary_path": "/opt/ollama", "remote_home": "/home/lfg",
+                  "remote_system_service": "ollama", "remote_systemctl_path": "/usr/bin/systemctl",
+                  "remote_nvidia_smi_path": "/usr/bin/nvidia-smi",
+                  "remote_expected_hostname": "worker", "remote_uid": 1000}
+        snapshot = {"hostname": "worker", "architecture": "x86_64", "uid": 1000,
+                    "netns_inode": 10, "memory_available_bytes": 100,
+                    "home_disk_free_bytes": 100, "loaded_model_count": 1}
+        result = mock.Mock(returncode=0, stdout=json.dumps(snapshot).encode("utf-8"))
+        with mock.patch.object(comparison, "_ssh_run", return_value=result):
+            with self.assertRaisesRegex(ValueError, "safe coexistence is not established"):
+                comparison._remote_snapshot(config)
+
     def test_output_schema_is_dynamic_unique_and_allows_empty_negative(self):
         schema = comparison.output_schema(["build.software", "verify.outcome"])
         self.assertEqual(schema["properties"]["labels"]["items"]["enum"],
