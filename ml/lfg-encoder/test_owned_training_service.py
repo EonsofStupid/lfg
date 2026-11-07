@@ -385,6 +385,111 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
         self.assertEqual(status['step'], 2)
 
 
+@unittest.skipUnless(os.name == 'posix', 'POSIX CLI required')
+class SupervisorCliPrivacyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def service_config(self, name, *, dataset=None, sft_config=None, max_sft_config_bytes=65536):
+        return {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+            'python': sys.executable, 'trainer': str(Path(service.__file__).resolve()),
+            'state_dir': str(self.root / f'{name}-state'), 'dataset': str(dataset or self.root / f'{name}-dataset'),
+            'checkpoint': str(self.root / f'{name}-source'), 'sft_config': str(sft_config or self.root / f'{name}-sft.json'),
+            'max_sft_config_bytes': max_sft_config_bytes, 'segment_steps': 1, 'status_poll_seconds': 1}
+
+    def run_cli(self, config_path):
+        return subprocess.run([sys.executable, str(Path(service.__file__).resolve()), '--config', str(config_path),
+                               '--exit-on-complete'], capture_output=True, text=True, check=False)
+
+    def assert_private_cli_error(self, result, *private_strings):
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        for private in (str(self.root), *private_strings):
+            self.assertNotIn(private, output)
+
+    def test_cli_redacts_missing_unreadable_and_malformed_service_configuration(self):
+        missing = self.root / 'private-missing-service-config.json'
+        result = self.run_cli(missing)
+        self.assert_private_cli_error(result)
+        self.assertIn('configured file or directory is missing', result.stderr)
+
+        unreadable = self.root / 'private-config-directory'
+        unreadable.mkdir()
+        result = self.run_cli(unreadable)
+        self.assert_private_cli_error(result)
+        self.assertIn('expected a file but found a directory', result.stderr)
+
+        malformed = self.root / 'private-malformed-service-config.json'
+        private_content = 'SYNTHETIC_PRIVATE_JSON_CONTENT'
+        malformed.write_text('{"secret":"' + private_content)
+        result = self.run_cli(malformed)
+        self.assert_private_cli_error(result, private_content)
+        self.assertIn('invalid JSON in configuration, input, or checkpoint', result.stderr)
+
+    def test_cli_redacts_oversized_config_and_dataset_and_missing_checkpoint_inputs(self):
+        oversized_config = self.root / 'private-oversized-sft.json'
+        oversized_config.write_text('{"SYNTHETIC_PRIVATE_CONFIG_CONTENT":true}')
+        config_path = self.root / 'oversized-service.json'
+        config_path.write_text(json.dumps(self.service_config('oversized', sft_config=oversized_config,
+                                                               max_sft_config_bytes=8)))
+        result = self.run_cli(config_path)
+        self.assert_private_cli_error(result, 'SYNTHETIC_PRIVATE_CONFIG_CONTENT')
+        self.assertIn('configured input exceeds byte limit', result.stderr)
+
+        dataset = self.root / 'private-oversized-dataset'
+        dataset.mkdir()
+        (dataset / 'manifest.json').write_text('{"SYNTHETIC_PRIVATE_DATASET_CONTENT":true}')
+        sft_config = self.root / 'small-limit-sft.json'
+        sft_config.write_text(json.dumps({'schema_version': 'lfg.owned-assessment-sft-config.v1', 'steps': 1,
+            'context': 4, 'max_manifest_bytes': 8, 'max_dataset_bytes': 1024}))
+        config_path = self.root / 'oversized-dataset-service.json'
+        config_path.write_text(json.dumps(self.service_config('oversized-dataset', dataset=dataset,
+                                                               sft_config=sft_config)))
+        result = self.run_cli(config_path)
+        self.assert_private_cli_error(result, 'SYNTHETIC_PRIVATE_DATASET_CONTENT')
+        self.assertIn('configured input exceeds byte limit', result.stderr)
+
+        unreadable_dataset = self.root / 'private-unreadable-dataset'
+        unreadable_dataset.mkdir()
+        (unreadable_dataset / 'manifest.json').mkdir()
+        readable_limit_config = self.root / 'readable-limit-sft.json'
+        readable_limit_config.write_text(json.dumps({'schema_version': 'lfg.owned-assessment-sft-config.v1',
+            'steps': 1, 'context': 4, 'max_manifest_bytes': 1024, 'max_dataset_bytes': 1024}))
+        config_path = self.root / 'unreadable-dataset-service.json'
+        config_path.write_text(json.dumps(self.service_config('unreadable-dataset', dataset=unreadable_dataset,
+                                                               sft_config=readable_limit_config)))
+        result = self.run_cli(config_path)
+        self.assert_private_cli_error(result)
+        self.assertIn('expected a file but found a directory', result.stderr)
+
+        missing_dataset = self.root / 'private-missing-dataset'
+        config_path = self.root / 'missing-dataset-service.json'
+        config_path.write_text(json.dumps(self.service_config('missing-dataset', dataset=missing_dataset,
+                                                               sft_config=sft_config)))
+        result = self.run_cli(config_path)
+        self.assert_private_cli_error(result)
+        self.assertIn('configured file or directory is missing', result.stderr)
+
+    def test_cli_redacts_invalid_published_checkpoint_metadata(self):
+        state = self.root / 'private-checkpoint-state' / 'segments' / 'private-segment' / 'checkpoints' / 'step-0000000000000001'
+        state.mkdir(parents=True)
+        (state / 'state.json').write_text('{"SYNTHETIC_PRIVATE_CHECKPOINT_CONTENT":')
+        config_path = self.root / 'checkpoint-service.json'
+        config_path.write_text(json.dumps({'schema_version': 'lfg.owned-training-service.v1',
+            'trainer_kind': 'distillation', 'python': sys.executable,
+            'trainer': str(Path(service.__file__).resolve()), 'state_dir': str(state.parents[3]),
+            'student_config': str(self.root / 'student.json'), 'distillation_config': str(self.root / 'distill.json'),
+            'runtime_config': str(self.root / 'runtime.json'), 'corpus_plan': str(self.root / 'corpus.json'),
+            'screen_policy': str(self.root / 'screen.json'), 'teacher_manifest': str(self.root / 'teacher.json'),
+            'teacher_weights': str(self.root / 'teacher.safetensors'), 'teacher_format': 'owned-byte',
+            'segment_steps': 1, 'status_poll_seconds': 1}))
+        result = self.run_cli(config_path)
+        self.assert_private_cli_error(result, 'SYNTHETIC_PRIVATE_CHECKPOINT_CONTENT')
+        self.assertIn('cannot validate published checkpoint metadata', result.stderr)
+
+
 @unittest.skipUnless(os.name == 'posix' and all(importlib.util.find_spec(name)
     for name in ('torch', 'safetensors')), 'POSIX torch and safetensors required for real trainer integration')
 class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
@@ -652,20 +757,61 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
             'sft_config': str(fixture.config_path), 'segment_steps': 1, 'status_poll_seconds': 1}
         service_path = fixture.root / 'dependencyless-supervisor.json'
         service_path.write_text(json.dumps(service_config))
-        driver = r'''import json, sys
+        import shutil
+        tampered_state = fixture.root / 'tampered-dependencyless-state'
+        shutil.copytree(state_dir, tampered_state)
+        tampered_checkpoint = next((tampered_state / 'segments').glob('*/checkpoints/step-*/state.json'))
+        tampered_metadata = json.loads(tampered_checkpoint.read_text())
+        tampered_metadata['identity']['multilabel_coverage_sha256'] = '0' * 64
+        tampered_checkpoint.write_text(json.dumps(tampered_metadata))
+        tampered_config = dict(service_config, state_dir=str(tampered_state))
+        tampered_config_path = fixture.root / 'tampered-dependencyless-supervisor.json'
+        tampered_config_path.write_text(json.dumps(tampered_config))
+        tamper_driver = r'''import sys
 sys.path.insert(0, sys.argv[1])
 import owned_training_service as service
-value = service.config(service.Path(sys.argv[2]))
-contract = service.sft_context(value)
-latest = service.latest_checkpoint(service.Path(value['state_dir']) / 'segments', contract['checkpoint_schema'], sft=contract)
-print(json.dumps({'schema': contract['checkpoint_schema'], 'step': latest[0]}))
+real_popen = service.subprocess.Popen
+def reject_launch(command, *args, **kwargs):
+    if kwargs:
+        return real_popen(command, *args, **kwargs)
+    raise SystemExit(44)
+service.subprocess.Popen = reject_launch
+try:
+    service.run(service.Path(sys.argv[2]), exit_on_complete=True)
+except ValueError as error:
+    print(str(error))
+else:
+    raise SystemExit(3)
 '''
-        result = subprocess.run([str(lightweight_python), '-c', driver,
-                                 str(Path(service.__file__).resolve().parent), str(service_path)],
+        rejected = subprocess.run([str(lightweight_python), '-c', tamper_driver,
+                                   str(Path(service.__file__).resolve().parent), str(tampered_config_path)],
+                                  capture_output=True, text=True, check=False)
+        self.assertEqual(rejected.returncode, 0, msg=rejected.stderr)
+        self.assertIn('multilabel_coverage_sha256', rejected.stdout)
+        self.assertNotIn(str(fixture.root), rejected.stdout + rejected.stderr)
+
+        valid_driver = r'''import json, sys
+sys.path.insert(0, sys.argv[1])
+import owned_training_service as service
+commands = []
+real_popen = service.subprocess.Popen
+def capture_launch(command, *args, **kwargs):
+    if kwargs:
+        return real_popen(command, *args, **kwargs)
+    commands.append(command)
+    return real_popen(command, stdout=service.subprocess.DEVNULL,
+        stderr=service.subprocess.DEVNULL, *args, **kwargs)
+service.subprocess.Popen = capture_launch
+service.run(service.Path(sys.argv[2]), exit_on_complete=True)
+result = json.loads((service.Path(sys.argv[3]) / 'complete.json').read_text())
+print(json.dumps({'completed_steps': result['completed_steps'],
+    'resumed': bool(commands and '--resume' in commands[0])}))
+'''
+        result = subprocess.run([str(lightweight_python), '-c', valid_driver,
+                                 str(Path(service.__file__).resolve().parent), str(service_path), str(state_dir)],
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(json.loads(result.stdout),
-                         {'schema': 'lfg.owned-multilabel-sft-checkpoint.v1', 'step': 1})
+        self.assertEqual(json.loads(result.stdout), {'completed_steps': 2, 'resumed': True})
 
         # A configured interpreter without ML dependencies must fail closed, without a raw path/error leak.
         bad_config = dict(service_config, python=str(lightweight_python))

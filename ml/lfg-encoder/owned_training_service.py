@@ -369,8 +369,8 @@ def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-chec
             if sft is not None:
                 validate_sft_state_identity(state, sft)
             newest.append((step, state_path.parent, hashlib.sha256(raw).hexdigest(), state))
-        except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f'cannot validate published checkpoint: {state_path}') from exc
+        except (KeyError, TypeError, OSError, json.JSONDecodeError):
+            raise ValueError('cannot validate published checkpoint metadata') from None
     for _, path, _, state in newest:
         try:
             if (digest(path / 'weights.safetensors') != state['model_sha256']
@@ -490,10 +490,28 @@ def main() -> int:
     args = parser.parse_args()
     try:
         run(args.config, exit_on_complete=args.exit_on_complete)
-    except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as error:
-        print(f'LFG training service: {error}', file=sys.stderr, flush=True)
-        return 1
-    return 0
+    except FileNotFoundError:
+        message = 'configured file or directory is missing'
+    except PermissionError:
+        message = 'permission denied for a configured file or directory'
+    except IsADirectoryError:
+        message = 'expected a file but found a directory'
+    except OSError:
+        message = 'filesystem operation failed; check configured paths and permissions'
+    except json.JSONDecodeError:
+        message = 'invalid JSON in configuration, input, or checkpoint'
+    except UnicodeDecodeError:
+        message = 'configured text input is not valid UTF-8'
+    except ValueError as error:
+        message = str(error)
+    except KeyError:
+        message = 'configuration or checkpoint is missing a required field'
+    except (RuntimeError, TypeError):
+        message = 'training or validation failed; inspect the private inputs and service status'
+    else:
+        return 0
+    print(f'LFG training service: {message}', file=sys.stderr, flush=True)
+    return 1
 
 
 if __name__ == '__main__':
