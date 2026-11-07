@@ -44,6 +44,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
     owned_identity_omit_field = None
     owned_status = 'ok'
     owned_lifecycle = {'workerStarted': True, 'workerCompletedSuccessfully': True}
+    owned_output_text = 'private fixture output'
+    owned_stop_reason = 'stop_sequence'
+    owned_measurement_overrides = {}
+    owned_response_overrides = {}
+    owned_omit_optional_fields = False
+    owned_omit_top_stop_reason = False
+    owned_omit_measurement_stop_reason = False
 
     def log_message(self, _format, *_args):
         pass
@@ -124,13 +131,26 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 time.sleep(float(self.sleep_owned))
             measurement = {'schemaVersion': 'lfg.owned-run-measurement.v1',
                            'status': self.owned_status, 'engineId': ENGINE['id'],
-                           'handlerElapsedMs': 3}
+                           'handlerElapsedMs': 3, 'stopReason': self.owned_stop_reason,
+                           'outputTextUtf8Bytes': (len(self.owned_output_text.encode('utf-8'))
+                                                   if self.owned_output_text is not None else None)}
             if self.owned_lifecycle is not None:
                 measurement.update(self.owned_lifecycle)
-            return self.respond(200, {'schemaVersion': ('invalid' if self.malformed_owned else 'lfg.owned-assessment.v1'), 'status': self.owned_status,
-                                      'engine': ENGINE,
-                                      'measurement': measurement,
-                                      'outputText': 'private fixture output'})
+            measurement.update(self.owned_measurement_overrides)
+            value = {'schemaVersion': ('invalid' if self.malformed_owned else 'lfg.owned-assessment.v1'),
+                     'status': self.owned_status, 'engine': ENGINE,
+                     'stopReason': self.owned_stop_reason, 'measurement': measurement,
+                     'outputText': self.owned_output_text}
+            if self.owned_omit_optional_fields:
+                value.pop('stopReason', None)
+                measurement.pop('stopReason', None)
+                measurement.pop('outputTextUtf8Bytes', None)
+            if self.owned_omit_top_stop_reason:
+                value.pop('stopReason', None)
+            if self.owned_omit_measurement_stop_reason:
+                measurement.pop('stopReason', None)
+            value.update(self.owned_response_overrides)
+            return self.respond(200, value)
         return self.respond(404, {})
 
 
@@ -148,6 +168,13 @@ class PairedBenchmarkTests(unittest.TestCase):
         FixtureHandler.owned_identity_omit_field = None
         FixtureHandler.owned_status = 'ok'
         FixtureHandler.owned_lifecycle = {'workerStarted': True, 'workerCompletedSuccessfully': True}
+        FixtureHandler.owned_output_text = 'private fixture output'
+        FixtureHandler.owned_stop_reason = 'stop_sequence'
+        FixtureHandler.owned_measurement_overrides = {}
+        FixtureHandler.owned_response_overrides = {}
+        FixtureHandler.owned_omit_optional_fields = False
+        FixtureHandler.owned_omit_top_stop_reason = False
+        FixtureHandler.owned_omit_measurement_stop_reason = False
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FixtureHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -454,6 +481,100 @@ class PairedBenchmarkTests(unittest.TestCase):
         self.assertEqual(owned['worker_lifecycle_counts'], {'unknown': 1})
         self.assertEqual(owned['server_handler_time_missing'], 1)
         self.assertEqual(owned['server_handler_time_us']['denominator'], 1)
+
+    def test_non_json_truncated_output_retains_bounded_envelope_telemetry(self):
+        FixtureHandler.owned_status = 'truncated'
+        FixtureHandler.owned_output_text = '{"partial":'
+        FixtureHandler.owned_stop_reason = 'byte_limit'
+        path, _ = self.make_config(warmups=0, rounds=1)
+        report = benchmark.run_benchmark(path)
+        owned = report['paths']['owned']
+        self.assertEqual(owned['status_counts'], {'truncated': 1})
+        self.assertEqual(owned['worker_lifecycle_counts'], {'worker_exit_observed_success': 1})
+        self.assertEqual(owned['stop_reason_counts'], {'byte_limit': 1})
+        self.assertEqual(owned['output_text_utf8_bytes'], {
+            'count': 1, 'denominator': 1, 'minimum_bytes': 11, 'median_bytes': 11,
+            'p95_bytes': 11, 'maximum_bytes': 11})
+        serialized = json.dumps(report)
+        self.assertNotIn('{"partial":', serialized)
+        self.assertNotIn('private fixture output', serialized)
+
+    def test_missing_optional_telemetry_is_explicitly_unavailable(self):
+        FixtureHandler.owned_status = 'unavailable'
+        FixtureHandler.owned_output_text = None
+        FixtureHandler.owned_stop_reason = None
+        FixtureHandler.owned_omit_optional_fields = True
+        FixtureHandler.owned_lifecycle = None
+        path, _ = self.make_config(warmups=0, rounds=1)
+        report = benchmark.run_benchmark(path)
+        owned = report['paths']['owned']
+        self.assertEqual(owned['status_counts'], {'unavailable': 1})
+        self.assertEqual(owned['worker_lifecycle_counts'], {'unknown': 1})
+        self.assertEqual(owned['stop_reason_counts'], {'unavailable': 1})
+        self.assertEqual(owned['output_text_utf8_bytes']['count'], 0)
+        self.assertEqual(owned['output_text_utf8_bytes_missing'], 1)
+        self.assertIsNone(report['measurement_scope']['cpu'])
+        self.assertIsNone(report['measurement_scope']['cpu_cycles'])
+        self.assertIsNone(report['measurement_scope']['memory'])
+
+    def test_context_limit_stop_reason_is_a_distinct_bounded_category(self):
+        FixtureHandler.owned_status = 'context_limit'
+        FixtureHandler.owned_stop_reason = 'context_limit'
+        FixtureHandler.owned_lifecycle = {'workerStarted': False, 'workerCompletedSuccessfully': False}
+        path, _ = self.make_config(warmups=0, rounds=1)
+        report = benchmark.run_benchmark(path)
+        self.assertEqual(report['paths']['owned']['status_counts'], {'context_limit': 1})
+        self.assertEqual(report['paths']['owned']['stop_reason_counts'], {'context_limit': 1})
+
+    def test_one_missing_stop_reason_copy_keeps_status_and_marks_reason_unavailable(self):
+        for missing_side in ('top', 'measurement'):
+            with self.subTest(missing_side=missing_side):
+                FixtureHandler.owned_status = 'truncated'
+                FixtureHandler.owned_stop_reason = 'byte_limit'
+                FixtureHandler.owned_omit_top_stop_reason = missing_side == 'top'
+                FixtureHandler.owned_omit_measurement_stop_reason = missing_side == 'measurement'
+                path, _ = self.make_config(warmups=0, rounds=1)
+                report = benchmark.run_benchmark(path)
+                owned = report['paths']['owned']
+                self.assertEqual(owned['status_counts'], {'truncated': 1})
+                self.assertEqual(owned['stop_reason_counts'], {'unavailable': 1})
+
+    def test_malformed_and_incomplete_output_statuses_survive_without_text_parsing(self):
+        for status, text in (('malformed_output', '{not-json'),
+                             ('incomplete_output', '{"missing":[]}')):
+            with self.subTest(status=status):
+                FixtureHandler.owned_status = status
+                FixtureHandler.owned_output_text = text
+                FixtureHandler.owned_stop_reason = 'stop_sequence'
+                FixtureHandler.requests = []
+                FixtureHandler.get_requests = []
+                FixtureHandler.post_counts = {}
+                path, _ = self.make_config(warmups=0, rounds=1)
+                report = benchmark.run_benchmark(path)
+                owned = report['paths']['owned']
+                self.assertEqual(owned['status_counts'], {status: 1})
+                self.assertEqual(owned['worker_lifecycle_counts'], {'worker_exit_observed_success': 1})
+
+    def test_output_byte_count_above_response_bound_is_malformed(self):
+        FixtureHandler.owned_status = 'unavailable'
+        FixtureHandler.owned_measurement_overrides = {'outputTextUtf8Bytes': 4097}
+        path, _ = self.make_config(warmups=0, rounds=1, max_response=4096)
+        report = benchmark.run_benchmark(path)
+        owned = report['paths']['owned']
+        self.assertEqual(owned['status_counts'], {'malformed_response': 1})
+        self.assertEqual(owned['worker_lifecycle_counts'], {'unknown': 1})
+        self.assertEqual(owned['output_text_utf8_bytes_missing'], 1)
+
+    def test_inconsistent_measurement_envelope_fields_are_rejected(self):
+        FixtureHandler.owned_status = 'truncated'
+        FixtureHandler.owned_stop_reason = 'byte_limit'
+        FixtureHandler.owned_measurement_overrides = {'stopReason': 'stop_sequence'}
+        path, _ = self.make_config(warmups=0, rounds=2)
+        report = benchmark.run_benchmark(path)
+        self.assertFalse(report['complete'])
+        self.assertEqual(report['abort_code'], 'owned_worker_lifecycle_unknown')
+        self.assertEqual(report['paths']['owned']['status_counts'], {'malformed_response': 1})
+        self.assertEqual(report['paths']['owned']['stop_reason_counts'], {'unavailable': 1})
 
     def test_timeout_with_missing_or_null_worker_lifecycle_aborts(self):
         for lifecycle in ({}, {'workerStarted': True, 'workerCompletedSuccessfully': None}):
