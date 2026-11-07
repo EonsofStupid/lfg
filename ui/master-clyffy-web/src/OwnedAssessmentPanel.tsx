@@ -37,11 +37,12 @@ function display(value: unknown): string {
   return JSON.stringify(value)
 }
 
-export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
+export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, onStatus, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
   prompt: string
   assessment: Assessment | null
   client?: OwnedAssessmentClient
   onResult?: (result: OwnedResult | null) => void
+  onStatus?: (status: OwnedStatus | null) => void
   declaredSubscriptions?: string[]
   loadKnowledge?: () => Promise<unknown>
 }) {
@@ -49,6 +50,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const [token, setToken] = useState<string | null>(null)
   const [status, setStatus] = useState<OwnedStatus | null>(null)
   const [result, setResult] = useState<OwnedResult | null>(null)
+  const [resultBinding, setResultBinding] = useState<string | null>(null)
   const [projectContext, setProjectContext] = useState('')
   const [contextBinding, setContextBinding] = useState<'verified' | 'missing' | 'mismatch' | null>(null)
   const [connecting, setConnecting] = useState(false)
@@ -65,12 +67,15 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const connectionGeneration = useRef(0)
   const draftGeneration = useRef(0)
   const onResultRef = useRef(onResult)
+  const onStatusRef = useRef(onStatus)
   const promptRef = useRef(prompt)
   const projectContextRef = useRef(projectContext)
   const tokenInputRef = useRef(tokenInput)
   const declarationKey = JSON.stringify([...new Set(declaredSubscriptions)].sort())
+  const comparisonBinding = JSON.stringify([prompt, projectContext, declarationKey])
   const declarationRef = useRef(declarationKey)
   onResultRef.current = onResult
+  onStatusRef.current = onStatus
   promptRef.current = prompt
   projectContextRef.current = projectContext
   tokenInputRef.current = tokenInput
@@ -81,6 +86,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     busyGeneration.current += 1
     setRunning(false)
     setResult(null)
+    setResultBinding(null)
     setContextBinding(null)
     setError('')
     onResultRef.current?.(null)
@@ -92,7 +98,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     draftGeneration.current += 1
     setDraftBusy(false)
     setDraftError('')
-    if (appliedDeclarations !== null && appliedDeclarations !== declarationKey) invalidate()
+    invalidate()
   }, [declarationKey])
 
   useEffect(() => () => {
@@ -101,6 +107,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     connectionGeneration.current += 1
     draftGeneration.current += 1
     onResultRef.current?.(null)
+    onStatusRef.current?.(null)
   }, [])
 
   async function run(action: () => Promise<void>, request?: number) {
@@ -133,14 +140,16 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   const bodyTooLarge = bodyLimit !== undefined && bodyBytes > bodyLimit
   const tooLarge = requestTooLarge || contextTooLarge || bodyTooLarge
   const appliedDraftStale = appliedDeclarations !== null && (appliedDeclarations !== declarationKey || appliedSuperseded)
-  const proposal = result && ['ok', 'incomplete_output', 'truncated'].includes(result.status) ? result.output : null
+  const visibleResult = resultBinding === comparisonBinding ? result : null
+  const proposal = visibleResult && ['ok', 'incomplete_output', 'truncated'].includes(visibleResult.status) ? visibleResult.output : null
 
   function runOwnedAssessment() {
     const current = ++requestGeneration.current
     const submittedPrompt = prompt
     const submittedContext = projectContext
-    const submittedDeclarations = appliedDeclarations
+    const submittedDeclarationKey = declarationKey
     setResult(null)
+    setResultBinding(null)
     setContextBinding(null)
     onResultRef.current?.(null)
     void run(async () => {
@@ -149,7 +158,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
         const contextSha256 = await sha256Utf8(submittedContext)
         if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
             || projectContextRef.current !== submittedContext
-            || (submittedDeclarations !== null && declarationRef.current !== submittedDeclarations)) return
+            || declarationRef.current !== submittedDeclarationKey) return
         boundContext = { context: submittedContext, contextSha256 }
       }
       const body = ownedAssessmentBody(submittedPrompt, boundContext)
@@ -162,9 +171,10 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
         : await client.assess(submittedPrompt, token!)
       if (requestGeneration.current !== current || promptRef.current !== submittedPrompt
           || projectContextRef.current !== submittedContext
-          || (submittedDeclarations !== null && declarationRef.current !== submittedDeclarations)) return
+          || declarationRef.current !== submittedDeclarationKey) return
       if (boundContext) {
         setResult(next)
+        setResultBinding(JSON.stringify([submittedPrompt, submittedContext, submittedDeclarationKey]))
         if (next.projectContextSha256 === boundContext.contextSha256) {
           setContextBinding('verified')
           onResultRef.current?.(next)
@@ -176,6 +186,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
         const unboundResult = { ...next }
         delete unboundResult.projectContextSha256
         setResult(unboundResult)
+        setResultBinding(JSON.stringify([submittedPrompt, submittedContext, submittedDeclarationKey]))
         onResultRef.current?.(unboundResult)
       }
     }, current)
@@ -190,6 +201,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       const next = await client.status(submittedToken)
       if (connectionGeneration.current !== current || tokenInputRef.current !== submittedToken) return
       setStatus(next)
+      onStatusRef.current?.(next)
       setToken(submittedToken)
       setTokenInput('')
       tokenInputRef.current = ''
@@ -283,7 +295,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {bodyLimit === undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} UTF-8 bytes. The owned route HTTP body limit is not advertised; the server may reject this request.</p>}
       <div className="feedback-actions">
         <button type="button" disabled={running || appliedDraftStale || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : 'Run owned model'}</button>
-        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
+        <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); onStatusRef.current?.(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
       </div>
       {requestTooLarge && <p role="alert">The request exceeds the model's configured UTF-8 input limit.</p>}
       {contextTooLarge && <p role="alert">The supplied context exceeds the model's configured context byte limit.</p>}
@@ -293,8 +305,14 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {contextBinding === 'verified' && <p role="status">The server echoed the matching project context digest. It identifies the supplied bytes only; it does not verify project facts.</p>}
       {contextBinding === 'missing' && <p role="alert">The response did not include the expected context digest. The result is shown but cannot be saved as linked to this context.</p>}
       {contextBinding === 'mismatch' && <p role="alert">The response context digest did not match the submitted bytes. The result is shown but cannot be saved as linked to this context.</p>}
-      {result && <div className="owned-result">
-        <p role="status">{STATUS_MESSAGE[result.status] ?? 'The model returned an unrecognized status.'} · {result.elapsedMs.toFixed(0)} ms{result.stopReason ? ` · ${result.stopReason}` : ''}</p>
+      {visibleResult && <div className="owned-result">
+        <p role="status">{STATUS_MESSAGE[visibleResult.status] ?? 'The model returned an unrecognized status.'} · {visibleResult.elapsedMs.toFixed(0)} ms{visibleResult.stopReason ? ` · ${visibleResult.stopReason}` : ''}</p>
+        {visibleResult.measurement?.schemaVersion === 'lfg.owned-run-measurement.v1' && <p>Observed handler wall time: {visibleResult.measurement.handlerElapsedMs} ms (may include child startup; not CPU or model-only time). Output text: {visibleResult.measurement.outputTextUtf8Bytes === null ? 'unavailable' : `${visibleResult.measurement.outputTextUtf8Bytes.toLocaleString()} UTF-8 bytes`}. Worker started: {visibleResult.measurement.workerStarted === null ? 'unknown' : visibleResult.measurement.workerStarted ? 'yes' : 'no'}; worker completed successfully: {visibleResult.measurement.workerCompletedSuccessfully === null ? 'unknown' : visibleResult.measurement.workerCompletedSuccessfully ? 'yes' : 'no'}.</p>}
+        <section aria-label="Current input comparison">
+          <h3>Current input comparison</h3>
+          <p>Rules result uses the current request without this optional project context. The owned model uses the request plus {hasProjectContext ? `${contextBytes.toLocaleString()} UTF-8 bytes of supplied context` : 'no supplied context'}. This is a side-by-side proposal comparison, not an equivalent-input quality test.</p>
+          <p>Rules: {assessment ? `${assessment.intent.primary} intent, ${assessment.complexity.bracket} complexity, ${assessment.agents.total} agents` : 'unavailable for the current input'}. Owned model status: {visibleResult.status}; output: {proposal ? `${display(proposal.intent)} intent, ${display(proposal.complexity)} complexity, ${display(proposal.agent_count)} agents` : 'no structured proposal'}.</p>
+        </section>
         {proposal && <dl className="owned-fields">
           <div><dt>Intent</dt><dd>{display(proposal.intent)}</dd></div>
           <div><dt>Complexity</dt><dd>{display(proposal.complexity)}</dd></div>
@@ -303,7 +321,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
           {proposal.reasons !== undefined && <div><dt>Reasons</dt><dd>{Array.isArray(proposal.reasons) ? <ul>{proposal.reasons.map((reason, index) => <li key={index}>{display(reason)}</li>)}</ul> : display(proposal.reasons)}</dd></div>}
           {proposal.reason !== undefined && <div><dt>Reason</dt><dd>{display(proposal.reason)}</dd></div>}
         </dl>}
-        {result.outputText && <details><summary>Show raw model output</summary><pre>{result.outputText}</pre></details>}
+        {visibleResult.outputText && <details><summary>Show raw model output</summary><pre>{visibleResult.outputText}</pre></details>}
       </div>}
     </>}
     {error && <p role="alert">{error}</p>}

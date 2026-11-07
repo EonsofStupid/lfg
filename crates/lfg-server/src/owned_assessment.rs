@@ -13,8 +13,9 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{ConnectInfo, DefaultBodyLimit, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode, header::CACHE_CONTROL},
+    middleware::map_response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -183,10 +184,28 @@ struct InferenceResponse {
     output_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<Value>,
+    measurement: OwnedRunMeasurement,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnedRunMeasurement {
+    schema_version: &'static str,
+    status: &'static str,
+    engine_id: Option<String>,
+    stop_reason: Option<String>,
+    handler_elapsed_ms: u64,
+    output_text_utf8_bytes: Option<usize>,
+    worker_started: Option<bool>,
+    worker_completed_successfully: Option<bool>,
 }
 
 pub(crate) fn routes(listener: SocketAddr) -> Router {
     let api = Api::new(listener);
+    owned_routes(api)
+}
+
+fn owned_routes(api: Api) -> Router {
     let max_body = api
         .service
         .as_ref()
@@ -195,6 +214,12 @@ pub(crate) fn routes(listener: SocketAddr) -> Router {
         .route("/api/lfg/assess/owned/status", get(status))
         .route("/api/lfg/assess/owned", post(infer))
         .layer(DefaultBodyLimit::max(max_body))
+        .layer(map_response(|mut response: Response| async move {
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }))
         .with_state(api)
 }
 
@@ -303,23 +328,25 @@ async fn infer(
 ) -> impl IntoResponse {
     let started = Instant::now();
     if let Err(code) = api.authorize(peer, &headers) {
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         return (
             code,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"reason":auth_reason(code)}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":elapsed_ms,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":elapsed_ms,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":auth_reason(code)}),
             ),
         );
     }
     let Some(service) = api.service.as_ref() else {
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         return (
             StatusCode::OK,
             Json(
-                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":started.elapsed().as_millis() as u64,"reason":api.unavailable_reason.unwrap_or("unavailable")}),
+                json!({"schemaVersion":"lfg.owned-assessment.v1","status":"unavailable","engine":null,"elapsedMs":elapsed_ms,"measurement":{"schemaVersion":"lfg.owned-run-measurement.v1","status":"unavailable","engineId":null,"stopReason":null,"handlerElapsedMs":elapsed_ms,"outputTextUtf8Bytes":null,"workerStarted":false,"workerCompletedSuccessfully":false},"reason":api.unavailable_reason.unwrap_or("unavailable")}),
             ),
         );
     };
     if body.len() > service.config.max_http_body_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -331,7 +358,7 @@ async fn infer(
     let request: InferRequest = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "invalid_input",
                 Some(service.engine.clone()),
                 started,
@@ -342,7 +369,7 @@ async fn infer(
         }
     };
     if request.text.is_empty() || request.text.len() > service.config.max_request_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -359,7 +386,7 @@ async fn infer(
     ) {
         Ok(value) => value,
         Err(()) => {
-            return response(
+            return response_before_worker(
                 "invalid_input",
                 Some(service.engine.clone()),
                 started,
@@ -376,7 +403,7 @@ async fn infer(
         Ok(permit) => permit,
         Err(_) => {
             return add_context_digest(
-                response(
+                response_before_worker(
                     "busy",
                     Some(service.engine.clone()),
                     started,
@@ -435,7 +462,7 @@ async fn run_inference(
     let config = &service.config;
     let prompt = model_prompt(&service.system, &service.framing, &text);
     if prompt.len() > config.max_context_bytes {
-        return response(
+        return response_before_worker(
             "context_limit",
             Some(service.engine.clone()),
             started,
@@ -450,7 +477,7 @@ async fn run_inference(
             value
         }
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "inference_error",
                 Some(service.engine.clone()),
                 started,
@@ -461,7 +488,7 @@ async fn run_inference(
         }
     };
     if input.len() > service.runtime_line_bytes {
-        return response(
+        return response_before_worker(
             "invalid_input",
             Some(service.engine.clone()),
             started,
@@ -473,7 +500,7 @@ async fn run_inference(
     let exe = match std::env::current_exe() {
         Ok(value) => value,
         Err(_) => {
-            return response(
+            return response_before_worker(
                 "unavailable",
                 Some(service.engine.clone()),
                 started,
@@ -488,7 +515,7 @@ async fn run_inference(
     match service.backend {
         Backend::LegacyFullPrefix => {
             let Some(artifact) = config.artifact_directory.as_ref() else {
-                return response(
+                return response_before_worker(
                     "unavailable",
                     Some(service.engine.clone()),
                     started,
@@ -515,7 +542,7 @@ async fn run_inference(
             match config.artifact_mode {
                 ArtifactMode::Directory => {
                     let Some(artifact) = config.artifact_directory.as_ref() else {
-                        return response(
+                        return response_before_worker(
                             "unavailable",
                             Some(service.engine.clone()),
                             started,
@@ -575,134 +602,72 @@ async fn run_inference(
     if !service.framing.assistant_suffix.is_empty() {
         command.arg("--stop").arg(&service.framing.assistant_suffix);
     }
-    let raw = match run_child(
+    let child_run = run_child(
         command,
         &input,
         Duration::from_millis(config.timeout_ms),
         config.max_worker_output_bytes,
     )
-    .await
-    {
+    .await;
+    let lifecycle = child_run.lifecycle;
+    let raw = match child_run.result {
         Ok(raw) => raw,
         Err(ChildFailure::Spawn) => {
-            return response(
-                "unavailable",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
+            return add_worker_lifecycle(
+                response(
+                    "unavailable",
+                    Some(service.engine.clone()),
+                    started,
+                    None,
+                    None,
+                    None,
+                ),
+                lifecycle,
             );
         }
         Err(ChildFailure::Timeout) => {
-            return response(
-                "timeout",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
+            return add_worker_lifecycle(
+                response(
+                    "timeout",
+                    Some(service.engine.clone()),
+                    started,
+                    None,
+                    None,
+                    None,
+                ),
+                lifecycle,
             );
         }
         Err(ChildFailure::Failed | ChildFailure::OutputLimit) => {
-            return response(
-                "inference_error",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
+            return add_worker_lifecycle(
+                response(
+                    "inference_error",
+                    Some(service.engine.clone()),
+                    started,
+                    None,
+                    None,
+                    None,
+                ),
+                lifecycle,
             );
         }
     };
-    let worker: Value = match serde_json::from_slice::<Value>(&raw) {
-        Ok(value) if value["schema_version"] == "lfg.owned-byte-generation.v1" => value,
-        _ => {
-            return response(
-                "malformed_output",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
-            );
-        }
-    };
-    let mut text = match worker["text"].as_str() {
-        Some(value) if value.len() <= config.max_generated_bytes => value.to_owned(),
-        _ => {
-            return response(
-                "malformed_output",
-                Some(service.engine.clone()),
-                started,
-                None,
-                None,
-                None,
-            );
-        }
-    };
-    if let Some(suffix) = text.strip_suffix(&service.framing.assistant_suffix) {
-        text = suffix.to_owned();
-    }
-    let stop_reason = worker["stop_reason"].as_str().map(str::to_owned);
-    let state = if stop_reason.as_deref() == Some("stop_sequence") {
-        "ok"
-    } else {
-        "truncated"
-    };
-    let status = if state == "ok" { "ok" } else { "truncated" };
-    if status == "truncated" {
-        return response(
-            status,
+    let interpreted = interpret_worker_response(
+        &raw,
+        config.max_generated_bytes,
+        &service.framing.assistant_suffix,
+        &config.required_output_fields,
+    );
+    add_worker_lifecycle(
+        response(
+            interpreted.status,
             Some(service.engine.clone()),
             started,
-            stop_reason,
-            Some(text),
-            None,
-        );
-    }
-    let parsed = match serde_json::from_str::<Value>(&text) {
-        Ok(value) => match validate_output(value, &config.required_output_fields) {
-            Ok(value) => value,
-            Err(OutputProblem::Incomplete(value)) => {
-                return response(
-                    "incomplete_output",
-                    Some(service.engine.clone()),
-                    started,
-                    stop_reason,
-                    Some(text),
-                    Some(value),
-                );
-            }
-            Err(OutputProblem::Malformed) => {
-                return response(
-                    "malformed_output",
-                    Some(service.engine.clone()),
-                    started,
-                    stop_reason,
-                    Some(text),
-                    None,
-                );
-            }
-        },
-        Err(_) => {
-            return response(
-                "malformed_output",
-                Some(service.engine.clone()),
-                started,
-                stop_reason,
-                Some(text),
-                None,
-            );
-        }
-    };
-    response(
-        status,
-        Some(service.engine.clone()),
-        started,
-        stop_reason,
-        Some(text),
-        Some(parsed),
+            interpreted.stop_reason,
+            interpreted.output_text,
+            interpreted.output,
+        ),
+        lifecycle,
     )
 }
 
@@ -710,6 +675,78 @@ async fn run_inference(
 enum OutputProblem {
     Incomplete(Value),
     Malformed,
+}
+
+struct InterpretedWorkerResponse {
+    status: &'static str,
+    stop_reason: Option<String>,
+    output_text: Option<String>,
+    output: Option<Value>,
+}
+
+fn interpret_worker_response(
+    raw: &[u8],
+    max_generated_bytes: usize,
+    assistant_suffix: &str,
+    required: &[RequiredField],
+) -> InterpretedWorkerResponse {
+    let malformed = || InterpretedWorkerResponse {
+        status: "malformed_output",
+        stop_reason: None,
+        output_text: None,
+        output: None,
+    };
+    let worker: Value = match serde_json::from_slice::<Value>(raw) {
+        Ok(value) if value["schema_version"] == "lfg.owned-byte-generation.v1" => value,
+        _ => return malformed(),
+    };
+    let Some(worker_text) = worker["text"].as_str() else {
+        return malformed();
+    };
+    if worker_text.len() > max_generated_bytes {
+        return malformed();
+    }
+    let text = worker_text
+        .strip_suffix(assistant_suffix)
+        .unwrap_or(worker_text)
+        .to_owned();
+    let stop_reason = worker["stop_reason"].as_str().map(str::to_owned);
+    if stop_reason.as_deref() != Some("stop_sequence") {
+        return InterpretedWorkerResponse {
+            status: "truncated",
+            stop_reason,
+            output_text: Some(text),
+            output: None,
+        };
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => match validate_output(value, required) {
+            Ok(output) => InterpretedWorkerResponse {
+                status: "ok",
+                stop_reason,
+                output_text: Some(text),
+                output: Some(output),
+            },
+            Err(OutputProblem::Incomplete(output)) => InterpretedWorkerResponse {
+                status: "incomplete_output",
+                stop_reason,
+                output_text: Some(text),
+                output: Some(output),
+            },
+            Err(OutputProblem::Malformed) => InterpretedWorkerResponse {
+                status: "malformed_output",
+                stop_reason,
+                output_text: Some(text),
+                output: None,
+            },
+        },
+        Err(_) => InterpretedWorkerResponse {
+            status: "malformed_output",
+            stop_reason,
+            output_text: Some(text),
+            output: None,
+        },
+    }
 }
 
 fn validate_output(value: Value, required: &[RequiredField]) -> Result<Value, OutputProblem> {
@@ -795,27 +832,62 @@ enum ChildFailure {
     OutputLimit,
 }
 
-async fn run_child(
-    mut command: Command,
-    input: &[u8],
-    timeout: Duration,
-    cap: usize,
-) -> Result<Vec<u8>, ChildFailure> {
-    let mut child = command.spawn().map_err(|_| ChildFailure::Spawn)?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkerLifecycle {
+    started: Option<bool>,
+    completed_successfully: Option<bool>,
+}
+
+struct ChildRun {
+    result: Result<Vec<u8>, ChildFailure>,
+    lifecycle: WorkerLifecycle,
+}
+
+enum ChildTaskFailure {
+    BeforeWait(ChildFailure),
+    Exit(ChildFailure, bool),
+}
+
+async fn run_child(mut command: Command, input: &[u8], timeout: Duration, cap: usize) -> ChildRun {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            return ChildRun {
+                result: Err(ChildFailure::Spawn),
+                lifecycle: WorkerLifecycle {
+                    started: Some(false),
+                    completed_successfully: Some(false),
+                },
+            };
+        }
+    };
+    let mut lifecycle = WorkerLifecycle {
+        started: Some(true),
+        completed_successfully: None,
+    };
     let Some(mut stdin) = child.stdin.take() else {
-        terminate(&mut child).await;
-        return Err(ChildFailure::Failed);
+        lifecycle.completed_successfully = terminate(&mut child).await;
+        return ChildRun {
+            result: Err(ChildFailure::Failed),
+            lifecycle,
+        };
     };
     let Some(stdout) = child.stdout.take() else {
-        terminate(&mut child).await;
-        return Err(ChildFailure::Failed);
+        lifecycle.completed_successfully = terminate(&mut child).await;
+        return ChildRun {
+            result: Err(ChildFailure::Failed),
+            lifecycle,
+        };
     };
     let task = async {
         stdin
             .write_all(input)
             .await
-            .map_err(|_| ChildFailure::Failed)?;
-        stdin.shutdown().await.map_err(|_| ChildFailure::Failed)?;
+            .map_err(|_| ChildTaskFailure::BeforeWait(ChildFailure::Failed))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|_| ChildTaskFailure::BeforeWait(ChildFailure::Failed))?;
         // `ChildStdin::poll_shutdown` is a no-op on some platforms. The child
         // worker reads JSONL until EOF, so close the pipe before awaiting stdout.
         drop(stdin);
@@ -824,32 +896,54 @@ async fn run_child(
             .take(cap.saturating_add(1) as u64)
             .read_to_end(&mut output)
             .await
-            .map_err(|_| ChildFailure::Failed)?;
+            .map_err(|_| ChildTaskFailure::BeforeWait(ChildFailure::Failed))?;
         if output.len() > cap {
-            return Err(ChildFailure::OutputLimit);
+            return Err(ChildTaskFailure::BeforeWait(ChildFailure::OutputLimit));
         }
-        let status = child.wait().await.map_err(|_| ChildFailure::Failed)?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| ChildTaskFailure::BeforeWait(ChildFailure::Failed))?;
         if !status.success() {
-            return Err(ChildFailure::Failed);
+            return Err(ChildTaskFailure::Exit(ChildFailure::Failed, false));
         }
         Ok(output)
     };
     match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(reason)) => {
-            terminate(&mut child).await;
-            Err(reason)
+        Ok(Ok(output)) => ChildRun {
+            result: Ok(output),
+            lifecycle: WorkerLifecycle {
+                started: Some(true),
+                completed_successfully: Some(true),
+            },
+        },
+        Ok(Err(ChildTaskFailure::Exit(reason, completed_successfully))) => ChildRun {
+            result: Err(reason),
+            lifecycle: WorkerLifecycle {
+                started: Some(true),
+                completed_successfully: Some(completed_successfully),
+            },
+        },
+        Ok(Err(ChildTaskFailure::BeforeWait(reason))) => {
+            lifecycle.completed_successfully = terminate(&mut child).await;
+            ChildRun {
+                result: Err(reason),
+                lifecycle,
+            }
         }
         Err(_) => {
-            terminate(&mut child).await;
-            Err(ChildFailure::Timeout)
+            lifecycle.completed_successfully = terminate(&mut child).await;
+            ChildRun {
+                result: Err(ChildFailure::Timeout),
+                lifecycle,
+            }
         }
     }
 }
 
-async fn terminate(child: &mut Child) {
+async fn terminate(child: &mut Child) -> Option<bool> {
     let _ = child.start_kill();
-    let _ = child.wait().await;
+    child.wait().await.ok().map(|status| status.success())
 }
 
 fn response(
@@ -860,16 +954,58 @@ fn response(
     output_text: Option<String>,
     output: Option<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let engine_id = engine
+        .as_ref()
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let response = InferenceResponse {
         schema_version: "lfg.owned-assessment.v1",
         status,
         engine,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        stop_reason,
+        elapsed_ms,
+        stop_reason: stop_reason.clone(),
+        measurement: OwnedRunMeasurement {
+            schema_version: "lfg.owned-run-measurement.v1",
+            status,
+            engine_id,
+            stop_reason,
+            handler_elapsed_ms: elapsed_ms,
+            output_text_utf8_bytes: output_text.as_ref().map(|text| text.len()),
+            worker_started: None,
+            worker_completed_successfully: None,
+        },
         output_text,
         output,
     };
     (StatusCode::OK, Json(serde_json::to_value(response).unwrap_or_else(|_| json!({"schemaVersion":"lfg.owned-assessment.v1","status":"inference_error","engine":null,"elapsedMs":0}))))
+}
+
+fn response_before_worker(
+    status: &'static str,
+    engine: Option<Value>,
+    started: Instant,
+    stop_reason: Option<String>,
+    output_text: Option<String>,
+    output: Option<Value>,
+) -> (StatusCode, Json<Value>) {
+    add_worker_lifecycle(
+        response(status, engine, started, stop_reason, output_text, output),
+        WorkerLifecycle {
+            started: Some(false),
+            completed_successfully: Some(false),
+        },
+    )
+}
+
+fn add_worker_lifecycle(
+    (status, Json(mut value)): (StatusCode, Json<Value>),
+    lifecycle: WorkerLifecycle,
+) -> (StatusCode, Json<Value>) {
+    value["measurement"]["workerStarted"] = json!(lifecycle.started);
+    value["measurement"]["workerCompletedSuccessfully"] = json!(lifecycle.completed_successfully);
+    (status, Json(value))
 }
 
 fn add_context_digest(
@@ -1244,6 +1380,287 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::to_bytes, http::Request};
+    use tower::ServiceExt;
+
+    fn protected_test_router() -> (Router, SocketAddr, SocketAddr, String) {
+        let listener = "127.0.0.1:4317".parse().unwrap();
+        let peer = "127.0.0.1:51000".parse().unwrap();
+        let token = "0123456789abcdef0123456789abcdef".to_owned();
+        let api = Api {
+            listener,
+            token: Some(Arc::new(token.clone())),
+            allowed_hosts: Arc::new(Vec::new()),
+            allowed_origins: Arc::new(Vec::new()),
+            service: None,
+            unavailable_reason: Some("service_disabled"),
+        };
+        (owned_routes(api), listener, peer, token)
+    }
+
+    fn owned_request(
+        _listener: SocketAddr,
+        peer: SocketAddr,
+        path: &str,
+        host: &str,
+        origin: Option<&str>,
+        token: Option<&str>,
+        body: &'static str,
+    ) -> Request<axum::body::Body> {
+        let method = if path.ends_with("/status") {
+            "GET"
+        } else {
+            "POST"
+        };
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", host)
+            .header("content-type", "application/json");
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        if let Some(token) = token {
+            request = request.header("x-lfg-session-token", token);
+        }
+        request
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::from(body))
+            .unwrap()
+    }
+
+    fn required_intent() -> Vec<RequiredField> {
+        vec![RequiredField {
+            name: "intent".into(),
+            value_type: OutputType::String,
+            non_empty: true,
+            min_integer: None,
+            max_integer: None,
+        }]
+    }
+
+    #[tokio::test]
+    async fn protected_routes_are_no_store_and_do_not_echo_private_request_bytes() {
+        let (app, listener, peer, token) = protected_test_router();
+        let request_body = r#"{"text":"private prompt","context":"private project context","contextSha256":"unused"}"#;
+        for (path, body) in [
+            ("/api/lfg/assess/owned/status", ""),
+            ("/api/lfg/assess/owned", request_body),
+        ] {
+            let request = owned_request(
+                listener,
+                peer,
+                path,
+                &listener.to_string(),
+                Some(&format!("http://{listener}")),
+                Some(&token),
+                body,
+            );
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(!text.contains("private prompt"));
+            assert!(!text.contains("private project context"));
+            if path.ends_with("/owned") {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["elapsedMs"], value["measurement"]["handlerElapsedMs"]);
+                assert_eq!(value["measurement"]["status"], "unavailable");
+                assert_eq!(value["measurement"]["workerStarted"], false);
+                assert_eq!(value["measurement"]["workerCompletedSuccessfully"], false);
+            }
+        }
+
+        let oversized = Request::builder()
+            .method("POST")
+            .uri("/api/lfg/assess/owned")
+            .header("host", listener.to_string())
+            .header("content-type", "application/json")
+            .header("x-lfg-session-token", token)
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::from(vec![b'x'; 8192]))
+            .unwrap();
+        let response = app.oneshot(oversized).await.unwrap();
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_ne!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("measurement"));
+    }
+
+    #[tokio::test]
+    async fn protected_routes_remain_no_store_on_host_origin_token_and_peer_denial() {
+        let (app, listener, peer, token) = protected_test_router();
+        let authority = listener.to_string();
+        let cases = [
+            (peer, "127.0.0.1:9999".to_owned(), None, Some(token.clone())),
+            (
+                peer,
+                authority.clone(),
+                Some("http://attacker.example".to_owned()),
+                Some(token.clone()),
+            ),
+            (
+                peer,
+                authority.clone(),
+                None,
+                Some("wrong-token".to_owned()),
+            ),
+            (
+                "192.0.2.1:51000".parse().unwrap(),
+                authority,
+                None,
+                Some(token.clone()),
+            ),
+        ];
+        for (peer, host, origin, token) in cases {
+            let request = owned_request(
+                listener,
+                peer,
+                "/api/lfg/assess/owned",
+                &host,
+                origin.as_deref(),
+                token.as_deref(),
+                r#"{"text":"private"}"#,
+            );
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["elapsedMs"], value["measurement"]["handlerElapsedMs"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_service_status_remains_locally_authorized_and_no_store() {
+        let listener = "127.0.0.1:4318".parse().unwrap();
+        let peer = "127.0.0.1:51001".parse().unwrap();
+        let token = "abcdef0123456789abcdef0123456789".to_owned();
+        let config = Config {
+            schema_version: "lfg.owned-assessment-service.v1".into(),
+            enabled: true,
+            backend: Backend::LegacyFullPrefix,
+            artifact_mode: ArtifactMode::Directory,
+            artifact_directory: None,
+            expected_cached_manifest_sha256: None,
+            max_cached_graph_bytes: None,
+            max_cache_bytes: None,
+            framing_file: PathBuf::new(),
+            training_manifest_file: PathBuf::new(),
+            runtime_config_file: PathBuf::new(),
+            max_runtime_config_bytes: 1,
+            expected_model_sha256: "a".repeat(64),
+            expected_framing_sha256: "b".repeat(64),
+            max_metadata_bytes: 1,
+            required_output_fields: required_intent(),
+            max_http_body_bytes: 4096,
+            max_request_bytes: 1024,
+            max_context_bytes: 2048,
+            max_generated_bytes: 512,
+            max_worker_output_bytes: 4096,
+            timeout_ms: 1000,
+            max_concurrent: 1,
+            worker_threads: 1,
+        };
+        let service = Service {
+            config,
+            backend: Backend::LegacyFullPrefix,
+            engine: json!({"id":"enabled-test-engine","modelSha256":"a".repeat(64)}),
+            system: String::new(),
+            framing: Framing {
+                system_prefix: String::new(),
+                system_suffix: String::new(),
+                user_prefix: String::new(),
+                user_suffix: String::new(),
+                assistant_prefix: String::new(),
+                assistant_suffix: String::new(),
+            },
+            runtime_line_bytes: 4096,
+            runtime_sha256: "c".repeat(64),
+            runtime_max_bytes: 1,
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let api = Api {
+            listener,
+            token: Some(Arc::new(token.clone())),
+            allowed_hosts: Arc::new(Vec::new()),
+            allowed_origins: Arc::new(Vec::new()),
+            service: Some(Arc::new(service)),
+            unavailable_reason: None,
+        };
+        let app = owned_routes(api);
+        let request = owned_request(
+            listener,
+            peer,
+            "/api/lfg/assess/owned/status",
+            &listener.to_string(),
+            None,
+            Some(&token),
+            "",
+        );
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["engine"]["id"], "enabled-test-engine");
+    }
+
+    #[test]
+    fn owned_response_reports_only_observed_timing_and_output_bytes() {
+        let (_, Json(value)) = add_worker_lifecycle(
+            response(
+                "ok",
+                Some(json!({"id":"engine"})),
+                Instant::now(),
+                Some("stop_sequence".into()),
+                Some("caf\u{00e9}".into()),
+                Some(json!({"intent":"build"})),
+            ),
+            WorkerLifecycle {
+                started: Some(true),
+                completed_successfully: Some(true),
+            },
+        );
+        assert_eq!(
+            value["measurement"]["schemaVersion"],
+            "lfg.owned-run-measurement.v1"
+        );
+        assert_eq!(value["measurement"]["status"], "ok");
+        assert_eq!(value["measurement"]["engineId"], "engine");
+        assert_eq!(value["measurement"]["stopReason"], "stop_sequence");
+        assert_eq!(value["measurement"]["outputTextUtf8Bytes"], 5);
+        assert_eq!(value["measurement"]["workerStarted"], true);
+        assert_eq!(value["measurement"]["workerCompletedSuccessfully"], true);
+        assert!(value.get("cpuTimeMicros").is_none());
+        let diagnostic = value["measurement"].to_string();
+        assert!(!diagnostic.contains("private prompt"));
+        assert!(!diagnostic.contains("private context"));
+        assert!(!diagnostic.contains("caf"));
+    }
+
+    #[test]
+    fn unavailable_response_measurements_remain_unknown() {
+        let (_, Json(value)) = response("inference_error", None, Instant::now(), None, None, None);
+        assert_eq!(value["measurement"]["status"], "inference_error");
+        assert_eq!(value["measurement"]["engineId"], Value::Null);
+        assert_eq!(value["measurement"]["stopReason"], Value::Null);
+        assert_eq!(value["measurement"]["outputTextUtf8Bytes"], Value::Null);
+        assert_eq!(value["measurement"]["workerStarted"], Value::Null);
+        assert_eq!(
+            value["measurement"]["workerCompletedSuccessfully"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn pre_worker_responses_report_the_known_absence_of_a_child() {
+        let (_, Json(value)) =
+            response_before_worker("busy", None, Instant::now(), None, None, None);
+        assert_eq!(value["measurement"]["workerStarted"], false);
+        assert_eq!(value["measurement"]["workerCompletedSuccessfully"], false);
+    }
 
     #[test]
     fn framing_and_request_bounds_count_utf8_bytes() {
@@ -1526,13 +1943,24 @@ mod tests {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         let start = Instant::now();
-        assert_eq!(
-            run_child(command, b"", Duration::from_millis(200), 4096)
-                .await
-                .unwrap_err(),
-            ChildFailure::Timeout
-        );
+        let run = run_child(command, b"", Duration::from_millis(200), 4096).await;
+        assert_eq!(run.result.unwrap_err(), ChildFailure::Timeout);
+        assert_eq!(run.lifecycle.started, Some(true));
+        assert_eq!(run.lifecycle.completed_successfully, Some(false));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_reports_no_worker_started() {
+        let missing = std::env::temp_dir().join(format!(
+            "lfg-missing-owned-worker-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let run = run_child(Command::new(missing), b"", Duration::from_secs(1), 4096).await;
+        assert_eq!(run.result.unwrap_err(), ChildFailure::Spawn);
+        assert_eq!(run.lifecycle.started, Some(false));
+        assert_eq!(run.lifecycle.completed_successfully, Some(false));
     }
 
     #[test]
@@ -1555,12 +1983,10 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        assert_eq!(
-            run_child(command, b"", Duration::from_secs(5), 1)
-                .await
-                .unwrap_err(),
-            ChildFailure::OutputLimit
-        );
+        let run = run_child(command, b"", Duration::from_secs(5), 1).await;
+        assert_eq!(run.result.unwrap_err(), ChildFailure::OutputLimit);
+        assert_eq!(run.lifecycle.started, Some(true));
+        assert_eq!(run.lifecycle.completed_successfully, Some(false));
     }
 
     #[tokio::test]
@@ -1578,10 +2004,140 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let output = run_child(command, b"worker-input\n", Duration::from_secs(5), 4096)
-            .await
+        let run = run_child(command, b"worker-input\n", Duration::from_secs(5), 4096).await;
+        assert_eq!(run.lifecycle.started, Some(true));
+        assert_eq!(run.lifecycle.completed_successfully, Some(true));
+        let output = run
+            .result
             .expect("worker must observe EOF and produce output");
-        assert!(String::from_utf8_lossy(&output).contains("EOF-OK"));
+        // Rust's test harness writes its progress around the helper's stdout;
+        // isolate the worker-shaped line emitted by the child test.
+        let worker_line = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .unwrap()
+            .to_owned();
+        let interpreted =
+            interpret_worker_response(worker_line.as_bytes(), 4096, "END", &required_intent());
+        assert_eq!(interpreted.status, "ok");
+        assert_eq!(
+            interpreted.output_text.as_deref(),
+            Some("{\"intent\":\"caf\u{00e9}\"}")
+        );
+        let output_text_bytes = interpreted.output_text.as_ref().unwrap().len();
+        let (_, Json(result)) = add_worker_lifecycle(
+            response(
+                interpreted.status,
+                Some(json!({"id":"test-engine"})),
+                Instant::now(),
+                interpreted.stop_reason,
+                interpreted.output_text,
+                interpreted.output,
+            ),
+            run.lifecycle,
+        );
+        assert_eq!(
+            result["measurement"]["outputTextUtf8Bytes"],
+            output_text_bytes
+        );
+        assert_eq!(result["measurement"]["workerStarted"], true);
+        assert_eq!(result["measurement"]["workerCompletedSuccessfully"], true);
+    }
+
+    #[tokio::test]
+    async fn worker_truncation_and_malformed_output_keep_actual_lifecycle() {
+        for (request, expected_text, expected_status) in [
+            (
+                b"truncated-input\n".as_slice(),
+                Some("partial"),
+                "truncated",
+            ),
+            (b"malformed-input\n".as_slice(), None, "malformed_output"),
+        ] {
+            let executable = std::env::current_exe().unwrap();
+            let mut command = Command::new(executable);
+            command
+                .args([
+                    "--exact",
+                    "owned_assessment::tests::read_to_eof_child_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let run = run_child(command, request, Duration::from_secs(5), 4096).await;
+            assert_eq!(run.lifecycle.started, Some(true));
+            assert_eq!(run.lifecycle.completed_successfully, Some(true));
+            let output = run.result.unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let worker_line = output
+                .lines()
+                .find(|line| line.starts_with('{') || *line == "NOT JSON")
+                .unwrap();
+            let interpreted =
+                interpret_worker_response(worker_line.as_bytes(), 4096, "END", &required_intent());
+            assert_eq!(interpreted.status, expected_status);
+            assert_eq!(interpreted.output_text.as_deref(), expected_text);
+            let result = add_worker_lifecycle(
+                response(
+                    interpreted.status,
+                    Some(json!({"id":"test-engine"})),
+                    Instant::now(),
+                    interpreted.stop_reason,
+                    interpreted.output_text,
+                    interpreted.output,
+                ),
+                run.lifecycle,
+            );
+            let Json(value) = result.1;
+            assert_eq!(value["measurement"]["status"], expected_status);
+            assert_eq!(
+                value["measurement"]["outputTextUtf8Bytes"],
+                expected_text.map_or(Value::Null, |text| json!(text.len()))
+            );
+        }
+    }
+
+    #[test]
+    fn worker_interpreter_handles_invalid_schema_and_byte_limit_without_echoing_text() {
+        let fields = required_intent();
+        let cases = [
+            (
+                json!({"schema_version":"wrong","text":"private output","stop_reason":"stop_sequence"}),
+                100,
+            ),
+            (
+                json!({"schema_version":"lfg.owned-byte-generation.v1","text":"123456789","stop_reason":"stop_sequence"}),
+                8,
+            ),
+        ];
+        for (worker, max_bytes) in cases {
+            let interpreted = interpret_worker_response(
+                &serde_json::to_vec(&worker).unwrap(),
+                max_bytes,
+                "",
+                &fields,
+            );
+            assert_eq!(interpreted.status, "malformed_output");
+            assert_eq!(interpreted.output_text, None);
+            assert_eq!(interpreted.output, None);
+        }
+        let malformed_model_json = json!({
+            "schema_version":"lfg.owned-byte-generation.v1",
+            "text":"not json",
+            "stop_reason":"stop_sequence"
+        });
+        let interpreted = interpret_worker_response(
+            &serde_json::to_vec(&malformed_model_json).unwrap(),
+            100,
+            "",
+            &fields,
+        );
+        assert_eq!(interpreted.status, "malformed_output");
+        assert_eq!(interpreted.output_text.as_deref(), Some("not json"));
     }
 
     #[test]
@@ -1589,14 +2145,38 @@ mod tests {
     fn read_to_eof_child_helper() {
         let mut input = Vec::new();
         std::io::stdin().read_to_end(&mut input).unwrap();
-        assert_eq!(input, b"worker-input\n");
-        print!("EOF-OK");
+        match input.as_slice() {
+            b"worker-input\n" => println!(
+                "{}",
+                json!({
+                    "schema_version": "lfg.owned-byte-generation.v1",
+                "text": format!("{}END", json!({"intent":"caf\u{00e9}"})),
+                    "stop_reason": "stop_sequence"
+                })
+            ),
+            b"truncated-input\n" => println!(
+                "{}",
+                json!({
+                    "schema_version": "lfg.owned-byte-generation.v1",
+                    "text": "partial",
+                    "stop_reason": "byte_limit"
+                })
+            ),
+            b"malformed-input\n" => println!("NOT JSON"),
+            _ => panic!("unexpected test worker input"),
+        }
     }
 
     #[test]
     #[ignore]
     fn output_child_helper() {
-        print!("child output is deliberately larger than one byte");
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        loop {
+            stdout.write_all(&[b'x'; 4096]).unwrap();
+            stdout.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

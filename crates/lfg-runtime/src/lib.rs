@@ -268,6 +268,10 @@ pub struct OperationsConfig {
     max_http_body_bytes: usize,
     default_signal_page_size: usize,
     max_signal_page_size: usize,
+    #[serde(default = "default_scorecard_max_feedback_pages")]
+    scorecard_max_feedback_pages: usize,
+    #[serde(default = "default_scorecard_max_feedback_page_size")]
+    scorecard_max_feedback_page_size: usize,
     event_buffer_capacity: usize,
     stream_keepalive_seconds: u64,
     ui_debounce_ms: u32,
@@ -303,6 +307,8 @@ impl OperationsConfig {
             || value.max_http_body_bytes < value.max_prompt_bytes
             || value.default_signal_page_size == 0
             || value.max_signal_page_size < value.default_signal_page_size
+            || value.scorecard_max_feedback_pages == 0
+            || value.scorecard_max_feedback_page_size == 0
             || value.event_buffer_capacity == 0
             || value
                 .event_buffer_capacity
@@ -325,6 +331,8 @@ impl OperationsConfig {
                 value.max_http_body_bytes,
                 value.default_signal_page_size,
                 value.max_signal_page_size,
+                value.scorecard_max_feedback_pages,
+                value.scorecard_max_feedback_page_size,
                 value.event_buffer_capacity,
             ]
             .iter()
@@ -371,6 +379,12 @@ impl OperationsConfig {
     pub fn max_signal_page_size(&self) -> usize {
         self.max_signal_page_size
     }
+    pub fn scorecard_max_feedback_pages(&self) -> usize {
+        self.scorecard_max_feedback_pages
+    }
+    pub fn scorecard_max_feedback_page_size(&self) -> usize {
+        self.scorecard_max_feedback_page_size
+    }
     pub fn event_buffer_capacity(&self) -> usize {
         self.event_buffer_capacity
     }
@@ -394,6 +408,14 @@ impl OperationsConfig {
         }
         Ok(())
     }
+}
+
+fn default_scorecard_max_feedback_pages() -> usize {
+    100
+}
+
+fn default_scorecard_max_feedback_page_size() -> usize {
+    100
 }
 
 impl Default for OperationsConfig {
@@ -1120,6 +1142,33 @@ mod tests {
                 .dev_tools()
                 .is_none()
         );
+        let mut previous_operations = settings.clone();
+        previous_operations
+            .as_object_mut()
+            .unwrap()
+            .remove("scorecardMaxFeedbackPages");
+        previous_operations
+            .as_object_mut()
+            .unwrap()
+            .remove("scorecardMaxFeedbackPageSize");
+        assert_eq!(
+            OperationsConfig::from_json_str(&previous_operations.to_string())
+                .unwrap()
+                .scorecard_max_feedback_pages(),
+            default_scorecard_max_feedback_pages()
+        );
+        assert_eq!(
+            OperationsConfig::from_json_str(&previous_operations.to_string())
+                .unwrap()
+                .scorecard_max_feedback_page_size(),
+            default_scorecard_max_feedback_page_size()
+        );
+        let mut invalid_scorecard = settings.clone();
+        invalid_scorecard["scorecardMaxFeedbackPages"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&invalid_scorecard.to_string()).is_err());
+        let mut invalid_page_size = settings.clone();
+        invalid_page_size["scorecardMaxFeedbackPageSize"] = serde_json::json!(0);
+        assert!(OperationsConfig::from_json_str(&invalid_page_size.to_string()).is_err());
         let mut invalid_dev = settings.clone();
         invalid_dev["devTools"]["debounceMinMs"] = serde_json::json!(0);
         assert!(OperationsConfig::from_json_str(&invalid_dev.to_string()).is_err());

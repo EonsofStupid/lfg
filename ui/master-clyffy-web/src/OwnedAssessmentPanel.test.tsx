@@ -7,7 +7,7 @@ import type { Assessment } from './types'
 const deterministic = { intent: { primary: 'build' }, complexity: { bracket: 'moderate' }, agents: { total: 2 } } as Assessment
 const client = (): OwnedAssessmentClient => ({
   status: vi.fn(async () => ({ enabled: true, status: 'ready' as const, engine: { id: 'owned-test', modelSha256: 'a'.repeat(64) }, limits: { maxRequestBytes: 1000, maxHttpBodyBytes: 10000, maxContextBytes: 5000, maxGeneratedBytes: 512, timeoutMs: 3000, maxConcurrent: 1 } })),
-  assess: vi.fn(async () => ({ status: 'ok' as const, engine: { id: 'owned-test' }, elapsedMs: 120, stopReason: 'stop_sequence', output: { intent: 'research', complexity: 'simple', suggested_models: ['local-model'], agent_count: 1, reason: 'One task' } })),
+  assess: vi.fn(async () => ({ status: 'ok' as const, engine: { id: 'owned-test' }, elapsedMs: 120, stopReason: 'stop_sequence', measurement: { schemaVersion: 'lfg.owned-run-measurement.v1' as const, status: 'ok', engineId: 'owned-test', stopReason: 'stop_sequence', handlerElapsedMs: 120, outputTextUtf8Bytes: 51, workerStarted: true, workerCompletedSuccessfully: true }, output: { intent: 'research', complexity: 'simple', suggested_models: ['local-model'], agent_count: 1, reason: 'One task' } })),
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -27,7 +27,21 @@ test('runs only on request and displays the experimental output separately from 
   expect(await screen.findByText('research')).toBeInTheDocument()
   expect(screen.getByText('One task')).toBeInTheDocument()
   expect(screen.getByText(/It has not been verified/)).toBeInTheDocument()
+  expect(screen.getByText(/Observed handler wall time: 120 ms \(may include child startup/)).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Current input comparison' })).toHaveTextContent(/side-by-side proposal comparison/)
+  expect(screen.getByRole('region', { name: 'Current input comparison' })).toHaveTextContent(/Rules: build intent/)
   expect(api.assess).toHaveBeenCalledWith('owner request', 'test-token')
+})
+
+test('publishes connected engine identity to the Inspector scorecard and clears it on disconnect', async () => {
+  const api = client()
+  const onStatus = vi.fn()
+  const connected = await api.status('test-token')
+  render(<OwnedAssessmentPanel prompt="owner request" assessment={deterministic} client={api} onStatus={onStatus} />)
+  await connect()
+  expect(onStatus).toHaveBeenLastCalledWith(connected)
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
+  expect(onStatus).toHaveBeenLastCalledWith(null)
 })
 
 test('sends exact reviewed Unicode context bytes and accepts only the matching server digest', async () => {
@@ -375,4 +389,20 @@ test('a changed knowledge snapshot invalidates an applied context without overwr
   expect(screen.getByRole('button', { name: 'Run owned model' })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Append draft to project context' })).toBeDisabled()
   expect(onResult).toHaveBeenLastCalledWith(null)
+})
+
+test('subscription changes reject a late owned result even when no context draft was applied', async () => {
+  const api = client()
+  const onResult = vi.fn()
+  let resolveResult!: (result: OwnedResult) => void
+  vi.mocked(api.assess).mockImplementation(() => new Promise(resolve => { resolveResult = resolve }))
+  const view = render(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} declaredSubscriptions={['one']} onResult={onResult} />)
+  await connect()
+  fireEvent.click(screen.getByRole('button', { name: 'Run owned model' }))
+  await waitFor(() => expect(api.assess).toHaveBeenCalledTimes(1))
+  view.rerender(<OwnedAssessmentPanel prompt="request" assessment={deterministic} client={api} declaredSubscriptions={['two']} onResult={onResult} />)
+  resolveResult({ status: 'ok', elapsedMs: 2, engine: null, output: { intent: 'stale subscription result' } })
+  await waitFor(() => expect(onResult).toHaveBeenLastCalledWith(null))
+  expect(screen.queryByText('stale subscription result')).not.toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Current input comparison' })).not.toBeInTheDocument()
 })
