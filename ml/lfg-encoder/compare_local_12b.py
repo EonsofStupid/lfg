@@ -688,6 +688,21 @@ def _http_requests_started(outcomes: list[str]) -> int:
     return sum(outcome not in NOT_STARTED_OUTCOMES for outcome in outcomes)
 
 
+def _validate_final_timings(outcomes: Any, timings: Any, progress: list[dict[str, Any]], rows: int) -> None:
+    if (not isinstance(outcomes, list) or not isinstance(timings, list)
+            or len(outcomes) != rows or len(timings) != rows or len(progress) != rows):
+        raise ValueError("worker final timing/result row counts are inconsistent")
+    for index, (outcome, elapsed, observed) in enumerate(zip(outcomes, timings, progress, strict=True)):
+        if not isinstance(outcome, str) or not isinstance(observed, dict):
+            raise ValueError("worker final timing/result structure is invalid")
+        not_started = outcome in NOT_STARTED_OUTCOMES
+        valid_elapsed = (elapsed is None if not_started else
+                         type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0)
+        if (not valid_elapsed or observed.get("index") != index
+                or observed.get("outcome") != outcome or observed.get("timing_ms") != elapsed):
+            raise ValueError("worker final timing does not match validated progress observations")
+
+
 def _response_prediction_matrix(raw_predictions: list[list[Any]], labels: list[str], rows: int) -> list[list[int]]:
     if len(raw_predictions) != rows:
         raise ValueError("worker prediction row count is inconsistent")
@@ -714,6 +729,84 @@ def _git_revision_for_comparator() -> str | None:
         return revision if re.fullmatch(r"[0-9a-f]{40,64}", revision) else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _baseline_review_provenance(baseline_report: dict[str, Any]) -> dict[str, Any]:
+    data = baseline_report.get("data") if isinstance(baseline_report.get("data"), dict) else {}
+    raw_states = data.get("label_review_state")
+    fields = ("rows", "target_array_nonempty", "target_array_empty", "target_array_missing_or_null",
+              "verified_true", "verified_false", "labels_pending_true", "labels_pending_false",
+              "labels_pending_absent", "target_completeness_true", "target_completeness_false",
+              "target_completeness_absent")
+    review_state = None
+    if isinstance(raw_states, dict):
+        sanitized = {}
+        for split in ("train", "validation"):
+            counts = raw_states.get(split)
+            if not isinstance(counts, dict):
+                sanitized = {}
+                break
+            if any(type(counts.get(field)) is not int or counts[field] < 0 for field in fields):
+                sanitized = {}
+                break
+            sanitized[split] = {field: counts[field] for field in fields}
+        if sanitized:
+            review_state = sanitized
+    group_use_claim = data.get("validation_group_use_claim")
+    if not isinstance(group_use_claim, str) or group_use_claim not in {"previously_used", "reported_unused", "unknown"}:
+        group_use_claim = "unknown"
+    group_claim_verified = data.get("validation_group_use_claim_verified")
+    if type(group_claim_verified) is not bool:
+        group_claim_verified = None
+    independence_claim = data.get("independence_claim")
+    if not isinstance(independence_claim, str) or not independence_claim.strip():
+        independence_claim = "unknown; no baseline claim supplied"
+    elif "source independence remains unverified" in independence_claim:
+        independence_claim = "plan separation is claimed; source independence remains unverified"
+    else:
+        independence_claim = "baseline claim supplied; meaning not recognized by this adapter"
+    independence_verified = data.get("validation_independence_verified")
+    if type(independence_verified) is not bool:
+        independence_verified = None
+    all_marked_verified = None
+    if review_state is not None:
+        all_marked_verified = all(review_state[split]["verified_true"] == review_state[split]["rows"]
+                                  for split in ("train", "validation"))
+    return {"label_review_state": review_state,
+            "all_rows_marked_verified": all_marked_verified,
+            "validation_group_use_claim": group_use_claim,
+            "validation_group_use_claim_verified": group_claim_verified,
+            "validation_independence_claim": independence_claim,
+            "validation_independence_verified": independence_verified}
+
+
+def _review_history_limitations(review: dict[str, Any]) -> list[str]:
+    limits = ["label-review and validation-history flags copied from the baseline are claims; this adapter does not independently audit them",
+              "source schema completeness claims are not independently verified",
+              "no final test or heldout data were opened",
+              "conversion linkage from the configured artifact to upstream weights is not independently proven unless the receipt explicitly establishes it",
+              "per-process GPU memory attribution was not measured",
+              "paired classical same-answered-subset metrics unavailable without per-row baseline predictions"]
+    if review["label_review_state"] is None:
+        limits.append("baseline label review state is absent or unsupported; label review status is unknown")
+    claim = review["validation_group_use_claim"]
+    verified = review["validation_group_use_claim_verified"]
+    verification_text = ("baseline marks the history claim verified" if verified is True else
+                         "baseline marks the history claim unverified" if verified is False else
+                         "history-claim verification status is unknown")
+    if claim == "previously_used":
+        limits.append(f"baseline reports prior validation-group use; {verification_text}; results are exploratory")
+    elif claim == "reported_unused":
+        limits.append(f"baseline reports validation groups unused; {verification_text}")
+    else:
+        limits.append("validation-group use history is unknown in the baseline report")
+    if review["validation_independence_verified"] is True:
+        pass
+    elif review["validation_independence_verified"] is False:
+        limits.append("baseline explicitly marks validation independence as unverified")
+    else:
+        limits.append("baseline does not provide a validation-independence verification status")
+    return limits
 
 
 def _compute_metrics(y_true: list[list[int]], y_pred: list[list[int]],
@@ -882,6 +975,14 @@ def _bind_baseline(config: dict[str, Any]) -> tuple[dict, dict, list[dict], list
             or report["data"].get("review_ledger_sha256") != ledger_digest
             or report["data"].get("rejected_label_handling") != cc["rejected_label_handling"]):
         raise ValueError("baseline data, screening, or review-ledger identity changed")
+    recorded_review = report["data"].get("label_review_state")
+    if (recorded_review is not None
+            and recorded_review != {"train": classical._label_review_state(train, field),
+                                    "validation": classical._label_review_state(validation, field)}):
+        raise ValueError("baseline label review counts no longer match the selected source rows")
+    recorded_group_claim = report["data"].get("validation_group_use_claim")
+    if recorded_group_claim is not None and recorded_group_claim != cc["validation_group_use_claim"]:
+        raise ValueError("baseline validation-use claim differs from its configured claim")
     if (len(train) != report["data"].get("train_rows") or len(validation) != report["data"].get("validation_rows")
             or _baseline_id_hashes(train) != report["data"].get("train_record_id_sha256")
             or _baseline_id_hashes(validation) != report["data"].get("validation_record_id_sha256")):
@@ -1438,6 +1539,9 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
              for row in (target_known.tolist() if hasattr(target_known, "tolist") else target_known)]
     predictions = _response_prediction_matrix(result["predictions"], labels, len(validation_rows))
     policy = _target_scoring_policy(y_train, train_known, labels, classical_config["constant_target_behavior"])
+    review = _baseline_review_provenance(baseline_report)
+    resources_before = ready.get("resources_before", {})
+    resources_after = result.get("resources_after", {})
     metrics = _compute_metrics(y_true, predictions, known, labels)
     status_counts = {status: outcomes.count(status) for status in sorted(set(outcomes))}
     lifecycle = {"completed_responses": sum(status in {"answered", "abstain", "malformed", "invalid_schema",
@@ -1489,14 +1593,18 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
                       "payload_sha256": sha(payload_raw), "response_record_id_set_sha256": sha(
                           json.dumps(sorted(target_id_hashes), separators=(",", ":")).encode())},
         "metrics": metrics,
-        "resources": {"remote_before": ready["resources_before"], "remote_after": result["resources_after"],
+        "resources": {"remote_before": resources_before, "remote_after": resources_after,
                       "configured_transient_scope": {"memory_max_bytes": config["resource_memory_max_bytes"],
                                                        "cpu_quota_percent": config["resource_cpu_quota_percent"],
                                                        "scope_started_successfully": True},
                       "per_run_cpu_time_usec": None,
                       "per_run_peak_memory_bytes": None,
-                      "cgroup_usage_scope": "unknown; cgroup mount was not visible inside the worker mount namespace",
-                      "gpu_memory_attribution": "unknown on shared-memory GB10; no per-process GPU memory attribution",
+                      "cgroup_usage_scope": "unknown; the worker did not collect per-run cgroup CPU or peak-memory counters",
+                      "cgroup_memory_available_bytes_before": resources_before.get("cgroup_memory_available_bytes"),
+                      "cgroup_memory_available_bytes_after": resources_after.get("cgroup_memory_available_bytes"),
+                      "gpu_memory_attribution": {"before": resources_before.get("gpu_attribution", "unknown"),
+                                                  "after": resources_after.get("gpu_attribution", "unknown"),
+                                                  "per_process": "unknown; no per-process GPU memory measurement was collected"},
                       "model_layer_size_bytes": result["artifact"]["model_layer_bytes"],
                       "model_layer_size_scope": "quantized model blob size; not runtime memory"},
         "provenance": {"baseline_report_sha256": config["baseline_report_sha256"],
@@ -1508,14 +1616,9 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
                        "taxonomy_sha256": corpus["taxonomy_sha256"],
                        "rejected_label_handling": classical_config["rejected_label_handling"],
                        "rejected_rows_excluded": baseline_report["data"]["rejected_rows_excluded"],
-                       "labels_unverified": True, "validation_independence_verified": False,
+                       **review,
                        "privacy": "screened text sent once over authenticated SSH stdin only after private namespace, artifact, model identity, and host-loopback denial checks; no text/output logs or public/cloud service"},
-        "limitations": ["validation labels are unreviewed proposals and previously used; exploratory only",
-                        "source schema completeness claims are not independently verified",
-                        "no final test or heldout data were opened",
-                        "conversion linkage from the configured artifact to upstream weights is not independently proven unless the receipt explicitly establishes it",
-                        "GB10 unified GPU memory is not separately observable or attributable",
-                        "paired classical same-answered-subset metrics unavailable without per-row baseline predictions"],
+        "limitations": _review_history_limitations(review),
         "host_state": {"before": {k: host_before[k] for k in ("hostname", "architecture", "memory_available_bytes",
                          "home_disk_free_bytes", "gpu_inventory", "ollama_service_pid", "ollama_version", "loaded_model_count")},
                        "after": {k: host_after[k] for k in ("hostname", "architecture", "memory_available_bytes",
@@ -1690,6 +1793,8 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
                 or len(result.get("predictions", [])) != len(validation_rows)
                 or len(result.get("outcomes", [])) != len(validation_rows)):
             raise ValueError("worker results do not bind to the submitted records and masks")
+        _validate_final_timings(result.get("outcomes"), result.get("timing_ms"), progress,
+                                len(validation_rows))
         if (len(progress) != len(result["outcomes"])
                 or [item["outcome"] for item in progress] != result["outcomes"]
                 or [item["prediction"] for item in progress] != result["predictions"]):

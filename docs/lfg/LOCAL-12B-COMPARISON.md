@@ -100,11 +100,14 @@ snapshots; intervening intervals and other services are not continuously
 observed. A timeout or ambiguous transport failure stops subsequent
 requests. A failed or partial run cannot be read as a complete denominator.
 
-Unreviewed labels remain unverified proposals. Previously used development
-validation is exploratory and is not an independent final test. No final
-holdout is opened. GPU memory and per-process GPU use are reported as unknown
-when the platform exposes only shared unified memory; the runtime did not report
-whether inference ran on CPU or GPU. System-wide inventory is not per-process
-attribution. Host RAM and disk snapshots, configured transient scope limits,
-and unknown per-run CPU/memory totals are reported separately; these do not
-imply a reservation or an LFG model size.
+The report copies label review counts and validation group-use/history claims
+from the baseline report. It does not independently verify those claims. A
+reported prior use is identified as such; a reported unused or unknown history
+is not described as a previously used split. Validation independence remains
+unknown unless the baseline explicitly supplies a status. No final holdout is
+opened. GPU and cgroup availability fields reflect the worker's observed
+resource snapshots. Per-process GPU attribution and per-run cgroup CPU/peak
+memory are unknown because this adapter does not collect those measurements;
+it does not assume a particular device or mount namespace. Host RAM and disk
+snapshots and configured transient scope limits are reported separately and do
+not imply a reservation or an LFG model size.

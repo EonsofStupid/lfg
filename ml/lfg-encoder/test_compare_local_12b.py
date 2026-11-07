@@ -224,6 +224,26 @@ class ComparisonAdapterTests(unittest.TestCase):
         self.assertEqual(summary["missing_count"], 2)
         self.assertEqual(summary["median_ms"], 15.0)
 
+    def test_final_timing_list_must_match_started_and_not_started_progress(self):
+        outcomes = ["answered", "not_attempted_after_abort"]
+        progress = [{"index": 0, "outcome": "answered", "timing_ms": 12.0},
+                    {"index": 1, "outcome": "not_attempted_after_abort", "timing_ms": None}]
+        comparison._validate_final_timings(outcomes, [12.0, None], progress, 2)
+        for timings in ([13.0, None], [12.0], [float("nan"), None], [12.0, 0.0]):
+            with self.subTest(timings=timings), self.assertRaisesRegex(ValueError, "final timing"):
+                comparison._validate_final_timings(outcomes, list(timings), progress, 2)
+
+    def test_missing_baseline_review_and_history_are_reported_unknown(self):
+        review = comparison._baseline_review_provenance({"data": {}})
+        self.assertIsNone(review["label_review_state"])
+        self.assertIsNone(review["all_rows_marked_verified"])
+        self.assertEqual(review["validation_group_use_claim"], "unknown")
+        self.assertIsNone(review["validation_group_use_claim_verified"])
+        self.assertEqual(review["validation_independence_claim"], "unknown; no baseline claim supplied")
+        self.assertIsNone(review["validation_independence_verified"])
+        self.assertTrue(any("history is unknown" in item for item in
+                            comparison._review_history_limitations(review)))
+
     def test_worker_recomputes_text_identity_and_partial_label_masks(self):
         record_id = "a" * 64
         text = "screened local task"
@@ -465,10 +485,25 @@ class ComparisonAdapterTests(unittest.TestCase):
         y_validation = np.array([[1], [0], [0]])
         validation_known = np.array([[True], [True], [True]])
         validation_ids = [comparison.sha(row["id"].encode()) for row in validation_rows]
+        train_review_state = {"rows": 2, "target_array_nonempty": 2, "target_array_empty": 0,
+                              "target_array_missing_or_null": 0, "verified_true": 2, "verified_false": 0,
+                              "labels_pending_true": 0, "labels_pending_false": 2, "labels_pending_absent": 0,
+                              "target_completeness_true": 2, "target_completeness_false": 0,
+                              "target_completeness_absent": 0}
+        validation_review_state = {"rows": 3, "target_array_nonempty": 3, "target_array_empty": 0,
+                                   "target_array_missing_or_null": 0, "verified_true": 3, "verified_false": 0,
+                                   "labels_pending_true": 0, "labels_pending_false": 3, "labels_pending_absent": 0,
+                                   "target_completeness_true": 3, "target_completeness_false": 0,
+                                   "target_completeness_absent": 0}
         baseline = {"code_sha256": "1" * 64,
                     "data": {"validation_record_id_sha256": sorted(validation_ids),
                              "plan_sha256": "2" * 64, "review_ledger_sha256": "3" * 64,
-                             "rejected_rows_excluded": {"train": 0, "validation": 0}},
+                             "rejected_rows_excluded": {"train": 0, "validation": 0},
+                             "label_review_state": {"train": train_review_state,
+                                                    "validation": validation_review_state},
+                             "validation_group_use_claim": "reported_unused",
+                             "validation_group_use_claim_verified": False,
+                             "independence_claim": "project/group/family and screened-text separation checked against the selected plan; source independence remains unverified"},
                     "task": {"validation_support": {label: {"positive": 1, "negative": 2}}},
                     "algorithms": {name: {"metrics": {"macro_f1": 0.5}} for name in
                                    ("logistic_regression", "knn", "decision_tree")}}
@@ -494,10 +529,14 @@ class ComparisonAdapterTests(unittest.TestCase):
                   "timing_ms": [12.0, 18.0, None], "aborted": True, "abort_reason": "fixture abort",
                   "artifact": {"manifest_sha256": "5" * 64, "model_layer_bytes": 12345},
                   "loaded_model": {"identity_match": True},
-                  "resources_after": {"effective_memory_available_bytes": 40_000_000_000},
+                  "resources_after": {"effective_memory_available_bytes": 40_000_000_000,
+                                      "cgroup_memory_available_bytes": 12_000_000,
+                                      "gpu_attribution": "device-wide memory readings only"},
                   "server_cleanup_verified": True}
         ready = {"warmup": {"status": "completed"},
-                 "resources_before": {"effective_memory_available_bytes": 45_000_000_000}}
+                 "resources_before": {"effective_memory_available_bytes": 45_000_000_000,
+                                      "cgroup_memory_available_bytes": 15_000_000,
+                                      "gpu_attribution": "device memory query unavailable"}}
         host = {"hostname": "clyffy-03", "architecture": "aarch64", "memory_available_bytes": 100,
                 "home_disk_free_bytes": 100, "gpu_inventory": None, "ollama_service_pid": "2324",
                 "ollama_version": "ollama version is 0.30.11", "loaded_model_count": 0}
@@ -519,6 +558,18 @@ class ComparisonAdapterTests(unittest.TestCase):
         self.assertEqual(report["inference"]["timing_ms"]["missing_count"], 1)
         self.assertEqual(report["task"]["target_scoring_policy"][label]["mode"],
                          "constant_target_majority_fallback")
+        self.assertEqual(report["provenance"]["validation_group_use_claim"], "reported_unused")
+        self.assertFalse(report["provenance"]["validation_group_use_claim_verified"])
+        self.assertTrue(any("reports validation groups unused" in item for item in report["limitations"]))
+        self.assertIsNone(report["provenance"]["validation_independence_verified"])
+        self.assertTrue(report["provenance"]["all_rows_marked_verified"])
+        self.assertEqual(report["provenance"]["label_review_state"]["validation"]["verified_true"], 3)
+        self.assertIn("did not collect per-run cgroup", report["resources"]["cgroup_usage_scope"])
+        self.assertEqual(report["resources"]["cgroup_memory_available_bytes_before"], 15_000_000)
+        self.assertEqual(report["resources"]["gpu_memory_attribution"]["before"],
+                         "device memory query unavailable")
+        self.assertNotIn("GB10", json.dumps(report))
+        self.assertNotIn("labels_unverified", report["provenance"])
         self.assertIsNone(report["resources"]["per_run_cpu_time_usec"])
         self.assertIsNone(report["resources"]["per_run_peak_memory_bytes"])
         self.assertEqual(report["model"]["inference_device"],
