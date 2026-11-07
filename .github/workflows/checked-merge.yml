@@ -51,6 +51,8 @@ jobs:
           if-no-files-found: warn
       - name: Check optional native inference
         run: cargo check --locked --workspace --all-targets --features lfg-server/embedded-ui,lfg-server/onnx-shadow
+      - name: Install classifier comparison test dependencies
+        run: python -m pip install -r ml/lfg-encoder/requirements-classifier-comparison.txt
       - name: Test dataset and evaluation tools
         run: python -m unittest discover -s ml/lfg-encoder -p 'test_*.py'
 
