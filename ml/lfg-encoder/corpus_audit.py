@@ -41,6 +41,48 @@ def annotation_digest(record: dict[str, Any], project: str, split: str, taxonomy
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _label_guide_identity(plan_path: Path, plan: dict[str, Any],
+                          taxonomy: dict[str, set[str]]) -> tuple[str, str | None]:
+    """Distinguish an undeclared guide from an explicitly guide-free plan."""
+    if "label_guide" not in plan:
+        return "not_declared", None
+    configured = plan["label_guide"]
+    if configured is None:
+        return "explicitly_none", None
+    path = resolve(plan_path.parent, configured)
+    max_bytes = 4 * 1024 * 1024
+
+    def read_bounded() -> bytes:
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("label guide exceeds the configured audit bound")
+        return data
+
+    raw = read_bounded()
+    try:
+        guide = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid label guide") from error
+    if (not isinstance(guide, dict) or set(guide) != {"schema_version", "revision", "notice", "labels"}
+            or guide.get("schema_version") != "lfg.review-label-guide.v1"
+            or not isinstance(guide.get("revision"), str) or not guide["revision"].strip()
+            or not isinstance(guide.get("notice"), str) or not guide["notice"].strip()
+            or not isinstance(guide.get("labels"), dict) or set(guide["labels"]) != set(evaluate.FIELDS)):
+        raise ValueError("invalid label guide")
+    for field in evaluate.FIELDS:
+        definitions = guide["labels"][field]
+        if not isinstance(definitions, dict) or set(definitions) != taxonomy[field]:
+            raise ValueError("label guide does not match the configured taxonomy")
+        for definition in definitions.values():
+            if (not isinstance(definition, dict) or set(definition) != {"apply", "boundary"}
+                    or any(not isinstance(text, str) or not text.strip() for text in definition.values())):
+                raise ValueError("invalid label guide definition")
+    if read_bounded() != raw:
+        raise ValueError("label guide changed while auditing")
+    return "verified_sha256", hashlib.sha256(raw).hexdigest()
+
+
 def text_key(text: str) -> str:
     normalized = " ".join(unicodedata.normalize("NFKC", text).casefold().split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -93,6 +135,7 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
                            for source in sources):
         raise ValueError("development plans permit only train and validation sources")
     taxonomy, taxonomy_hash = evaluate.load_taxonomy(resolve(plan_path.parent, plan.get("taxonomy")))
+    label_guide_status, label_guide_hash = _label_guide_identity(plan_path, plan, taxonomy)
     ledger_path = None if plan.get("review_ledger") is None else resolve(plan_path.parent, plan["review_ledger"])
     ledger, ledger_hash = read_ledger(ledger_path)
     partitions: dict[str, str] = {}
@@ -174,7 +217,8 @@ def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, An
     if set(ledger) - ids:
         raise ValueError("review ledger contains IDs absent from this plan")
     report = {"schema_version": "lfg.encoder-corpus-audit.v1", "plan_sha256": hashlib.sha256(raw_plan).hexdigest(),
-              "taxonomy_sha256": taxonomy_hash, "review_ledger_sha256": ledger_hash,
+              "taxonomy_sha256": taxonomy_hash, "label_guide_status": label_guide_status,
+              "label_guide_sha256": label_guide_hash, "review_ledger_sha256": ledger_hash,
               "auditor_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "taxonomy_loader_sha256": hashlib.sha256(Path(evaluate.__file__).read_bytes()).hexdigest(),
               "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),

@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -39,6 +40,64 @@ class CorpusAuditTests(unittest.TestCase):
         self.assertEqual({row["decision"] for row in queue}, {"pending"})
         self.assertFalse(report["promotion_eligible"])
         self.assertNotIn("private input", json.dumps(report) + json.dumps(queue))
+
+    def test_label_guide_provenance_distinguishes_missing_explicit_none_and_verified_bytes(self):
+        report, _ = corpus_audit.audit(self.root / "plan.json")
+        self.assertEqual(report["label_guide_status"], "not_declared")
+        self.assertIsNone(report["label_guide_sha256"])
+
+        self.plan["label_guide"] = None
+        self.write()
+        report, _ = corpus_audit.audit(self.root / "plan.json")
+        self.assertEqual(report["label_guide_status"], "explicitly_none")
+        self.assertIsNone(report["label_guide_sha256"])
+
+        labels = {"intents": {"build": {"apply": "build", "boundary": "no build"}},
+                  "capabilities": {"write": {"apply": "write", "boundary": "no write"}},
+                  "risks": {"sensitive": {"apply": "sensitive", "boundary": "not sensitive"}}}
+        guide = {"schema_version": "lfg.review-label-guide.v1", "revision": "test-1",
+                 "notice": "Review uncertain labels.", "labels": labels}
+        raw = json.dumps(guide, sort_keys=True).encode()
+        (self.root / "guide.json").write_bytes(raw)
+        self.plan["label_guide"] = "guide.json"
+        self.write()
+        report, _ = corpus_audit.audit(self.root / "plan.json")
+        self.assertEqual(report["label_guide_status"], "verified_sha256")
+        self.assertEqual(report["label_guide_sha256"], __import__("hashlib").sha256(raw).hexdigest())
+
+    def test_label_guide_reread_is_bounded_when_file_grows(self):
+        labels = {"intents": {"build": {"apply": "build", "boundary": "no build"}},
+                  "capabilities": {"write": {"apply": "write", "boundary": "no write"}},
+                  "risks": {"sensitive": {"apply": "sensitive", "boundary": "not sensitive"}}}
+        guide = {"schema_version": "lfg.review-label-guide.v1", "revision": "test-1",
+                 "notice": "Review uncertain labels.", "labels": labels}
+        raw = json.dumps(guide, sort_keys=True).encode()
+        taxonomy = {"intents": {"build"}, "capabilities": {"write"}, "risks": {"sensitive"}}
+        requested = []
+
+        class BoundedStream(io.BytesIO):
+            def read(self, size=-1):
+                requested.append(size)
+                return super().read(size)
+
+        oversized = raw + b" " * ((4 * 1024 * 1024) + 1)
+        with patch.object(Path, "open", side_effect=[BoundedStream(raw), BoundedStream(oversized)]):
+            with self.assertRaisesRegex(ValueError, "audit bound"):
+                corpus_audit._label_guide_identity(
+                    self.root / "plan.json", {"label_guide": "guide.json"}, taxonomy)
+        self.assertEqual(requested, [(4 * 1024 * 1024) + 1, (4 * 1024 * 1024) + 1])
+
+    def test_invalid_or_taxonomy_mismatched_label_guide_is_rejected(self):
+        self.plan["label_guide"] = "guide.json"
+        guide = {"schema_version": "lfg.review-label-guide.v1", "revision": "test-1",
+                 "notice": "Review uncertain labels.",
+                 "labels": {"intents": {"other": {"apply": "x", "boundary": "y"}},
+                            "capabilities": {"write": {"apply": "x", "boundary": "y"}},
+                            "risks": {"sensitive": {"apply": "x", "boundary": "y"}}}}
+        (self.root / "guide.json").write_text(json.dumps(guide), encoding="utf-8")
+        self.write()
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            corpus_audit.audit(self.root / "plan.json")
 
     def test_attestation_is_bound_to_text_labels_taxonomy_and_split(self):
         _, queue = corpus_audit.audit(self.root / "plan.json")

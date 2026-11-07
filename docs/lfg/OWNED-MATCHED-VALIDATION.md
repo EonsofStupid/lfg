@@ -1,4 +1,4 @@
-﻿# Matched owned and deterministic validation
+# Matched owned and deterministic validation
 
 **Status: blocked before private inference.** The original scope-and-pipe
 transport failed independent review and `_ssh_worker` refuses to run it. A
@@ -38,6 +38,44 @@ that an exact target literal has the same meaning as the bound target, so owned
 predictions remain unknown. A different intent, invalid output, timeout, missing
 result, and other incomplete response are never negatives. Metrics for an
 unknown-only result have zero coverage and null precision, recall, and F1.
+
+An optional top-level `atomic_query_contract` in the private comparator config
+enables scoring for one selected field and label only when it pins a completed
+`lfg.owned-multilabel-sft-result.v1`, loaded weights, cached graph manifest,
+training manifest, system, framing, taxonomy, guide, and instruction-template
+digests. The development plan must declare `label_guide` as a path whose bytes
+match a taxonomy-valid review guide, or explicitly set `label_guide` to `null`
+to attest that no guide was used. A missing `label_guide` property is unknown
+and cannot authorize atomic scoring. The configured template is
+formatted with the bound field and label, then the exact training user text is
+sent: `instruction + "\n" + the same screened source text`. Deterministic
+requests still use that screened source text without the added instruction.
+Reports identify this prompt difference, one owned request per row, completed
+worker count, aggregate per-label target support, and end-to-end and handler
+latency scopes. They do not claim equal raw requests or isolate instruction
+overhead. The response must pass the existing typed multilabel validator and
+match the pinned taxonomy and guide identities; only one explicit positive or
+negative decision is scoreable. Missing decisions, abstention, unknown values,
+identity mismatch, invalid output, or incomplete lifecycle remain unknown.
+Without this extension, the prior free-form intent path remains unscorable.
+Configuration identity alone does not establish a completed checkpoint or
+classifier quality; this adapter performs no inference during configuration or
+test validation.
+
+The atomic worker requires the actual private `cached-manifest.json` beside the
+framing, runtime, and completed training metadata. It verifies that manifest's
+weights and source-training link, then compares its cached-manifest, model,
+prefill, decode, framing, and training identities with the loaded service
+engine. The completed multilabel result stores `training_task` and
+`weights_sha256` at the top level; neither is part of `coverage`. The worker
+verifies those fields there, checks the genuinely shared coverage fields against
+the result, and binds the raw result-manifest digest and trained weight digest
+to the cached graph manifest. The checked-in Rust owned service still requires
+the older `lfg.owned-assessment-sft-result.v1` schema, so an actual multilabel
+checkpoint cannot load through that service until a separately reviewed
+compatibility change is made. The metadata fixture exercises the trainer's
+result schema and graph links without reading private rows; it does not
+establish classifier quality or service compatibility.
 
 The deterministic endpoint can yield a configured rule-hit outcome only when
 its actual configuration identity, complete hit list, and untruncated scoring
