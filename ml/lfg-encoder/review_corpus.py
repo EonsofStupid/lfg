@@ -241,8 +241,14 @@ def _read_partial_events(path: Path, max_bytes: int) -> list[dict[str, Any]]:
     if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_size > max_bytes:
         raise ValueError('partial review sidecar is unsafe or exceeds its configured limit')
     raw = path.read_bytes()
-    if len(raw) != info.st_size or len(raw) > max_bytes or (raw and not raw.endswith(b'\n')):
+    if len(raw) != info.st_size:
         raise ValueError('partial review sidecar is truncated or changed')
+    return _parse_partial_events(raw, max_bytes)
+
+
+def _parse_partial_events(raw: bytes, max_bytes: int) -> list[dict[str, Any]]:
+    if not isinstance(raw, bytes) or len(raw) > max_bytes or (raw and not raw.endswith(b'\n')):
+        raise ValueError('partial review sidecar is truncated or exceeds its configured limit')
     events = []
     seen_event_ids = set()
     previous_by_id: dict[str, dict[str, Any]] = {}
