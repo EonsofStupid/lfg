@@ -254,3 +254,40 @@ record bodies. Page traversal is not a snapshot: the list can change while it
 is read. A page error or configured cap leaves the displayed count partial.
 Feedback counts remain separate from the imported report; older feedback
 records lack cached graph digests and are not joined to a benchmark run.
+
+The Inspector also has a separate three-file comparison view for explicitly
+selected `lfg.classifier-comparison-report.v1`,
+`lfg.local-12b-comparison-report.v1`, and
+`lfg.owned-matched-validation-report.v1` files. Each file is bounded by the
+configured maximum HTTP body size; the combined selection is bounded to three
+times that limit with safe integer arithmetic. The report content is read in
+the browser only. It is not sent to an API, stored in browser storage, or
+written to console or logs. The raw file buffer is discarded after parsing and
+the view model retains only allowlisted counters, finite metrics, status
+categories, validated identities, and selected provenance digests. Unknown
+extensions are ignored.
+
+The browser computes the SHA-256 of each exact selected file and the canonical
+sorted validation ID digest from the classical and local reports. The owned
+report's author-supplied baseline hashes must link to the other two raw file
+hashes. The panel also compares task field, selected labels, validation row
+count and ID-set digest, local/owned target-mask digest, support counts, and
+available manifest, plan, screening policy/code, review ledger, taxonomy,
+train, and validation digests. A missing or different field prevents a
+matching report banner. If WebCrypto is unavailable, report aggregates remain
+viewable when parsing succeeds but linkage is shown as unavailable. These
+checks establish consistency among report-supplied claims only. They do not
+independently verify source files, screening, labels, or per-row target values.
+
+Algorithm names and model identity are read from selected reports, under
+bounded safe-text validation. A model identity is distinct from binary
+identity; a displayed model identity does not authenticate the executable.
+The view shows observed coverage and supplied metrics only; missing or null
+results remain Unknown. Review and validation-history wording is derived from
+recognized report claims; absent, negated, or freeform claims remain not
+established. These report claims are not independently verified. The reports
+do not include per-row target values or the intersection of individual
+predictions. Coverage differs among paths, so their aggregates do not support
+a paired winner, significance, independent accuracy, quality qualification,
+or model promotion claim. Reported elapsed values retain their stated scope
+and are not interpreted as CPU, model-only latency, or cost.
