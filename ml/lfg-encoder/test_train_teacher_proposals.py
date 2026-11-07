@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import train_teacher_proposals as adapter
+import masked_supervision as masked
 
 
 def row(row_id="a" * 64):
@@ -126,6 +127,9 @@ class TrainOnlySnapshotTests(unittest.TestCase):
                 def _verify_owner_private_access(*_a, **_k):
                     return None
                 @staticmethod
+                def _secure_private_path(*_a, **_k):
+                    return None
+                @staticmethod
                 def load_export(snapshot, train_only=False):
                     loader_inventory.extend(p.name for p in snapshot.iterdir())
                     self.assertEqual(train_only, True)
@@ -142,6 +146,122 @@ class TrainOnlySnapshotTests(unittest.TestCase):
             self.assertEqual(source_reads.count("manifest.json"), 1)
             self.assertNotIn("validation.jsonl", loader_inventory)
             self.assertEqual(got_binding["manifest_sha256"], cfg["export_manifest_sha256"])
+
+    def test_real_train_only_snapshot_loader_accepts_owner_private_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            columns = [{"field": "intents", "label": "build.software"}]
+            text = "local sanitized fixture"
+            row_id = "a" * 64
+            raw_row = {
+                "schema_version": masked.ROW_SCHEMA, "id": row_id, "split": "train",
+                "family": "b" * 64, "text": text,
+                "text_sha256": adapter._sha(text.encode("utf-8")),
+                "source_identity": {"artifact_path": "source.jsonl", "artifact_sha256": "c" * 64,
+                    "project_claim_sha256": "d" * 64, "project_group_claim_sha256": "e" * 64,
+                    "record_id_sha256": row_id, "source_claim_sha256": "f" * 64},
+                "columns": columns, "targets": [None], "known_mask": [False], "weights": [0],
+                "target_origins": ["unknown"], "target_reviewer_claims": [None],
+            }
+            train_raw = (json.dumps(raw_row, sort_keys=True) + "\n").encode("utf-8")
+            export_config = {
+                "schema_version": masked.CONFIG_SCHEMA, "workspace": str(root / "workspace"),
+                "output": str(root / "export"), "screening_policy": str(root / "policy.json"),
+                "guide": None, "selected_labels": {field: ["label"] for field in masked.FIELDS},
+                "allow_unreviewed_proposals": True, "unreviewed_complete_array_fields": [],
+                "rejected_record_policy": "exclude", "stale_retracted_event_policy": "omit_record",
+                "weights": {"default": 1.0, "per_label": {}},
+                "limits": {key: 100_000 for key in masked.LIMIT_FIELDS},
+                "near_duplicate": {"similarity": 0.98},
+            }
+            config_raw = (json.dumps(export_config, sort_keys=True) + "\n").encode("utf-8")
+            export = adapter._private_temp_directory("lfg-teacher-test-export")
+            try:
+                adapter._write_new(export / "config.json", config_raw)
+                adapter._write_new(export / "train.jsonl", train_raw)
+                manifest = {"schema_version": masked.EXPORT_SCHEMA,
+                    "config_sha256": adapter._sha(config_raw), "selected_columns": columns,
+                    "taxonomy_sha256": "1" * 64, "screening_policy_sha256": "2" * 64,
+                    "screening_code_sha256": "3" * 64,
+                    "output_files": {"train.jsonl": {"bytes": len(train_raw),
+                        "sha256": adapter._sha(train_raw)}}}
+                manifest_raw = (json.dumps(manifest, sort_keys=True) + "\n").encode("utf-8")
+                adapter._write_new(export / "manifest.json", manifest_raw)
+                cfg = {"export_dir": str(export), "export_manifest_sha256": adapter._sha(manifest_raw),
+                    "export_config_sha256": adapter._sha(config_raw),
+                    "export_train_sha256": adapter._sha(train_raw), "max_export_bytes": len(train_raw),
+                    "taxonomy_sha256": "1" * 64, "screening_policy_sha256": "2" * 64,
+                    "screening_code_sha256": "3" * 64, "selected_columns": columns,
+                    "selection": {"row_ids": []}}
+                loaded, rows, _binding = adapter._preflight_export(cfg)
+                self.assertEqual(loaded, manifest)
+                self.assertEqual([item["id"] for item in rows], [row_id])
+                self.assertEqual({p.name for p in export.iterdir()},
+                                 {"config.json", "manifest.json", "train.jsonl"})
+            finally:
+                import shutil
+                shutil.rmtree(export)
+
+
+class OwnerPrivateTempTests(unittest.TestCase):
+    def test_uuid_collision_preserves_preexisting_empty_directory(self):
+        token = "a" * 32
+        prefix = "lfg-teacher-collision"
+        with tempfile.TemporaryDirectory(prefix="lfg-teacher-collision-case-") as base:
+            existing = Path(base) / f"{prefix}-{token}"
+            existing.mkdir()
+            with mock.patch.object(adapter.tempfile, "gettempdir", return_value=base), \
+                 mock.patch.object(adapter.uuid, "uuid4", return_value=SimpleNamespace(hex=token)):
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._private_temp_directory(prefix)
+            self.assertTrue(existing.is_dir())
+            self.assertEqual(list(existing.iterdir()), [])
+
+    def test_windows_temp_directory_and_file_have_real_owner_only_acl_before_and_after_write(self):
+        if os.name != "nt":
+            self.skipTest("native Windows ACL verification requires Windows")
+        directory = adapter._private_temp_directory("lfg-teacher-acl-e2e")
+        try:
+            masked._verify_owner_private_access(directory, is_directory=True)
+            path = directory / "worker-config.json"
+            # _write_new establishes and verifies the strict ACL before payload bytes.
+            adapter._write_new(path, b'{"fixture":"safe"}\n')
+            masked._verify_owner_private_access(path, is_directory=False)
+            self.assertEqual(path.read_bytes(), b'{"fixture":"safe"}\n')
+        finally:
+            import shutil
+            shutil.rmtree(directory)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode assertions are platform-specific")
+    def test_posix_temp_directory_and_file_use_owner_only_modes(self):
+        directory = adapter._private_temp_directory("lfg-teacher-acl-posix")
+        try:
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            masked._verify_owner_private_access(directory, is_directory=True)
+            path = directory / "snapshot.json"
+            adapter._write_new(path, b"fixture\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            masked._verify_owner_private_access(path, is_directory=False)
+        finally:
+            import shutil
+            shutil.rmtree(directory)
+
+    def test_acl_setup_failure_writes_no_payload_and_removes_only_empty_task_paths(self):
+        with tempfile.TemporaryDirectory() as base, \
+             mock.patch.object(adapter.tempfile, "gettempdir", return_value=base), \
+             mock.patch.object(masked, "_secure_private_path", side_effect=ValueError("private sentinel")):
+            with self.assertRaises(adapter.ProposalError):
+                adapter._private_temp_directory("lfg-teacher-acl-fail")
+            self.assertEqual(list(Path(base).iterdir()), [])
+        with tempfile.TemporaryDirectory() as base:
+            directory = adapter._private_temp_directory("lfg-teacher-acl-file-fail")
+            path = directory / "secret.json"
+            with mock.patch.object(masked, "_secure_private_path", side_effect=ValueError("private sentinel")):
+                with self.assertRaises(ValueError):
+                    adapter._write_new(path, b"must-not-be-written")
+            self.assertFalse(path.exists())
+            import shutil
+            shutil.rmtree(directory)
 
 
 class PublicationTests(unittest.TestCase):
@@ -608,6 +728,62 @@ class CoordinatorEntryTests(unittest.TestCase):
             "cleanup": "not_started",
         })
         self.assertNotIn(sentinel, stderr.getvalue())
+
+    def test_main_distinguishes_remote_directory_and_local_temp_config_failures(self):
+        comp = {"max_manifest_bytes": 100_000, "min_memory_available_bytes": 1,
+            "min_disk_free_bytes": 1, "resource_memory_max_bytes": 1,
+            "resource_cpu_quota_percent": 100, "remote_scope_tasks_max": 1,
+            "remote_sudo_path": "/usr/bin/sudo", "remote_systemd_run_path": "/usr/bin/systemd-run",
+            "remote_true_path": "/usr/bin/true", "remote_home": "/home/owner",
+            "remote_workdir": "/home/owner/work", "ssh_port": 22, "remote_user": "owner",
+            "remote_host": "worker.test", "remote_expected_hostname": "worker",
+            "remote_expected_architecture": "x86_64"}
+        snapshot = {"memory_available_bytes": 10, "home_disk_free_bytes": 10,
+            "loaded_model_count": 0, "hostname": "worker", "architecture": "x86_64"}
+        paths = {"workdir": "/home/owner/work/run-x", "teacher": "/home/owner/work/run-x/a.py",
+            "comparator": "/home/owner/work/run-x/b.py", "config": "/home/owner/work/run-x/c.json"}
+        sentinel = "PRIVATE_SENTINEL C:\\private\\prompt --token=secret"
+        real_private_temp_directory = adapter._private_temp_directory
+
+        for failure, expected_phase in (("remote", "remote_task_directory"),
+                                        ("temp", "local_temp_directory"),
+                                        ("config", "local_config_file")):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                cfg, _ = self.cfg_and_comp(Path(tmp))
+                stderr = io.StringIO()
+                def create_remote(*_args):
+                    if failure == "remote":
+                        raise adapter.ProposalError(sentinel)
+                def create_local_temp(*_args):
+                    if failure == "temp":
+                        raise adapter.ProposalError(sentinel)
+                    return real_private_temp_directory("lfg-teacher-diagnostic-test")
+                def write_config(*_args):
+                    if failure == "config":
+                        raise adapter.ProposalError(sentinel)
+                with mock.patch.object(sys, "argv", ["train_teacher_proposals.py", "--config",
+                        str(Path(tmp) / "private-config.json"), "--zero-row-probe"]), \
+                     mock.patch.object(adapter, "load_config", return_value=(cfg, "e" * 64)), \
+                     mock.patch.object(adapter.comparator, "load_config", return_value=(comp, "f" * 64)), \
+                     mock.patch.object(adapter, "_private_file", return_value=True), \
+                     mock.patch.object(adapter.comparator, "verify_acquisition", return_value=({}, "9" * 64)), \
+                     mock.patch.object(adapter, "_remote_identity_snapshot", return_value=snapshot), \
+                     mock.patch.object(adapter.comparator, "_remote_port_closed", return_value=True), \
+                     mock.patch.object(adapter.comparator, "_ssh_run", return_value=SimpleNamespace(returncode=0)), \
+                     mock.patch.object(adapter, "_remote_stage_paths", return_value=paths), \
+                     mock.patch.object(adapter, "_worker_config", return_value={}), \
+                     mock.patch.object(adapter, "_remote_create_workdir", side_effect=create_remote), \
+                     mock.patch.object(adapter, "_private_temp_directory", side_effect=create_local_temp), \
+                     mock.patch.object(adapter, "_write_new", side_effect=write_config), \
+                     mock.patch.object(adapter, "_remote_cleanup_worker"), \
+                     contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit):
+                        adapter.main()
+                records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0]["phase"], expected_phase)
+                self.assertEqual(records[0]["cleanup"], "succeeded")
+                self.assertNotIn(sentinel, stderr.getvalue())
 
     def test_worker_failure_reports_fixed_worker_phase_to_controller_protocol(self):
         stderr, stdout = io.StringIO(), io.StringIO()

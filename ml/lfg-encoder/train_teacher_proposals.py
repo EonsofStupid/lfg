@@ -41,7 +41,8 @@ MAX_TRAIN_PAYLOAD_ROWS = 100_000
 DIAGNOSTIC_SCHEMA = "lfg.teacher-lifecycle-diagnostic.v1"
 DIAGNOSTIC_PHASES = frozenset({
     "config_validation", "receipt_validation", "remote_snapshot", "port_check",
-    "transient_preflight", "task_directory", "file_staging", "file_verification",
+    "transient_preflight", "task_directory", "remote_task_directory",
+    "local_temp_directory", "local_config_file", "file_staging", "file_verification",
     "model_install", "worker_startup", "control_handshake", "outside_port_denial",
     "warmup_readiness", "payload_result", "host_recheck", "cleanup", "unknown",
     "worker_config_validation", "worker_receipt_validation", "worker_boundary_check",
@@ -208,9 +209,24 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
 def _private_temp_directory(prefix: str) -> Path:
     base = Path(tempfile.gettempdir())
     path = base / f"{prefix}-{uuid.uuid4().hex}"
+    created = False
     try:
-        return comparator._private_report_directory(path)
+        # Create exclusively, then apply the same owner-only ACL/mode used by
+        # masked export inputs before the directory can contain private bytes.
+        path.mkdir(mode=0o700, parents=False, exist_ok=False)
+        created = True
+        masked = _masked()
+        masked._secure_private_path(path, is_directory=True)
+        masked._verify_owner_private_access(path, is_directory=True)
+        return path
     except (OSError, ValueError, subprocess.SubprocessError):
+        # Remove only the empty directory this call created. Never recurse from
+        # a failed ACL setup where another process could have added entries.
+        if created and path.is_dir() and not path.is_symlink():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
         raise ProposalError("cannot create owner-private temporary directory") from None
 
 
@@ -357,19 +373,34 @@ def _create_private_output(path: Path) -> Path:
 
 
 def _write_new(path: Path, raw: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     fd = os.open(path, flags, 0o600)
     try:
+        # New files may inherit broad Windows ACLs from their parent. Replace
+        # those grants and validate the resulting path before writing bytes.
+        _masked()._secure_private_path(path, is_directory=False)
+        _masked()._verify_owner_private_access(path, is_directory=False)
         with os.fdopen(fd, "wb") as out:
+            fd = -1
             out.write(raw)
             out.flush()
             os.fsync(out.fileno())
     except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            fd = -1
         try:
             path.unlink()
         except OSError:
             pass
         raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _validate_worker_payload(payload: Any, expected: dict) -> tuple[list[dict], list[dict]]:
@@ -1146,11 +1177,13 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
     primary_error = None
     primary_phase = None
     try:
-        _diagnostic_phase("task_directory")
+        _diagnostic_phase("remote_task_directory")
         _remote_create_workdir(comp, workdir)
         work_created = True
+        _diagnostic_phase("local_temp_directory")
         local_config_dir = _private_temp_directory("lfg-teacher-worker-config")
         worker_config_path_local = local_config_dir / "worker-config.json"
+        _diagnostic_phase("local_config_file")
         _write_new(worker_config_path_local, worker_config_raw)
         _masked()._verify_owner_private_access(worker_config_path_local, is_directory=False)
         _diagnostic_phase("file_staging")
