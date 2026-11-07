@@ -1146,11 +1146,15 @@ records that explicit fresh review, while the exact contents of the older
 interrupted action remain unknown.
 
 Partial decisions do not alter source rows, `verified`, or the full-review
-ledger. They are not approved records, are not exported by the existing
-approved-record export, and cannot be consumed by `train.py`. The current
-training loader does not support these partial masks. A future mask-aware
-consumer must preserve unknown cells explicitly before partial judgments can
-be used for training. Reviewer identity, source rights, screening, and label
+ledger. They are not approved records and are not exported by the existing
+approved-record export. The legacy `train.py` complete-record loader remains
+unchanged and does not consume partial masks. The separate opt-in
+`masked_supervision.py` path can export current per-label judgments and
+owner-authorized draft positives, preserving unknown cells as null with zero
+loss weight; omitted draft labels remain unknown unless completeness is
+explicitly declared in its private configuration. See
+[`MASKED-SUPERVISION.md`](MASKED-SUPERVISION.md) for the export and future
+training contract. Reviewer identity, source rights, screening, and label
 accuracy remain claims; this workflow does not independently verify them. A
 redacted preview changes the text binding, so partial review is blocked until
 the original request is restored. Legacy full approval/rejection remains a
