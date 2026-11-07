@@ -914,7 +914,7 @@ def _make_export_rows(snapshot: dict[str, Any], config: dict[str, Any],
     return rows_by_split, summary
 
 
-def load_export(export_dir: Path) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+def load_export(export_dir: Path, *, train_only: bool = False) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     export_dir = export_dir.resolve(strict=True)
     if not export_dir.is_dir() or export_dir.is_symlink():
         raise ValueError('masked export path must be a private directory')
@@ -933,6 +933,8 @@ def load_export(export_dir: Path) -> tuple[dict[str, Any], dict[str, list[dict[s
     files = manifest.get('output_files')
     if not isinstance(files, dict) or 'train.jsonl' not in files:
         raise ValueError('masked export manifest must contain train.jsonl')
+    if set(files) - {'train.jsonl', 'validation.jsonl'}:
+        raise ValueError('masked export file manifest is malformed')
     if manifest.get('config_sha256') != _sha(config_raw):
         raise ValueError('masked export configuration digest does not match manifest')
     rows_by_split = {}
@@ -947,6 +949,10 @@ def load_export(export_dir: Path) -> tuple[dict[str, Any], dict[str, list[dict[s
     seen_all_split_ids: set[str] = set()
     total_bytes = len(config_raw) + len(manifest_raw)
     for filename, details in files.items():
+        # This branch is deliberately before any ACL, stat, or open of the
+        # validation artifact. Train-only consumers must not probe held-out data.
+        if train_only and filename != 'train.jsonl':
+            continue
         if filename not in ('train.jsonl', 'validation.jsonl') or \
                 not isinstance(details, dict) or set(details) != {'sha256', 'bytes'} or \
                 not isinstance(details['sha256'], str) or not SHA256_RE.fullmatch(details['sha256']) or \
