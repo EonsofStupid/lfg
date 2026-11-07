@@ -34,6 +34,72 @@ REPORT_SCHEMA = "lfg.owned-matched-validation-report.v1"
 HEX = re.compile(r"^[0-9a-f]{64}$")
 HOST_PART = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
 CURRENT_STAGE = "configuration"
+DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = (256, 1024, 4096, 16384)
+MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = 16
+MAX_OUTPUT_TEXT_BYTE_BOUNDARY = (1 << 63) - 1
+
+
+def _validated_output_text_byte_bucket_boundaries(value: Any = None) -> list[int]:
+    """Return bounded public byte-bucket boundaries, rejecting ambiguous values."""
+    if value is None:
+        return list(DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES)
+    if (not isinstance(value, list) or not 1 <= len(value) <= MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES
+            or any(type(boundary) is not int or boundary < 1 or boundary > MAX_OUTPUT_TEXT_BYTE_BOUNDARY
+                   for boundary in value)
+            or any(left >= right for left, right in zip(value, value[1:]))):
+        raise ValueError("invalid output_text_utf8_byte_bucket_boundaries")
+    return list(value)
+
+
+def _new_owned_response_diagnostics(boundaries: list[int]) -> dict[str, Any]:
+    return {
+        "accepted_responses": 0,
+        "stop_reason_counts": {key: 0 for key in
+                               ("stop_sequence", "byte_limit", "context_limit", "other", "unavailable")},
+        "output_text_shape_counts": {key: 0 for key in
+                                     ("valid_json_object", "valid_json_non_object", "invalid_json",
+                                      "unavailable_or_invalid_type")},
+        "output_text_utf8_byte_bucket_counts": [0] * (len(boundaries) + 1),
+        "output_text_utf8_bytes_unavailable_or_invalid": 0,
+    }
+
+
+def _record_owned_response_diagnostics(stop_reason: Any, output_text: Any, measurement: Any,
+                                       boundaries: list[int], counts: dict[str, Any]) -> None:
+    """Add one response to fixed aggregates; never retain response content or parse errors."""
+    counts["accepted_responses"] += 1
+    stop_category = stop_reason if isinstance(stop_reason, str) and stop_reason in (
+        "stop_sequence", "byte_limit", "context_limit") else (
+            "unavailable" if stop_reason is None or not isinstance(stop_reason, str) else "other")
+    counts["stop_reason_counts"][stop_category] += 1
+
+    if not isinstance(output_text, str):
+        shape = "unavailable_or_invalid_type"
+    else:
+        try:
+            parsed = json.loads(output_text, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        except (ValueError, TypeError, json.JSONDecodeError, RecursionError):
+            shape = "invalid_json"
+        else:
+            shape = "valid_json_object" if isinstance(parsed, dict) else "valid_json_non_object"
+    counts["output_text_shape_counts"][shape] += 1
+
+    byte_count = measurement.get("outputTextUtf8Bytes") if isinstance(measurement, dict) else None
+    if type(byte_count) is not int or byte_count < 0:
+        counts["output_text_utf8_bytes_unavailable_or_invalid"] += 1
+    else:
+        index = 0
+        while index < len(boundaries) and byte_count >= boundaries[index]:
+            index += 1
+        counts["output_text_utf8_byte_bucket_counts"][index] += 1
+
+
+def _payload_output_text_byte_bucket_boundaries(payload: dict[str, Any]) -> list[int]:
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, dict) or set(diagnostics) != {"output_text_utf8_byte_bucket_boundaries"}:
+        raise ValueError("invalid payload diagnostics configuration")
+    return _validated_output_text_byte_bucket_boundaries(
+        diagnostics["output_text_utf8_byte_bucket_boundaries"])
 
 
 def sha(raw: bytes) -> str:
@@ -134,6 +200,11 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
     if (not isinstance(config, dict) or not required <= set(config) or config.get("schema_version") != SCHEMA
             or not isinstance(config.get("revision"), str) or not config["revision"].strip()):
         raise ValueError("invalid matched evaluation configuration")
+    if "output_text_utf8_byte_bucket_boundaries" in config and config["output_text_utf8_byte_bucket_boundaries"] is None:
+        raise ValueError("invalid output_text_utf8_byte_bucket_boundaries")
+    _validated_output_text_byte_bucket_boundaries(
+        config["output_text_utf8_byte_bucket_boundaries"]
+        if "output_text_utf8_byte_bucket_boundaries" in config else None)
     for name in ("classical_report_sha256", "classical_config_sha256", "comparison_12b_report_sha256",
                  "comparison_12b_config_sha256", "service_binary_sha256", "expected_model_sha256",
                  "service_config_template_sha256",
@@ -882,6 +953,10 @@ def _make_payload(config: dict[str, Any], bound: dict[str, Any], run_id: str) ->
                           "per_request_deadline_seconds": config["per_request_deadline_seconds"],
                           "total_runtime_deadline_seconds": config["total_runtime_deadline_seconds"],
                           "max_response_bytes": config["max_response_bytes"]},
+               "diagnostics": {"output_text_utf8_byte_bucket_boundaries":
+                               _validated_output_text_byte_bucket_boundaries(
+                                   config.get("output_text_utf8_byte_bucket_boundaries")
+                                   if "output_text_utf8_byte_bucket_boundaries" in config else None)},
                "records": records}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -1076,6 +1151,7 @@ from typing import Any
 def sha(b): return hashlib.sha256(b).hexdigest()
 def verify_payload_evidence(p):
  rows=p.get('records'); b=p.get('binding')
+ _payload_output_text_byte_bucket_boundaries(p)
  if not isinstance(rows,list) or not isinstance(b,dict) or len(rows)!=b.get('rows'): raise RuntimeError('worker payload row count mismatch')
  ids=[]; masks=[]
  for row in rows:
@@ -1104,10 +1180,15 @@ def stats(xs):
 
 def _remote_worker_source() -> str:
     helpers = "\n".join(inspect.getsource(fn) for fn in
-                         (_owned_prediction, _owned_lifecycle_complete, _owned_terminal_prediction,
+                         (_validated_output_text_byte_bucket_boundaries, _payload_output_text_byte_bucket_boundaries,
+                          _new_owned_response_diagnostics,
+                          _record_owned_response_diagnostics, _owned_prediction, _owned_lifecycle_complete, _owned_terminal_prediction,
                           _deterministic_prediction, _metrics, _http_loopback,
                           _descendant_pids, _process_alive, _terminate_process_group, _loopback_port_closed))
-    return REMOTE_WORKER + "\n" + helpers + "\n" + _remote_worker_body()
+    constants = (f"DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = {DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES!r}\n"
+                 f"MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = {MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES}\n"
+                 f"MAX_OUTPUT_TEXT_BYTE_BOUNDARY = {MAX_OUTPUT_TEXT_BYTE_BOUNDARY}\n")
+    return REMOTE_WORKER + "\n" + constants + helpers + "\n" + _remote_worker_body()
 
 
 FILE_WORKER_HELPERS = r'''
@@ -1165,10 +1246,17 @@ def receive_payload(static):
 def _file_worker_source() -> str:
     """Build the isolated worker; its service preflight precedes payload access."""
     source = _remote_worker_source()
-    old_start = " p=json.load(sys.stdin); b=p['binding']; q=p['remote']; rows=p['records']; run=p['run_id']\n payload_evidence=verify_payload_evidence(p)"
+    old_start = (" p=json.load(sys.stdin); b=p['binding']; q=p['remote']; rows=p['records']; run=p['run_id']\n"
+                 " diag=p.get('diagnostics')\n"
+                 " if not isinstance(diag,dict) or set(diag)!={'output_text_utf8_byte_bucket_boundaries'}: raise RuntimeError('worker diagnostics configuration is invalid')\n"
+                 " boundaries=_validated_output_text_byte_bucket_boundaries(diag['output_text_utf8_byte_bucket_boundaries']); response_diagnostics=_new_owned_response_diagnostics(boundaries)\n"
+                 " payload_evidence=verify_payload_evidence(p)")
     new_start = (" static=_json(_read_private_file(pathlib.Path(sys.argv[1]),65536),'static configuration')\n"
                  " check_self(static)\n"
                  " p=static['plan']; b=p['binding']; q=p['remote']; rows=[]; run=static['nonce']\n"
+                 " diag=p.get('diagnostics')\n"
+                 " if not isinstance(diag,dict) or set(diag)!={'output_text_utf8_byte_bucket_boundaries'}: raise RuntimeError('worker diagnostics configuration is invalid')\n"
+                 " boundaries=_validated_output_text_byte_bucket_boundaries(diag['output_text_utf8_byte_bucket_boundaries']); response_diagnostics=_new_owned_response_diagnostics(boundaries)\n"
                  " p['outer_netns_inode']=static['outer_netns_inode']; p['run_directory']=static['run_directory']")
     old_deadline = "q['total_runtime_deadline_seconds']<len(rows)*q['per_request_deadline_seconds']+60"
     new_deadline = "q['total_runtime_deadline_seconds']<b['rows']*q['per_request_deadline_seconds']+60"
@@ -1177,6 +1265,7 @@ def _file_worker_source() -> str:
                  "  received=receive_payload(static)\n"
                  "  payload_evidence=verify_payload_evidence(received)\n"
                  "  p=received; p['outer_netns_inode']=static['outer_netns_inode']; p['run_directory']=static['run_directory']\n"
+                 "  diag=p.get('diagnostics'); boundaries=_validated_output_text_byte_bucket_boundaries(diag['output_text_utf8_byte_bucket_boundaries']); response_diagnostics=_new_owned_response_diagnostics(boundaries)\n"
                  "  b=p['binding']; q=p['remote']; rows=p['records']; started=time.monotonic()\n" + marker)
     old_entry = "if __name__=='__main__':\n try: print(json.dumps(main(),sort_keys=True,separators=(',',':'),allow_nan=False))\n except Exception: sys.exit(31)"
     new_entry = ("if __name__=='__main__':\n"
@@ -1434,6 +1523,9 @@ def route_isolated():
    elif any(x.split() and x.split()[0]=='00000000000000000000000000000000' for x in lines): raise RuntimeError('network namespace has a default IPv6 route')
 def main():
  p=json.load(sys.stdin); b=p['binding']; q=p['remote']; rows=p['records']; run=p['run_id']
+ diag=p.get('diagnostics')
+ if not isinstance(diag,dict) or set(diag)!={'output_text_utf8_byte_bucket_boundaries'}: raise RuntimeError('worker diagnostics configuration is invalid')
+ boundaries=_validated_output_text_byte_bucket_boundaries(diag['output_text_utf8_byte_bucket_boundaries']); response_diagnostics=_new_owned_response_diagnostics(boundaries)
  payload_evidence=verify_payload_evidence(p)
  netns=os.stat('/proc/self/ns/net').st_ino
  if netns==p['outer_netns_inode']: raise RuntimeError('worker did not enter a distinct network namespace')
@@ -1539,6 +1631,7 @@ def main():
      raise RuntimeError('owned service returned an unrecognized status')
     # Only a confirmed completed worker is a completed attempt. Any timeout,
     # busy state, missing child, or incomplete child aborts the remaining rows.
+    _record_owned_response_diagnostics(out.get('stopReason'),out.get('outputText'),measurement,boundaries,response_diagnostics)
     owned[ix],outcome,completed = _owned_terminal_prediction(state,out.get('output'),measurement,mapping_supported,b['target_label'],owned_statuses,owned_lifecycle_outcomes)
     if not completed:
      aborted=True; abort_reason=outcome
@@ -1564,7 +1657,7 @@ def main():
     raise RuntimeError('deterministic capability identity drift')
   except Exception:
    aborted=True; abort_reason='deterministic_capability_identity_drift_or_transport'; deterministic=[None]*len(rows); det_identity=None
-  report={'rows_attempted':rows_attempted,'rows_total':len(rows),'deterministic_requests_started':deterministic_requests_started,'owned_requests_started':owned_requests_started,'aborted':aborted,'abort_reason':abort_reason,'deterministic_rule_status_counts':det_statuses,'deterministic_cache_control_counts':det_cache_headers,'owned_response_status_counts':owned_statuses,'owned_lifecycle_outcome_counts':owned_lifecycle_outcomes,'owned_mapping_outcome_counts':mapping_outcomes,
+  report={'rows_attempted':rows_attempted,'rows_total':len(rows),'deterministic_requests_started':deterministic_requests_started,'owned_requests_started':owned_requests_started,'aborted':aborted,'abort_reason':abort_reason,'deterministic_rule_status_counts':det_statuses,'deterministic_cache_control_counts':det_cache_headers,'owned_response_status_counts':owned_statuses,'owned_lifecycle_outcome_counts':owned_lifecycle_outcomes,'owned_mapping_outcome_counts':mapping_outcomes,'owned_response_diagnostics':response_diagnostics,
    'deterministic_metrics':_metrics(targets,known,deterministic),'owned_metrics':_metrics(targets,known,owned),
    'deterministic_latency_ms':stats(det_ms),'owned_end_to_end_latency_ms':stats(owned_e2e_ms),'owned_handler_elapsed_ms':stats(owned_handler_ms),
    'owned_mapping':{'supported':mapping_supported,'status':'exact_taxonomy_not_established_by_checkpoint_framing' if not mapping_supported else 'exact_label_contract_seen'},
@@ -1822,6 +1915,7 @@ def _unknown_execution(payload: dict[str, Any], reason: str, transfer_state: str
             'abort_reason':reason,'supervisor_failure':True,'cleanup_verified':False,
             'payload_transfer_state':transfer_state,'owned_metrics':metrics,'deterministic_metrics':metrics,
             'owned_mapping':{'supported':False,'status':'unknown_after_isolation_or_transport_failure'},
+            'owned_response_diagnostics':None,
             'worker_payload_sha256':None,'supervisor_payload_sha256':None,
             'remote_workspace_retained':None,'remote_workspace_status':'unknown'}
 
@@ -2041,7 +2135,8 @@ def _file_evaluate(config: dict[str, Any], payload: bytes, run_id: str,
         if not isinstance(result, dict):
             raise TimeoutError("file worker result deadline expired")
         _validate_payload_identity(payload, result.get("worker_payload_sha256"))
-        _validate_worker_aggregate(result, value["binding"]["rows"])
+        _validate_worker_aggregate(result, value["binding"]["rows"],
+                                   _payload_output_text_byte_bucket_boundaries(value))
     except Exception as error:
         kind = ("timeout" if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) else
                 "invalid" if isinstance(error, ValueError) else
@@ -2122,7 +2217,12 @@ def _empty_probe_payload(config: dict[str, Any], classical_config: dict[str, Any
                            "target_mask_sha256": empty_digest, "target_label": labels[0], "rows": 0,
                            "assessment_sha256": _canonical_digest(assessment), "rules_sha256": _canonical_digest(rules),
                            "rule_ids": rule_ids, "fallback_id": fallback},
-               "remote": {field: config[field] for field in remote_fields}, "records": []}
+               "remote": {field: config[field] for field in remote_fields},
+               "diagnostics": {"output_text_utf8_byte_bucket_boundaries":
+                               _validated_output_text_byte_bucket_boundaries(
+                                   config.get("output_text_utf8_byte_bucket_boundaries")
+                                   if "output_text_utf8_byte_bucket_boundaries" in config else None)},
+               "records": []}
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
@@ -2155,7 +2255,8 @@ def run_file_probe(config_path: Path, output: Path) -> dict[str, Any]:
     return {"passed": passed, "report_path": str(target), "report_sha256": sha(encoded)}
 
 
-def _validate_probe(probe_raw: bytes, config_digest: str) -> dict[str, Any]:
+def _validate_probe(probe_raw: bytes, config_digest: str,
+                    output_text_byte_bucket_boundaries: list[int] | None = None) -> dict[str, Any]:
     """Bind a successful no-input run to the current file protocol and config."""
     probe = _json(probe_raw, "probe report")
     worker_sha = sha(_file_worker_source().encode())
@@ -2173,6 +2274,7 @@ def _validate_probe(probe_raw: bytes, config_digest: str) -> dict[str, Any]:
             or result.get("coexisting_service_snapshots_match") is not True
             or result.get("remote_workspace_retained") is not False):
         raise ValueError("no-input probe result does not establish the required lifecycle")
+    _validate_worker_aggregate(result, 0, output_text_byte_bucket_boundaries)
     return {"probe_report_sha256": sha(probe_raw), "worker_code_sha256": worker_sha,
             "control_code_sha256": control_sha}
 
@@ -2243,7 +2345,9 @@ def _ssh_worker(config: dict[str, Any], payload: bytes, run_id: str) -> dict[str
         if events.get(timeout=5) is not None: raise RuntimeError("unexpected extra remote output")
         if proc.returncode!=0: raise RuntimeError("isolated scope launcher returned failure")
         value["scope_preflight"]={k:preflight[k] for k in ("username","uid","gid","netns_inode","outer_netns_inode","scope_unit","capabilities_empty","no_new_privs","owner_groups_verified","scope_cgroup_observed")}
-        return _validate_worker_aggregate(value,_json(payload,"worker payload")["binding"]["rows"])
+        worker_payload = _json(payload, "worker payload")
+        return _validate_worker_aggregate(value, worker_payload["binding"]["rows"],
+                                          _payload_output_text_byte_bucket_boundaries(worker_payload))
     except Exception as error:
         try: proc.stdin.close()
         except Exception: pass
@@ -2274,7 +2378,37 @@ def _ssh_worker(config: dict[str, Any], payload: bytes, run_id: str) -> dict[str
         return _validate_worker_aggregate(value,value["rows_total"])
 
 
-def _validate_worker_aggregate(value: Any, total: int) -> dict[str, Any]:
+def _validate_owned_response_diagnostics(value: Any, total: int, boundaries: list[int],
+                                         owned_requests_started: Any,
+                                         expected_accepted_responses: int) -> None:
+    stop_keys = {"stop_sequence", "byte_limit", "context_limit", "other", "unavailable"}
+    shape_keys = {"valid_json_object", "valid_json_non_object", "invalid_json", "unavailable_or_invalid_type"}
+    expected_keys = {"accepted_responses", "stop_reason_counts", "output_text_shape_counts",
+                     "output_text_utf8_byte_bucket_counts", "output_text_utf8_bytes_unavailable_or_invalid"}
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("remote response diagnostics schema is invalid")
+    accepted = value["accepted_responses"]
+    if (type(accepted) is not int or not 0 <= accepted <= total
+            or accepted != expected_accepted_responses
+            or type(owned_requests_started) is not int or not accepted <= owned_requests_started <= total):
+        raise ValueError("remote response diagnostics count is invalid")
+    for field, keys in (("stop_reason_counts", stop_keys), ("output_text_shape_counts", shape_keys)):
+        counts = value[field]
+        if (not isinstance(counts, dict) or set(counts) != keys
+                or any(type(count) is not int or not 0 <= count <= total for count in counts.values())
+                or sum(counts.values()) != accepted):
+            raise ValueError("remote response diagnostics categories are invalid")
+    byte_buckets = value["output_text_utf8_byte_bucket_counts"]
+    unavailable_bytes = value["output_text_utf8_bytes_unavailable_or_invalid"]
+    if (not isinstance(byte_buckets, list) or len(byte_buckets) != len(boundaries) + 1
+            or any(type(count) is not int or not 0 <= count <= total for count in byte_buckets)
+            or type(unavailable_bytes) is not int or not 0 <= unavailable_bytes <= total
+            or sum(byte_buckets) + unavailable_bytes != accepted):
+        raise ValueError("remote byte diagnostics buckets are invalid")
+
+
+def _validate_worker_aggregate(value: Any, total: int,
+                               output_text_byte_bucket_boundaries: list[int] | None = None) -> dict[str, Any]:
     attempted = value.get("rows_attempted") if isinstance(value, dict) else None
     known_attempts = type(attempted) is int and 0 <= attempted <= total
     unknown_after_supervisor_failure = (isinstance(value, dict) and attempted is None
@@ -2287,11 +2421,36 @@ def _validate_worker_aggregate(value: Any, total: int) -> dict[str, Any]:
             or (known_attempts and attempted != total and value["aborted"] is not True)
             or (unknown_after_supervisor_failure and value["aborted"] is not True)):
         raise ValueError("remote aggregate does not safely account for the bound validation rows")
+    boundaries = _validated_output_text_byte_bucket_boundaries(output_text_byte_bucket_boundaries)
+    if value.get("supervisor_failure") is True:
+        # A supervisor or transport failure makes any worker-returned diagnostics untrusted.
+        value["owned_response_diagnostics"] = None
+    else:
+        diag = value.get("owned_response_diagnostics")
+        if type(value.get("owned_requests_started")) is not int or value["owned_requests_started"] > attempted:
+            raise ValueError("remote owned request accounting is invalid")
+        status_counts = value.get("owned_response_status_counts")
+        allowed_statuses = {"ok", "truncated", "context_limit", "invalid_input", "malformed_output",
+                            "incomplete_output", "timeout", "inference_error", "unavailable", "busy",
+                            "no_terminal_response"}
+        if (not isinstance(status_counts, dict) or not set(status_counts) <= allowed_statuses
+                or any(type(count) is not int or not 0 <= count <= total for count in status_counts.values())
+                or sum(status_counts.values()) != value["owned_requests_started"]):
+            raise ValueError("remote owned response status accounting is invalid")
+        accepted_responses = sum(count for status, count in status_counts.items()
+                                 if status != "no_terminal_response")
+        _validate_owned_response_diagnostics(diag, total, boundaries,
+                                             value.get("owned_requests_started"), accepted_responses)
     return value
 
 
 def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], result: dict[str, Any],
             payload: bytes, code_sha256: str, output_dir: Path) -> dict[str, Any]:
+    result = _validate_worker_aggregate(
+        result, len(bound["validation_rows"]),
+        _validated_output_text_byte_bucket_boundaries(
+            config.get("output_text_utf8_byte_bucket_boundaries")
+            if "output_text_utf8_byte_bucket_boundaries" in config else None))
     baseline = bound["classical_report"]
     report12 = bound["comparison_12b_report"]
     selected = sorted(bound["classical_config"]["selected_labels"])
@@ -2322,6 +2481,12 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
         "owned": {"mapping": result.get("owned_mapping"), "status_counts": result.get("owned_response_status_counts"),
                   "lifecycle_outcome_counts": result.get("owned_lifecycle_outcome_counts"),
                   "mapping_outcome_counts": result.get("owned_mapping_outcome_counts"),
+                  "response_diagnostics": ({**result["owned_response_diagnostics"],
+                                            "output_text_utf8_byte_bucket_boundaries":
+                                                _validated_output_text_byte_bucket_boundaries(
+                                                    config.get("output_text_utf8_byte_bucket_boundaries")
+                                                    if "output_text_utf8_byte_bucket_boundaries" in config else None)}
+                                           if result.get("owned_response_diagnostics") is not None else None),
                   "metrics": result.get("owned_metrics"), "engine_identity": result.get("owned_engine_identity"),
                   "configured_limits": result.get("owned_status_limits"),
                   "latency_ms": {"end_to_end": result.get("owned_end_to_end_latency_ms"),
@@ -2412,7 +2577,11 @@ def run(config_path: Path, output: Path, probe_path: Path | None = None) -> dict
     config, config_digest = load_config(config_path)
     probe = None
     if probe_path is not None:
-        probe = _validate_probe(_read_bounded(probe_path, config["report_max_bytes"], "probe report"), config_digest)
+        probe = _validate_probe(
+            _read_bounded(probe_path, config["report_max_bytes"], "probe report"), config_digest,
+            _validated_output_text_byte_bucket_boundaries(
+                config.get("output_text_utf8_byte_bucket_boundaries")
+                if "output_text_utf8_byte_bucket_boundaries" in config else None))
     CURRENT_STAGE = "baseline_binding"
     bound = _bind_inputs(config)
     run_id = uuid.uuid4().hex

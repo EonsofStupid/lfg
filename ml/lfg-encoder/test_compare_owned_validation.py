@@ -159,6 +159,364 @@ class OwnedMappingTests(unittest.TestCase):
         self.assertEqual((fp_and_fn["tp"], fp_and_fn["fp"], fp_and_fn["fn"], fp_and_fn["f1"]), (0, 1, 1, 0.0))
 
 
+class OwnedResponseDiagnosticsTests(unittest.TestCase):
+    def test_production_and_empty_payloads_bind_effective_diagnostic_boundaries(self):
+        class Matrix:
+            def __init__(self, value):
+                self.value = value
+            def tolist(self):
+                return self.value
+
+        config = {
+            "classical_report_sha256": "a" * 64, "classical_config_sha256": "1" * 64,
+            "comparison_12b_report_sha256": "b" * 64, "comparison_12b_config_sha256": "2" * 64,
+            "private_source_root": "/private/root", "service_binary": "/private/root/server",
+            "service_binary_sha256": "c" * 64, "service_config_template": "/private/root/service.json",
+            "service_config_template_sha256": "d" * 64, "metadata_directory": "/private/root/metadata",
+            "expected_model_sha256": "e" * 64, "expected_framing_sha256": "f" * 64,
+            "expected_cached_manifest_sha256": "1" * 64, "expected_runtime_config_sha256": "2" * 64,
+            "expected_training_manifest_sha256": "3" * 64, "coexisting_service_unit": "lfg.service",
+            "resource_cpu_quota_percent": 100, "resource_memory_max_bytes": 1000,
+            "min_memory_available_bytes": 1, "min_disk_free_bytes": 1,
+            "per_request_deadline_seconds": 10, "total_runtime_deadline_seconds": 100,
+            "max_response_bytes": 10000, "max_payload_bytes": 100000,
+            "output_text_utf8_byte_bucket_boundaries": [32, 128],
+        }
+        bound = {
+            "validation_rows": [{"id": "fixture-row", "text": "fixture input"}],
+            "y_validation": Matrix([[1]]), "target_known": Matrix([[True]]),
+            "target_label": "build.software", "classical_config_sha256": "4" * 64,
+            "comparison_12b_config_sha256": "5" * 64, "validation_id_set_sha256": "6" * 64,
+            "target_mask_sha256": "7" * 64, "classical_report": {"data": {"validation_sha256": "8" * 64}},
+            "deterministic_assessment_sha256": "9" * 64, "deterministic_rule_ids": ["build.software"],
+            "deterministic_rules_sha256": "a" * 64, "deterministic_fallback_id": "respond.general",
+            "classical_config": {"selected_labels": ["build.software"], "max_text_bytes": 128},
+        }
+        production = json.loads(compare._make_payload(config, bound, "a" * 32))
+        empty = json.loads(compare._empty_probe_payload(
+            config, {"selected_labels": ["build.software"], "target_field": "intents"}, "b" * 32))
+        expected = [32, 128]
+        self.assertEqual(production["diagnostics"]["output_text_utf8_byte_bucket_boundaries"], expected)
+        self.assertEqual(empty["diagnostics"]["output_text_utf8_byte_bucket_boundaries"], expected)
+        self.assertEqual(compare._payload_output_text_byte_bucket_boundaries(production), expected)
+        self.assertEqual(compare._payload_output_text_byte_bucket_boundaries(empty), expected)
+        self.assertEqual(len(production["records"]), 1)
+        self.assertEqual(empty["records"], [])
+
+    def test_generated_worker_counts_only_allowlisted_diagnostics_and_never_emits_sentinels(self):
+        namespace = {"__name__": "generated_worker_test"}
+        exec(compare._remote_worker_source(), namespace)
+        boundaries = [2, 4, 8]
+        counts = namespace["_new_owned_response_diagnostics"](boundaries)
+        responses = [
+            ("stop_sequence", '{"intent":"private-sentinel-field"}', {"outputTextUtf8Bytes": 3}),
+            ("byte_limit", "[]", {"outputTextUtf8Bytes": 4}),
+            ("context_limit", "invalid-private-sentinel", {"outputTextUtf8Bytes": 8}),
+            ("unrecognized-private-stop", None, {}),
+            (None, 4, {"outputTextUtf8Bytes": -1}),
+            (17, "é", {"outputTextUtf8Bytes": 2}),
+        ]
+        for stop_reason, output_text, measurement in responses:
+            namespace["_record_owned_response_diagnostics"](
+                stop_reason, output_text, measurement, boundaries, counts)
+        self.assertEqual(counts["accepted_responses"], 6)
+        self.assertEqual(counts["stop_reason_counts"], {
+            "stop_sequence": 1, "byte_limit": 1, "context_limit": 1, "other": 1, "unavailable": 2})
+        self.assertEqual(counts["output_text_shape_counts"], {
+            "valid_json_object": 1, "valid_json_non_object": 1, "invalid_json": 2,
+            "unavailable_or_invalid_type": 2})
+        self.assertEqual(counts["output_text_utf8_byte_bucket_counts"], [0, 2, 1, 1])
+        self.assertEqual(counts["output_text_utf8_bytes_unavailable_or_invalid"], 2)
+        serialized = json.dumps(counts, sort_keys=True)
+        for sentinel in ("private-sentinel-field", "invalid-private-sentinel", "unrecognized-private-stop", "intent"):
+            self.assertNotIn(sentinel, serialized)
+        compare._validate_owned_response_diagnostics(counts, 6, boundaries, 6, 6)
+
+    def test_bucket_boundaries_are_bounded_strictly_increasing_integers(self):
+        self.assertEqual(compare._validated_output_text_byte_bucket_boundaries(None), [256, 1024, 4096, 16384])
+        self.assertEqual(compare._validated_output_text_byte_bucket_boundaries([4, 8]), [4, 8])
+        for invalid in ([], [0], [4, 4], [8, 4], [True], [-1], [1 << 63], [1] * 17, "4,8"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                compare._validated_output_text_byte_bucket_boundaries(invalid)
+
+    def test_untrusted_or_malformed_worker_diagnostics_are_unknown_or_rejected(self):
+        failed = {"rows_total": 2, "rows_attempted": None, "aborted": True,
+                  "supervisor_failure": True, "abort_reason": "supervisor_timeout",
+                  "owned_response_diagnostics": {"private-sentinel": 99}}
+        self.assertIs(compare._validate_worker_aggregate(failed, 2), failed)
+        self.assertIsNone(failed["owned_response_diagnostics"])
+
+        valid = compare._new_owned_response_diagnostics([4])
+        valid["accepted_responses"] = 1
+        valid["stop_reason_counts"]["other"] = 1
+        valid["output_text_shape_counts"]["invalid_json"] = 1
+        valid["output_text_utf8_bytes_unavailable_or_invalid"] = 1
+        aggregate = {"rows_total": 2, "rows_attempted": 1, "owned_requests_started": 1,
+                     "owned_response_status_counts": {"ok": 1},
+                     "owned_response_diagnostics": valid, "aborted": True}
+        self.assertIs(compare._validate_worker_aggregate(aggregate, 2, [4]), aggregate)
+        for mutate in (
+            lambda d: d["stop_reason_counts"].update({"private-sentinel": 1}),
+            lambda d: d["output_text_shape_counts"].update({"invalid_json": True}),
+            lambda d: d.update({"accepted_responses": -1}),
+            lambda d: d["output_text_utf8_byte_bucket_counts"].__setitem__(0, 2),
+        ):
+            bad = json.loads(json.dumps(aggregate))
+            mutate(bad["owned_response_diagnostics"])
+            with self.assertRaises(ValueError):
+                compare._validate_worker_aggregate(bad, 2, [4])
+
+    def test_lifecycle_incomplete_accepted_response_is_still_diagnosed_once(self):
+        namespace = {"__name__": "generated_worker_test"}
+        exec(compare._remote_worker_source(), namespace)
+        boundaries = [4]
+        counts = namespace["_new_owned_response_diagnostics"](boundaries)
+        measurement = {"schemaVersion": "lfg.owned-run-measurement.v1", "status": "ok",
+                       "workerStarted": True, "workerCompletedSuccessfully": False,
+                       "outputTextUtf8Bytes": 7}
+        namespace["_record_owned_response_diagnostics"](
+            "byte_limit", '{"field":"secret-value"}', measurement, boundaries, counts)
+        prediction = namespace["_owned_terminal_prediction"](
+            "ok", {"intent": "secret-value"}, measurement, False, "build.software")
+        self.assertEqual(prediction, (None, "owned_worker_incomplete", False))
+        self.assertEqual(counts["accepted_responses"], 1)
+        self.assertEqual(counts["stop_reason_counts"]["byte_limit"], 1)
+        self.assertEqual(counts["output_text_shape_counts"]["valid_json_object"], 1)
+        self.assertEqual(counts["output_text_utf8_byte_bucket_counts"], [0, 1])
+        self.assertNotIn("secret-value", json.dumps(counts))
+
+    def test_report_exposes_aggregates_and_public_boundaries_only(self):
+        boundaries = [4, 8]
+        diagnostics = compare._new_owned_response_diagnostics(boundaries)
+        diagnostics["accepted_responses"] = 1
+        diagnostics["stop_reason_counts"]["stop_sequence"] = 1
+        diagnostics["output_text_shape_counts"]["valid_json_object"] = 1
+        diagnostics["output_text_utf8_byte_bucket_counts"][1] = 1
+        result = {"rows_total": 1, "rows_attempted": 1, "owned_requests_started": 1,
+                  "owned_response_status_counts": {"incomplete_output": 1},
+                  "owned_response_diagnostics": diagnostics, "aborted": False,
+                  "owned_metrics": {"coverage": None}, "deterministic_metrics": {},
+                  "owned_mapping": {"supported": False}, "owned_mapping_outcome_counts": {},
+                  "owned_lifecycle_outcome_counts": {"owned_worker_incomplete": 1},
+                  "deterministic_rule_status_counts": {}, "owned_engine_identity": {},
+                  "owned_status_limits": {}}
+        bound = {
+            "validation_rows": [{}], "classical_report": {
+                "task": {"validation_support": {}}, "algorithms": {},
+                "data": {"plan_sha256": "a" * 64, "review_ledger_sha256": "b" * 64}},
+            "comparison_12b_report": {"metrics": {}},
+            "comparison_12b_config": {"remote_host": "baseline-host", "remote_user": "baseline-user"},
+            "classical_config": {"target_field": "intents", "selected_labels": ["build.software"]},
+            "corpus": {"taxonomy_sha256": "c" * 64, "manifest_sha256": "d" * 64,
+                       "policy_sha256": "e" * 64, "screen_code_sha256": "f" * 64,
+                       "train_sha256": "1" * 64, "validation_sha256": "2" * 64},
+            "validation_id_set_sha256": "3" * 64, "target_mask_sha256": "4" * 64,
+            "classical_config_sha256": "5" * 64, "comparison_12b_config_sha256": "6" * 64,
+            "review_provenance": {}, "deterministic_files_sha256": {},
+            "deterministic_assessment_sha256": "7" * 64, "deterministic_rules_sha256": "8" * 64,
+        }
+        config = {"output_text_utf8_byte_bucket_boundaries": boundaries,
+                  "classical_report_sha256": "9" * 64, "classical_config_sha256": "a" * 64,
+                  "comparison_12b_report_sha256": "b" * 64, "comparison_12b_config_sha256": "c" * 64,
+                  "remote_host": "fixture", "remote_user": "worker",
+                  "service_config_template_sha256": "d" * 64,
+                  "per_request_deadline_seconds": 10}
+        report = compare._report(config, "e" * 64, bound, result, b"{}", "f" * 64, Path("unused"))
+        self.assertEqual(report["owned"]["response_diagnostics"]["accepted_responses"], 1)
+        self.assertEqual(report["owned"]["response_diagnostics"]["output_text_utf8_byte_bucket_boundaries"], boundaries)
+        self.assertEqual(report["owned"]["status_counts"], {"incomplete_output": 1})
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn("secret-value", serialized)
+        self.assertNotIn("outputText", serialized)
+
+    def test_generated_worker_main_counts_multiple_rows_and_terminal_failure_safely(self):
+        import io
+        from types import SimpleNamespace
+
+        def run_worker(owned_responses):
+            namespace = {"__name__": "generated_worker_test"}
+            exec(compare._remote_worker_source(), namespace)
+            boundaries = [8, 32]
+            expected_hashes = {"model": "a" * 64, "framing": "b" * 64,
+                               "cached": "c" * 64, "runtime": "d" * 64, "training": "e" * 64}
+            rows = []
+            for index, text in enumerate(("fixture row one", "fixture row two")):
+                row_id = str(index + 1)
+                rows.append({"record_id_sha256": compare.sha(row_id.encode()), "text": text,
+                             "text_sha256": compare.sha(text.encode()), "target_known": True,
+                             "target_value": index % 2})
+            ids_digest = compare.sha(json.dumps(sorted(row["record_id_sha256"] for row in rows),
+                                                  separators=(",", ":")).encode())
+            masks = [[row["record_id_sha256"], [row["target_known"]]] for row in rows]
+            mask_digest = compare.sha(json.dumps(masks, separators=(",", ":")).encode())
+            payload = {"schema_version": "lfg.owned-matched-worker-input.v1", "run_id": "f" * 32,
+                       "binding": {"rows": 2, "validation_record_id_set_sha256": ids_digest,
+                                   "target_mask_sha256": mask_digest, "target_label": "build.software",
+                                   "rule_ids": ["build.software"], "fallback_id": "respond.general",
+                                   "assessment_sha256": "1" * 64, "rules_sha256": "2" * 64},
+                       "remote": {}, "diagnostics": {"output_text_utf8_byte_bucket_boundaries": boundaries},
+                       "records": rows, "outer_netns_inode": 11}
+
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "private"
+                root.mkdir(mode=0o700)
+                metadata = root / "metadata"
+                metadata.mkdir(mode=0o700)
+                binary = root / "server"
+                binary.write_bytes(b"fixture binary")
+                binary.chmod(0o700)
+                framing = metadata / "framing.json"
+                runtime = metadata / "runtime.json"
+                training = metadata / "training.json"
+                for path, content in ((framing, b'{"system":"fixture"}'),
+                                      (runtime, b'{"fixture":true}'),
+                                      (training, b'{"fixture":true}')):
+                    path.write_bytes(content)
+                    path.chmod(0o600)
+                service = {"schemaVersion": "lfg.owned-assessment-service.v1", "enabled": True,
+                           "backend": "cached_onnx", "artifactMode": "embedded",
+                           "expectedModelSha256": expected_hashes["model"],
+                           "expectedFramingSha256": expected_hashes["framing"],
+                           "expectedCachedManifestSha256": expected_hashes["cached"],
+                           "maxConcurrent": 1, "workerThreads": 1, "timeoutMs": 500,
+                           "maxRequestBytes": 1000, "maxContextBytes": 2000, "maxGeneratedBytes": 3000,
+                           "maxCachedGraphBytes": 4000, "maxCacheStateBytesPerRequest": 5000,
+                           "requiredOutputFields": [{"name": "intent", "valueType": "string", "nonEmpty": True}]}
+                template = root / "service.json"
+                template.write_text(json.dumps(service), encoding="utf-8")
+                template.chmod(0o600)
+                run_directory = root / "run"
+                run_directory.mkdir(mode=0o700)
+                expected_hashes.update({"model": compare.sha(binary.read_bytes()),
+                                        "framing": compare.sha(framing.read_bytes()),
+                                        "runtime": compare.sha(runtime.read_bytes()),
+                                        "training": compare.sha(training.read_bytes())})
+                service.update({"expectedModelSha256": expected_hashes["model"],
+                                "expectedFramingSha256": expected_hashes["framing"],
+                                "expectedCachedManifestSha256": expected_hashes["cached"]})
+                template.write_text(json.dumps(service), encoding="utf-8")
+                template.chmod(0o600)
+                remote = {"private_source_root": str(root), "service_binary": str(binary),
+                          "service_binary_sha256": expected_hashes["model"],
+                          "service_config_template": str(template),
+                          "service_config_template_sha256": compare.sha(template.read_bytes()),
+                          "metadata_directory": str(metadata), "expected_model_sha256": expected_hashes["model"],
+                          "expected_framing_sha256": expected_hashes["framing"],
+                          "expected_cached_manifest_sha256": expected_hashes["cached"],
+                          "expected_runtime_config_sha256": expected_hashes["runtime"],
+                          "expected_training_manifest_sha256": expected_hashes["training"],
+                          "per_request_deadline_seconds": 10, "total_runtime_deadline_seconds": 100,
+                          "max_response_bytes": 10000}
+                payload["remote"] = remote
+                payload["run_directory"] = str(run_directory)
+                engine = {"id": "fixture-engine", "modelIdentityKind": "source_weights_sha256",
+                          "modelSha256": expected_hashes["model"],
+                          "sourceWeightsSha256": expected_hashes["model"],
+                          "cachedManifestSha256": expected_hashes["cached"],
+                          "framingSha256": expected_hashes["framing"],
+                          "runtimeConfigSha256": expected_hashes["runtime"],
+                          "trainingManifestSha256": expected_hashes["training"]}
+                limits = {"backend": "cached_onnx", "maxRequestBytes": service["maxRequestBytes"],
+                          "maxContextBytes": service["maxContextBytes"], "maxGeneratedBytes": service["maxGeneratedBytes"],
+                          "maxCachedGraphBytes": service["maxCachedGraphBytes"],
+                          "maxCacheStateBytesPerRequest": service["maxCacheStateBytesPerRequest"],
+                          "timeoutMs": service["timeoutMs"], "maxConcurrent": 1, "workerThreads": 1}
+                caps = {"assessmentSha256": payload["binding"]["assessment_sha256"],
+                        "rulesSha256": payload["binding"]["rules_sha256"],
+                        "assessmentRevision": "fixture", "rulesRevision": "fixture"}
+
+                def response(status="ok", stop_reason="stop_sequence", output_text='{"intent":"sentinel-output"}',
+                             *, completed=True, byte_count=24):
+                    return {"schemaVersion": "lfg.owned-assessment.v1", "status": status,
+                            "engine": engine, "stopReason": stop_reason, "outputText": output_text,
+                            "output": {"intent": "sentinel-output"},
+                            "measurement": {"schemaVersion": "lfg.owned-run-measurement.v1",
+                                            "status": status, "workerStarted": True,
+                                            "workerCompletedSuccessfully": completed,
+                                            "outputTextUtf8Bytes": byte_count}}
+
+                response_queue = list(owned_responses(response))
+                def http(_port, path, _method="GET", _body=None, token=None, **_kwargs):
+                    headers = {"cache-control": "no-store"}
+                    if path.endswith("/api/lfg/assess/owned/status"):
+                        if token is None:
+                            return 401, headers, b"{}"
+                        return 200, headers, json.dumps({"status": "ready", "enabled": True,
+                                                        "engine": engine, "limits": limits}).encode()
+                    if path == "/api/lfg/observations/capabilities":
+                        return 200, headers, json.dumps(caps).encode()
+                    if path == "/api/lfg/assess":
+                        return 200, headers, b"{}"
+                    if path == "/api/lfg/assess/owned":
+                        next_response = response_queue.pop(0)
+                        if isinstance(next_response, BaseException):
+                            raise next_response
+                        return 200, headers, json.dumps(next_response).encode()
+                    raise AssertionError(path)
+
+                class Child:
+                    def poll(self):
+                        return None
+
+                real_stat = namespace["os"].stat
+                def stat(path, *args, **kwargs):
+                    if path == "/proc/self/ns/net":
+                        return SimpleNamespace(st_ino=22)
+                    return real_stat(path, *args, **kwargs)
+                real_path_stat = Path.stat
+                def secure_path_stat(path, *args, **kwargs):
+                    result = real_path_stat(path, *args, **kwargs)
+                    values = list(result)
+                    values[0] = result.st_mode & ~0o077
+                    values[4] = 1000
+                    return os.stat_result(values)
+
+                with patch.object(namespace["sys"], "stdin", io.StringIO(json.dumps(payload))), \
+                        patch.object(namespace["os"], "stat", side_effect=stat), \
+                        patch.object(namespace["os"], "geteuid", return_value=1000, create=True), \
+                        patch.object(namespace["pathlib"].Path, "stat", new=secure_path_stat), \
+                        patch.object(namespace["subprocess"], "Popen", return_value=Child()), \
+                        patch.dict(namespace, {"_http_loopback": http,
+                                               "_deterministic_prediction": lambda *_args: (None, "unknown", None),
+                                               "route_isolated": lambda: None,
+                                               "_terminate_process_group": lambda _child: {"verified": True, "exit_code": 0},
+                                               "_loopback_port_closed": lambda _port: True,
+                                               "resource_sample": lambda: {"cgroup": None}}):
+                    return namespace["main"]()
+
+        def response_factory(response):
+            first = response()
+            incomplete = response(stop_reason="context_limit", completed=False, byte_count=40)
+            return [first, incomplete]
+
+        lifecycle = run_worker(response_factory)
+        self.assertEqual(lifecycle["owned_response_diagnostics"]["accepted_responses"], 2)
+        self.assertEqual(lifecycle["owned_response_status_counts"], {"ok": 2})
+        self.assertEqual(lifecycle["owned_lifecycle_outcome_counts"], {"completed": 1, "owned_worker_incomplete": 1})
+        self.assertEqual(lifecycle["owned_response_diagnostics"]["stop_reason_counts"]["context_limit"], 1)
+        self.assertEqual(sum(lifecycle["owned_response_diagnostics"]["stop_reason_counts"].values()), 2)
+        self.assertEqual(sum(lifecycle["owned_response_diagnostics"]["output_text_shape_counts"].values()), 2)
+        self.assertEqual(sum(lifecycle["owned_response_diagnostics"]["output_text_utf8_byte_bucket_counts"])
+                         + lifecycle["owned_response_diagnostics"]["output_text_utf8_bytes_unavailable_or_invalid"], 2)
+        self.assertEqual(lifecycle["owned_metrics"]["coverage"], 0.0)
+        self.assertTrue(lifecycle["aborted"])
+        self.assertNotIn("sentinel-output", json.dumps(lifecycle))
+
+        def no_terminal_factory(response):
+            return [response(), TimeoutError("private-sentinel-exception")]
+
+        terminal = run_worker(no_terminal_factory)
+        self.assertEqual(terminal["owned_response_diagnostics"]["accepted_responses"], 1)
+        self.assertEqual(terminal["owned_response_status_counts"], {"ok": 1, "no_terminal_response": 1})
+        self.assertEqual(terminal["owned_response_diagnostics"]["stop_reason_counts"]["stop_sequence"], 1)
+        self.assertEqual(sum(terminal["owned_response_diagnostics"]["output_text_shape_counts"].values()), 1)
+        self.assertEqual(sum(terminal["owned_response_diagnostics"]["output_text_utf8_byte_bucket_counts"])
+                         + terminal["owned_response_diagnostics"]["output_text_utf8_bytes_unavailable_or_invalid"], 1)
+        self.assertTrue(terminal["aborted"])
+        self.assertNotIn("private-sentinel-exception", json.dumps(terminal))
+        self.assertNotIn("sentinel-output", json.dumps(terminal))
+
+
 class BoundaryTests(unittest.TestCase):
     def test_unloaded_unit_cleanup_requires_prior_observation_and_empty_namespace(self):
         missing = {"LoadState": "not-found"}
@@ -250,6 +608,8 @@ main()
         probe = json.loads(raw)
         self.assertEqual(probe["records"], [])
         self.assertEqual(probe["binding"]["rows"], 0)
+        self.assertEqual(probe["diagnostics"]["output_text_utf8_byte_bucket_boundaries"],
+                         list(compare.DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES))
         self.assertNotIn('"text"', raw.decode())
 
     def test_current_empty_probe_and_exact_code_digests_are_required(self):
@@ -258,7 +618,10 @@ main()
         control_sha = compare.sha(compare._file_control_source().encode())
         result = {"rows_total": 0, "rows_attempted": 0, "deterministic_requests_started": 0,
                   "owned_requests_started": 0, "aborted": False, "cleanup_verified": True,
-                  "coexisting_service_snapshots_match": True, "remote_workspace_retained": False}
+                  "coexisting_service_snapshots_match": True, "remote_workspace_retained": False,
+                  "owned_response_status_counts": {},
+                  "owned_response_diagnostics": compare._new_owned_response_diagnostics(
+                      list(compare.DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES))}
         probe = {"schema_version": "lfg.owned-file-probe.v1", "config_sha256": config_digest,
                  "adapter_sha256": compare.sha(Path(compare.__file__).read_bytes()),
                  "worker_code_sha256": worker_sha, "control_code_sha256": control_sha,
@@ -277,7 +640,10 @@ main()
         nonce = "0123456789abcdef0123456789abcdef"
         unit = "lfg-owned-matched-" + nonce[:18] + ".service"
         cg = "/user.slice/user-1000.slice/" + unit
-        payload = json.dumps({"run_id": nonce, "binding": {"rows": 0}, "remote": {}, "records": []},
+        boundaries = list(compare.DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES)
+        payload = json.dumps({"run_id": nonce, "binding": {"rows": 0}, "remote": {},
+                              "diagnostics": {"output_text_utf8_byte_bucket_boundaries": boundaries},
+                              "records": []},
                              sort_keys=True, separators=(",", ":")).encode()
         config = {"private_source_root": "/home/hades/private", "remote_python_path": "/usr/bin/python3",
                   "systemd_run_path": "/usr/bin/systemd-run", "remote_user": "hades", "remote_host": "example",
@@ -308,6 +674,9 @@ main()
                 elif action == "promote": reply = {"promoted": True}
                 elif action == "result": reply = {"ready": True, "result": {
                     "rows_total": 0, "rows_attempted": 0, "aborted": False,
+                    "owned_requests_started": 0,
+                    "owned_response_status_counts": {},
+                    "owned_response_diagnostics": compare._new_owned_response_diagnostics(boundaries),
                     "worker_payload_sha256": compare.sha(payload), "cleanup_verified": True}}
                 elif action == "stop": reply = {"verified": scenario != "preflight_exit",
                                                  "coexisting_service_snapshots_match": True}
@@ -575,7 +944,8 @@ main()
         mask_sha = compare.sha(json.dumps(mask, separators=(",", ":")).encode())
         payload = {"schema_version": "fixture", "run_id": "f" * 32,
                    "binding": {"rows": 2, "validation_record_id_set_sha256": id_set_sha,
-                               "target_mask_sha256": mask_sha}, "records": rows,
+                               "target_mask_sha256": mask_sha},
+                   "diagnostics": {"output_text_utf8_byte_bucket_boundaries": [8, 16]}, "records": rows,
                    "outer_netns_inode": 123, "run_directory": "/private/run"}
         evidence = namespace["verify_payload_evidence"](payload)
         original = {key: value for key, value in payload.items()
@@ -599,9 +969,17 @@ main()
         self.assertEqual(lifecycle_counts, {"unknown_lifecycle_measurement": 1})
 
     def test_partial_remote_aggregate_requires_explicit_aborted_count(self):
-        full = {"rows_total": 11, "rows_attempted": 11, "aborted": False}
-        partial = {"rows_total": 11, "rows_attempted": 4, "aborted": True}
-        full_but_aborted = {"rows_total": 11, "rows_attempted": 11, "aborted": True}
+        empty_diagnostics = compare._new_owned_response_diagnostics(
+            list(compare.DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES))
+        full = {"rows_total": 11, "rows_attempted": 11, "owned_requests_started": 0,
+                "owned_response_status_counts": {}, "owned_response_diagnostics": empty_diagnostics,
+                "aborted": False}
+        partial = {"rows_total": 11, "rows_attempted": 4, "owned_requests_started": 0,
+                   "owned_response_status_counts": {}, "owned_response_diagnostics": empty_diagnostics,
+                   "aborted": True}
+        full_but_aborted = {"rows_total": 11, "rows_attempted": 11, "owned_requests_started": 0,
+                            "owned_response_status_counts": {}, "owned_response_diagnostics": empty_diagnostics,
+                            "aborted": True}
         self.assertIs(compare._validate_worker_aggregate(full, 11), full)
         self.assertIs(compare._validate_worker_aggregate(partial, 11), partial)
         self.assertIs(compare._validate_worker_aggregate(full_but_aborted, 11), full_but_aborted)
@@ -910,6 +1288,7 @@ main()
             "file_transfer_deadline_seconds": 30, "file_cleanup_deadline_seconds": 30,
             "file_max_binary_bytes": 1000000000, "file_max_metadata_bytes": 1000000,
             "file_min_gpu_free_bytes": 0,
+            "output_text_utf8_byte_bucket_boundaries": [4, 8],
             "expected_remote_architecture": "aarch64",
             "extension": {"ignored": True},
         }
@@ -920,12 +1299,20 @@ main()
             path = Path(directory) / "config.json"
             path.write_text(json.dumps(fields), encoding="utf-8")
             loaded, digest = compare.load_config(path)
+            self.assertEqual(loaded["output_text_utf8_byte_bucket_boundaries"], [4, 8])
+            for invalid in ([4, 4], [True], [-1], None, [1] * 17):
+                fields["output_text_utf8_byte_bucket_boundaries"] = invalid
+                path.write_text(json.dumps(fields), encoding="utf-8")
+                with self.subTest(boundaries=invalid), self.assertRaisesRegex(ValueError, "output_text_utf8"):
+                    compare.load_config(path)
+            fields["output_text_utf8_byte_bucket_boundaries"] = [4, 8]
             fields["expected_remote_architecture"] = "../invalid"
             path.write_text(json.dumps(fields), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "architecture"):
                 compare.load_config(path)
             fields["expected_remote_architecture"] = "aarch64"
         self.assertEqual(loaded["extension"], {"ignored": True})
+        self.assertEqual(loaded["output_text_utf8_byte_bucket_boundaries"], [4, 8])
         self.assertEqual(digest, compare.sha(json.dumps(fields).encode()))
 
 
