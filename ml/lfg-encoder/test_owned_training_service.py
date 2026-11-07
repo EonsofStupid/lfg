@@ -1,7 +1,10 @@
 """Service recovery and corruption checks; fixtures are not training data."""
 import hashlib
+import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -86,6 +89,9 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        coverage_patch = patch.object(service, 'trainer_multilabel_coverage', return_value=None)
+        coverage_patch.start()
+        self.addCleanup(coverage_patch.stop)
         self.dataset = self.root / 'dataset'
         self.dataset.mkdir()
         (self.dataset / 'manifest.json').write_text('{"schema_version":"lfg.owned-multilabel-training.v1"}\n')
@@ -147,6 +153,8 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
                   'source_checkpoint_manifest_sha256': identity['source_checkpoint_manifest_sha256'],
                   'source_checkpoint_weights_sha256': identity['source_checkpoint_weights_sha256'],
                   'source_checkpoint_schema': identity['source_checkpoint_schema'],
+                  'source_checkpoint_system_linkage': identity['source_checkpoint_system_linkage'],
+                  'source_checkpoint_framing_linkage': identity['source_checkpoint_framing_linkage'],
                   'code_sha256': identity['code_sha256'],
                   'weights_sha256': hashlib.sha256(weights).hexdigest()}
         (output / 'manifest.json').write_text(json.dumps(result))
@@ -178,6 +186,7 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
             service.run(self.config_path, exit_on_complete=True)
         self.assertEqual(len(commands), 2)
         self.assertIn('--resume', commands[1])
+        self.assertEqual(commands[0][commands[0].index('--max-config-bytes') + 1], '65536')
         status = json.loads((Path(self.service_config['state_dir']) / 'status.json').read_text())
         self.assertEqual(status['state'], 'complete')
         complete = json.loads((Path(self.service_config['state_dir']) / 'complete.json').read_text())
@@ -266,6 +275,102 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
         self.service_config['dataset'] = str(dataset)
         contract = service.sft_context(self.service_config)
         self.assertEqual(contract['checkpoint_schema'], 'lfg.owned-user-request-sft-checkpoint.v1')
+        self.assertNotIn('training_config_sha256', contract['identity'])
+
+    def test_user_request_checkpoint_state_omits_training_config_digest(self):
+        dataset = self.root / 'user-request.json'
+        dataset.write_text(json.dumps({'train_records': [{'id': 'synthetic'}]}))
+        config = json.loads(self.sft_path.read_text())
+        config['schema_version'] = 'lfg.owned-user-request-sft-config.v1'
+        self.sft_path.write_text(json.dumps(config))
+        self.service_config['dataset'] = str(dataset)
+        contract = service.sft_context(self.service_config)
+        identity = dict(contract['identity'])
+        identity.update({'python': '3.11', 'torch': '2.14.1', 'safetensors': '0.8.0',
+                         'cuda_version': None, 'cublas_workspace_config': None, 'cuda_devices': []})
+        path = self.root / 'user-segments' / 'segment-a' / 'checkpoints' / 'step-0000000000000001'
+        path.mkdir(parents=True)
+        weights, optimizer = b'user weights', b'user optimizer'
+        (path / 'weights.safetensors').write_bytes(weights)
+        (path / 'optimizer.safetensors').write_bytes(optimizer)
+        (path / 'state.json').write_text(json.dumps({'schema_version': contract['checkpoint_schema'],
+            'identity': identity, 'progress': {'step': 1},
+            'model_sha256': hashlib.sha256(weights).hexdigest(),
+            'optimizer_sha256': hashlib.sha256(optimizer).hexdigest()}))
+        found = service.latest_checkpoint(path.parents[2], contract['checkpoint_schema'], sft=contract)
+        self.assertEqual(found[0], 1)
+
+    def test_linked_sft_source_checkpoint_identity_records_verified_status(self):
+        system_sha, framing_sha = '1' * 64, '2' * 64
+        source_weights_sha = service.digest(self.source / 'weights.safetensors')
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema_version': 'lfg.owned-assessment-sft-result.v1',
+            'weights_sha256': source_weights_sha,
+            'architecture': {'context': 4, 'layers': 1},
+            'code_sha256': {'owned_student.py': service.digest(Path(service.__file__).with_name('owned_student.py'))},
+            'system_sha256': system_sha, 'framing_sha256': framing_sha,
+            'coverage': {'system_sha256': system_sha, 'framing_sha256': framing_sha},
+        }))
+        contract = service.sft_context(self.service_config)
+        self.assertEqual(contract['identity']['source_checkpoint_system_linkage'], 'verified_linked')
+        self.assertEqual(contract['identity']['source_checkpoint_framing_linkage'], 'verified_linked')
+
+    def test_legacy_unlinked_sft_source_requires_explicit_user_request_policy(self):
+        source_weights_sha = service.digest(self.source / 'weights.safetensors')
+        (self.source / 'manifest.json').write_text(json.dumps({
+            'schema_version': 'lfg.owned-assessment-sft-result.v1',
+            'weights_sha256': source_weights_sha, 'architecture': {'context': 4, 'layers': 1},
+            'code_sha256': {'owned_student.py': service.digest(Path(service.__file__).with_name('owned_student.py'))},
+            'coverage': {},
+        }))
+        config = json.loads(self.sft_path.read_text())
+        config['schema_version'] = 'lfg.owned-user-request-sft-config.v1'
+        config['allow_unlinked_legacy_sft_checkpoint'] = True
+        self.sft_path.write_text(json.dumps(config))
+        dataset = self.root / 'user-request.json'
+        dataset.write_text(json.dumps({'train_records': [{'id': 'synthetic'}]}))
+        self.service_config['dataset'] = str(dataset)
+        contract = service.sft_context(self.service_config)
+        self.assertEqual(contract['identity']['source_checkpoint_system_linkage'], 'unknown_unlinked')
+        config['schema_version'] = 'lfg.owned-assessment-sft-config.v1'
+        self.sft_path.write_text(json.dumps(config))
+        self.service_config['dataset'] = str(self.dataset)
+        with self.assertRaisesRegex(ValueError, 'unlinked provenance'):
+            service.sft_context(self.service_config)
+
+    def test_sft_config_size_limits_are_enforced_and_forwarded(self):
+        for limit, extension_size in ((32768, 0), (131072, 70000)):
+            with self.subTest(limit=limit):
+                self.service_config['state_dir'] = str(self.root / f'state-{limit}')
+                self.service_config['max_sft_config_bytes'] = limit
+                config = json.loads(self.sft_path.read_text())
+                if extension_size:
+                    config['large_inert_extension'] = 'x' * extension_size
+                else:
+                    config.pop('large_inert_extension', None)
+                self.sft_path.write_text(json.dumps(config))
+                self.config_path.write_text(json.dumps(self.service_config))
+                commands = []
+
+                class Child:
+                    def __init__(child, command):
+                        commands.append(command)
+                        output = Path(command[command.index('--output') + 1])
+                        contract = self._checkpoint(output, len(commands))
+                        if len(commands) == 2:
+                            self._complete_result(output, contract)
+                    def wait(child):
+                        return 0
+                    def poll(child):
+                        return 0
+                    def send_signal(child, _signal):
+                        pass
+
+                with patch.dict(sys.modules, {'fcntl': self._fake_fcntl()}), \
+                        patch.object(service.subprocess, 'Popen', Child):
+                    service.run(self.config_path, exit_on_complete=True)
+                self.assertEqual(commands[0][commands[0].index('--max-config-bytes') + 1], str(limit))
+                self.assertEqual(len(commands), 2)
 
     def test_completed_service_stays_inspectable_without_reopening_training_inputs(self):
         state = Path(self.service_config['state_dir'])
@@ -278,6 +383,237 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
         status = json.loads((state / 'status.json').read_text())
         self.assertEqual(status['state'], 'complete')
         self.assertEqual(status['step'], 2)
+
+
+@unittest.skipUnless(os.name == 'posix' and all(importlib.util.find_spec(name)
+    for name in ('torch', 'safetensors')), 'POSIX torch and safetensors required for real trainer integration')
+class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
+    def _capture_child(self, command, real_popen, commands):
+        commands.append(command)
+        process = real_popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        class CapturedChild:
+            def wait(child):
+                stdout, stderr = process.communicate()
+                if process.returncode:
+                    raise RuntimeError(f'trainer child failed: {stderr or stdout}')
+                return process.returncode
+            def poll(child):
+                return process.poll()
+            def send_signal(child, signum):
+                process.send_signal(signum)
+
+        return CapturedChild()
+
+    def test_real_assessment_checkpoint_is_accepted_and_resumed_by_supervisor(self):
+        import subprocess
+        from test_train_owned_assessment_sft import OwnedAssessmentSFTTests
+
+        fixture = OwnedAssessmentSFTTests('test_multilabel_experiment_resumes_and_binds_source_and_configuration')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.config.update(steps=2, checkpoint_every=1, batch_size=1, max_attention_elements=100_000)
+        fixture.write_config()
+        state_dir = fixture.root / 'assessment-service-state'
+        seed_output = state_dir / 'segments' / 'seeded-segment'
+        seed_output.parent.mkdir(parents=True)
+        partial = fixture.subject.experiment(fixture.dataset, fixture.checkpoint, fixture.config_path,
+                                             seed_output, max_steps_this_run=1)
+        self.assertFalse(partial['completed'])
+        service_config = {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+            'python': sys.executable, 'trainer': str(Path(fixture.subject.__file__).resolve()),
+            'state_dir': str(state_dir), 'dataset': str(fixture.dataset),
+            'checkpoint': str(fixture.checkpoint), 'sft_config': str(fixture.config_path),
+            'segment_steps': 1, 'status_poll_seconds': 1}
+        service_config_path = fixture.root / 'assessment-service.json'
+        service_config_path.write_text(json.dumps(service_config))
+        contract = service.sft_context(service.config(service_config_path))
+        self.assertEqual(contract['checkpoint_schema'], 'lfg.owned-assessment-sft-checkpoint.v1')
+        self.assertEqual(service.latest_checkpoint(state_dir / 'segments', contract['checkpoint_schema'], sft=contract)[0], 1)
+        commands = []
+        real_popen = subprocess.Popen
+        with patch.object(service.subprocess, 'Popen',
+                          lambda command: self._capture_child(command, real_popen, commands)):
+            service.run(service_config_path, exit_on_complete=True)
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--resume', commands[0])
+        result = json.loads((Path(json.loads((state_dir / 'complete.json').read_text())['result_path'])
+                             / 'manifest.json').read_text())
+        self.assertEqual(result['schema_version'], 'lfg.owned-assessment-sft-result.v1')
+        self.assertEqual(result['steps'], 2)
+
+    def test_real_user_request_identity_and_linked_or_allowed_unlinked_sources(self):
+        import shutil
+        import subprocess
+        from test_train_owned_assessment_sft import OwnedAssessmentSFTTests
+        from test_user_request_sft import UserRequestSFTTests
+        import train_owned_assessment_sft as trainer_module
+
+        assessment = OwnedAssessmentSFTTests('test_multilabel_experiment_resumes_and_binds_source_and_configuration')
+        assessment.setUp()
+        self.addCleanup(assessment.doCleanups)
+        assessment.config.update(steps=1, checkpoint_every=1, batch_size=1, max_attention_elements=100_000)
+        assessment.write_config()
+        linked_source = assessment.root / 'linked-assessment-source'
+        linked_result = assessment.subject.experiment(assessment.dataset, assessment.checkpoint,
+            assessment.config_path, linked_source)
+        self.assertEqual(linked_result['schema_version'], 'lfg.owned-assessment-sft-result.v1')
+
+        request = UserRequestSFTTests('test_user_request_task_runs_one_private_fixture_step')
+        request.setUp()
+        self.addCleanup(request.doCleanups)
+        request._build()
+        user_request_config = json.loads(Path(trainer_module.__file__).with_name(
+            'owned-user-request-sft.example.json').read_text())
+        user_request_config.update(context=2048, batch_size=1, steps=2, checkpoint_every=1,
+            max_parameters=100_000, max_attention_elements=10_000_000, max_dataset_bytes=1_000_000,
+            max_record_bytes=200_000, max_manifest_bytes=1_000_000, max_checkpoint_bytes=10_000_000,
+            max_optimizer_bytes=10_000_000, max_examples=10)
+        user_request_config_path = request.root / 'owned-user-request-sft-train.json'
+        user_request_config_path.write_text(json.dumps(user_request_config))
+
+        def run_user_request(source_path, sft_config_path, state_name):
+            state_dir = request.root / state_name
+            segment = state_dir / 'segments' / 'preexisting-segment'
+            segment.parent.mkdir(parents=True)
+            result = trainer_module.experiment(request.root / 'dataset.json', source_path, sft_config_path,
+                                               segment, max_steps_this_run=1)
+            self.assertFalse(result['completed'])
+            service_config = {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+                'python': sys.executable, 'trainer': str(Path(trainer_module.__file__).resolve()),
+                'state_dir': str(state_dir), 'dataset': str(request.root / 'dataset.json'),
+                'checkpoint': str(source_path), 'sft_config': str(sft_config_path),
+                'segment_steps': 1, 'status_poll_seconds': 1}
+            service_path = request.root / f'{state_name}.json'
+            service_path.write_text(json.dumps(service_config))
+            contract = service.sft_context(service.config(service_path))
+            identity = json.loads((Path(result['latest_checkpoint']) / 'state.json').read_text())['identity']
+            self.assertNotIn('training_config_sha256', identity)
+            self.assertEqual(identity['source_checkpoint_system_linkage'], contract['identity']['source_checkpoint_system_linkage'])
+            found = service.latest_checkpoint(state_dir / 'segments', contract['checkpoint_schema'], sft=contract)
+            self.assertEqual(found[0], 1)
+            return service_path, state_dir, contract
+
+        linked_path, linked_state, linked_contract = run_user_request(linked_source,
+            user_request_config_path, 'linked-user-request-service')
+        self.assertEqual(linked_contract['identity']['source_checkpoint_system_linkage'], 'verified_linked')
+        original_dataset = (request.root / 'dataset.json').read_bytes()
+        (request.root / 'dataset.json').write_bytes(original_dataset + b' ')
+        with self.assertRaisesRegex(ValueError, 'dataset_manifest_sha256'):
+            service.latest_checkpoint(linked_state / 'segments', linked_contract['checkpoint_schema'],
+                                      sft=service.sft_context(service.config(linked_path)))
+        (request.root / 'dataset.json').write_bytes(original_dataset)
+        changed_config = json.loads(user_request_config_path.read_text())
+        changed_config['learning_rate'] *= 2
+        changed_config_path = request.root / 'changed-user-request-sft.json'
+        changed_config_path.write_text(json.dumps(changed_config))
+        changed_service = service.config(linked_path)
+        changed_service['sft_config'] = str(changed_config_path)
+        changed_service_path = request.root / 'changed-linked-user-request-service.json'
+        changed_service_path.write_text(json.dumps(changed_service))
+        changed_contract = service.sft_context(service.config(changed_service_path))
+        with self.assertRaisesRegex(ValueError, 'continuation_config_sha256'):
+            service.latest_checkpoint(linked_state / 'segments', linked_contract['checkpoint_schema'],
+                                      sft=changed_contract)
+        copied_trainer = request.root / 'changed-trainer'
+        copied_trainer.mkdir()
+        trainer_dir = Path(trainer_module.__file__).resolve().parent
+        for filename in ('train_owned_assessment_sft.py', 'train_owned_student.py',
+                         'owned_student.py', 'owned_sft_checkpoint.py'):
+            shutil.copyfile(trainer_dir / filename, copied_trainer / filename)
+        with (copied_trainer / 'train_owned_assessment_sft.py').open('ab') as altered:
+            altered.write(b'\n# synthetic code identity drift\n')
+        changed_code_service = service.config(linked_path)
+        changed_code_service['trainer'] = str(copied_trainer / 'train_owned_assessment_sft.py')
+        changed_code_service_path = request.root / 'changed-code-user-request-service.json'
+        changed_code_service_path.write_text(json.dumps(changed_code_service))
+        changed_code_contract = service.sft_context(service.config(changed_code_service_path))
+        with self.assertRaisesRegex(ValueError, 'code_sha256'):
+            service.latest_checkpoint(linked_state / 'segments', linked_contract['checkpoint_schema'],
+                                      sft=changed_code_contract)
+        commands = []
+        real_popen = subprocess.Popen
+        with patch.object(service.subprocess, 'Popen',
+                          lambda command: self._capture_child(command, real_popen, commands)):
+            service.run(linked_path, exit_on_complete=True)
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--resume', commands[0])
+        linked_result = json.loads((Path(json.loads((linked_state / 'complete.json').read_text())['result_path'])
+                                    / 'manifest.json').read_text())
+        self.assertEqual(linked_result['schema_version'], 'lfg.owned-user-request-sft-result.v1')
+        self.assertEqual(linked_result['steps'], 2)
+
+        legacy_source = request.root / 'legacy-unlinked-assessment-source'
+        legacy_source.mkdir()
+        (legacy_source / 'weights.safetensors').write_bytes((linked_source / 'weights.safetensors').read_bytes())
+        legacy_manifest = json.loads((linked_source / 'manifest.json').read_text())
+        legacy_manifest.pop('system_sha256')
+        legacy_manifest.pop('framing_sha256')
+        legacy_manifest['coverage'].pop('system_sha256')
+        legacy_manifest['coverage'].pop('framing_sha256')
+        (legacy_source / 'manifest.json').write_text(json.dumps(legacy_manifest))
+        user_request_config['allow_unlinked_legacy_sft_checkpoint'] = True
+        user_request_config_path.write_text(json.dumps(user_request_config))
+        _, _, legacy_contract = run_user_request(legacy_source, user_request_config_path,
+                                                 'legacy-user-request-service')
+        self.assertEqual(legacy_contract['identity']['source_checkpoint_system_linkage'], 'unknown_unlinked')
+    def test_real_multilabel_trainer_checkpoint_resumes_after_supervisor_restart(self):
+        import subprocess
+        from test_train_owned_assessment_sft import OwnedAssessmentSFTTests
+
+        fixture = OwnedAssessmentSFTTests('test_multilabel_experiment_resumes_and_binds_source_and_configuration')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        dataset, _ = fixture.multilabel_fixture()
+        fixture.config.update(context=512, batch_size=2, steps=2, checkpoint_every=1,
+                              max_attention_elements=5_000_000, max_parameters=100_000, cpu_threads=1)
+        fixture.write_config()
+        trainer_path = Path(fixture.subject.__file__).resolve()
+        state_dir = fixture.root / 'supervised-state'
+        service_config = {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+            'python': sys.executable, 'trainer': str(trainer_path), 'state_dir': str(state_dir),
+            'dataset': str(dataset), 'checkpoint': str(fixture.checkpoint),
+            'sft_config': str(fixture.config_path), 'segment_steps': 1, 'status_poll_seconds': 1}
+        service_config_path = fixture.root / 'service.json'
+        service_config_path.write_text(json.dumps(service_config))
+        actual_popen = subprocess.Popen
+        commands = []
+
+        class InterruptedChild:
+            def __init__(child, command):
+                commands.append(command)
+                child.process = actual_popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            def wait(child):
+                stdout, stderr = child.process.communicate()
+                if child.process.returncode:
+                    raise RuntimeError(f'trainer child failed: {stderr or stdout}')
+                raise RuntimeError('simulated supervisor interruption after child checkpoint')
+            def poll(child):
+                return child.process.poll()
+            def send_signal(child, signum):
+                child.process.send_signal(signum)
+
+        with patch.object(service.subprocess, 'Popen', InterruptedChild):
+            with self.assertRaisesRegex(RuntimeError, 'simulated supervisor interruption'):
+                service.run(service_config_path)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][commands[0].index('--max-config-bytes') + 1], '65536')
+        contract = service.sft_context(service.config(service_config_path))
+        first_checkpoint = service.latest_checkpoint(state_dir / 'segments', contract['checkpoint_schema'], sft=contract)
+        self.assertEqual(first_checkpoint[0], 1)
+        first_state = json.loads((first_checkpoint[1] / 'state.json').read_text())
+        self.assertIn('multilabel_coverage_sha256', first_state['identity'])
+        with patch.object(service.subprocess, 'Popen',
+                          lambda command: self._capture_child(command, actual_popen, commands)):
+            service.run(service_config_path, exit_on_complete=True)
+        self.assertEqual(len(commands), 2)
+        self.assertIn('--resume', commands[1])
+        self.assertEqual(service.latest_checkpoint(state_dir / 'segments', contract['checkpoint_schema'], sft=contract)[0], 2)
+        complete = json.loads((state_dir / 'complete.json').read_text())
+        result_manifest = json.loads((Path(complete['result_path']) / 'manifest.json').read_text())
+        self.assertEqual(result_manifest['schema_version'], 'lfg.owned-multilabel-sft-result.v1')
+        self.assertTrue(result_manifest['completed'])
+        self.assertEqual(result_manifest['steps'], 2)
 
 
 if __name__ == '__main__':

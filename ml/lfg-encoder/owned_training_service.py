@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,70 @@ def canonical_json(value: object) -> bytes:
                         allow_nan=False) + '\n').encode('utf-8')
 
 
+def sft_source_linkage(manifest: dict, schema_config: str, sft: dict) -> tuple[str, str]:
+    if manifest.get('schema_version') not in SFT_RESULT_SCHEMAS.values():
+        return 'not_applicable', 'not_applicable'
+    coverage = manifest.get('coverage')
+    if not isinstance(coverage, dict):
+        raise ValueError('configured SFT source lacks coverage provenance')
+    unlinked_allowed = (schema_config == 'lfg.owned-user-request-sft-config.v1'
+        and sft.get('allow_unlinked_legacy_sft_checkpoint', False) is True
+        and manifest.get('schema_version') == 'lfg.owned-assessment-sft-result.v1')
+    links = []
+    for name in ('system_sha256', 'framing_sha256'):
+        top_present, coverage_present = name in manifest, name in coverage
+        if not top_present:
+            if not unlinked_allowed or coverage_present:
+                raise ValueError('configured SFT source has unsupported unlinked provenance')
+            links.append('unknown_unlinked')
+            continue
+        value = manifest[name]
+        if (not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
+                or not coverage_present or coverage[name] != value):
+            raise ValueError('configured SFT source linkage is invalid')
+        links.append('verified_linked')
+    if len(set(links)) != 1:
+        raise ValueError('configured SFT source linkage is inconsistent')
+    return links[0], links[1]
+
+
+def trainer_multilabel_coverage(trainer_path: Path, dataset: Path, config_path: Path,
+                                config_raw: bytes, max_config_bytes: int,
+                                source_manifest_sha256: str, source_weights_sha256: str) -> str | None:
+    """Use the configured trainer's reader to reproduce the exact resume identity on POSIX."""
+    if os.name != 'posix' or not (importlib.util.find_spec('torch') and importlib.util.find_spec('safetensors')):
+        return None
+    trainer_dir = trainer_path.parent
+    module_name = '_lfg_owned_training_service_trainer'
+    spec = importlib.util.spec_from_file_location(module_name, trainer_path)
+    if spec is None or spec.loader is None:
+        raise ValueError('cannot load configured SFT trainer for checkpoint identity validation')
+    module = importlib.util.module_from_spec(spec)
+    prior_path = list(sys.path)
+    sys.path.insert(0, str(trainer_dir))
+    try:
+        spec.loader.exec_module(module)
+        trainer_config, trainer_config_raw = module.configuration(config_path, max_config_bytes)
+        if trainer_config_raw != config_raw:
+            raise ValueError('SFT config changed during checkpoint identity validation')
+        _, manifest_raw, train_raw, coverage = module.read_training(dataset, trainer_config)
+        if (digest(dataset / 'manifest.json') != hashlib.sha256(manifest_raw).hexdigest()
+                or digest(dataset / 'train.jsonl') != hashlib.sha256(train_raw).hexdigest()):
+            raise ValueError('multilabel training data changed during identity validation')
+        code = {name: digest(trainer_dir / name) for name in (
+            'train_owned_assessment_sft.py', 'train_owned_student.py', 'owned_student.py',
+            'owned_sft_checkpoint.py', 'owned_multilabel_contract.py', 'masked_supervision.py')}
+        coverage.update({'config_sha256': hashlib.sha256(config_raw).hexdigest(),
+            'trainer_code_sha256': code['train_owned_assessment_sft.py'], 'code_sha256': code,
+            'source_checkpoint_manifest_sha256': source_manifest_sha256,
+            'source_checkpoint_weights_sha256': source_weights_sha256,
+            'live_masked_supervision_code_sha256': code['masked_supervision.py']})
+        return hashlib.sha256(module.canonical(coverage)).hexdigest()
+    finally:
+        sys.path[:] = prior_path
+        sys.modules.pop(module_name, None)
+
+
 def sft_context(value: dict) -> dict:
     """Resolve the trainer's explicit schema and stable continuation identity before launch."""
     config_path = Path(value['sft_config'])
@@ -92,22 +157,25 @@ def sft_context(value: dict) -> dict:
             or not isinstance(source_manifest.get('code_sha256'), dict)
             or source_manifest['code_sha256'].get('owned_student.py') != digest(trainer_dir / 'owned_student.py')):
         raise ValueError('configured source checkpoint identity is invalid')
-    linked_sft_source = source_manifest.get('schema_version') in SFT_RESULT_SCHEMAS.values()
+    system_linkage, framing_linkage = sft_source_linkage(source_manifest, schema_config, sft)
     expected = {
         'dataset_manifest_sha256': hashlib.sha256(dataset_raw).hexdigest(),
         'training_file_sha256': hashlib.sha256(training_raw).hexdigest(),
         'source_checkpoint_manifest_sha256': hashlib.sha256(source_manifest_raw).hexdigest(),
         'source_checkpoint_weights_sha256': source_weights_sha256,
         'source_checkpoint_schema': source_manifest.get('schema_version'),
-        'source_checkpoint_system_linkage': (source_manifest.get('system_sha256', 'unknown_unlinked')
-            if linked_sft_source else 'not_applicable'),
-        'source_checkpoint_framing_linkage': (source_manifest.get('framing_sha256', 'unknown_unlinked')
-            if linked_sft_source else 'not_applicable'),
+        'source_checkpoint_system_linkage': system_linkage,
+        'source_checkpoint_framing_linkage': framing_linkage,
         'continuation_config_sha256': hashlib.sha256(canonical_json(
             {key: item for key, item in sft.items() if key not in SFT_MUTABLE_CONFIG_FIELDS})).hexdigest(),
     }
-    if schema_config in ('lfg.owned-user-request-sft-config.v1', 'lfg.owned-multilabel-sft-config.v1'):
+    if schema_config == 'lfg.owned-multilabel-sft-config.v1':
         expected['training_config_sha256'] = hashlib.sha256(config_raw).hexdigest()
+    if ('allow_unlinked_legacy_sft_checkpoint' in sft
+            and (type(sft['allow_unlinked_legacy_sft_checkpoint']) is not bool
+                 or (sft['allow_unlinked_legacy_sft_checkpoint']
+                     and schema_config != 'lfg.owned-user-request-sft-config.v1'))):
+        raise ValueError('invalid unlinked SFT source policy')
     architecture = dict(source_manifest['architecture'])
     if type(sft.get('context')) is not int or sft['context'] < 1:
         raise ValueError('SFT context must be positive')
@@ -117,7 +185,9 @@ def sft_context(value: dict) -> dict:
                   'owned_student.py', 'owned_sft_checkpoint.py']
     if schema_config == 'lfg.owned-multilabel-sft-config.v1':
         code_names.extend(['owned_multilabel_contract.py', 'masked_supervision.py'])
-        expected['multilabel_coverage_sha256'] = None  # The trainer recomputes the complete coverage identity.
+        expected['multilabel_coverage_sha256'] = trainer_multilabel_coverage(
+            Path(value['trainer']), dataset, config_path, config_raw, value.get('max_sft_config_bytes', 65536),
+            expected['source_checkpoint_manifest_sha256'], expected['source_checkpoint_weights_sha256'])
     expected['code_sha256'] = {name: digest(trainer_dir / name) for name in code_names}
     return {'schema_config': schema_config, 'checkpoint_schema': SFT_CHECKPOINT_SCHEMAS[schema_config],
             'result_schema': SFT_RESULT_SCHEMAS[schema_config], 'steps': steps,
@@ -132,8 +202,7 @@ def validate_sft_state_identity(state: dict, expected: dict) -> None:
                 'source_checkpoint_system_linkage', 'source_checkpoint_framing_linkage', 'code_sha256',
                 'continuation_config_sha256', 'architecture', 'python', 'torch', 'safetensors',
                 'cuda_version', 'cublas_workspace_config', 'cuda_devices'}
-    if expected['schema_config'] in ('lfg.owned-user-request-sft-config.v1',
-                                      'lfg.owned-multilabel-sft-config.v1'):
+    if expected['schema_config'] == 'lfg.owned-multilabel-sft-config.v1':
         required.add('training_config_sha256')
     if expected['schema_config'] == 'lfg.owned-multilabel-sft-config.v1':
         required.add('multilabel_coverage_sha256')
@@ -146,8 +215,7 @@ def validate_sft_state_identity(state: dict, expected: dict) -> None:
                  'source_checkpoint_weights_sha256', 'continuation_config_sha256'):
         if not isinstance(identity.get(name), str) or not re.fullmatch(r'[0-9a-f]{64}', identity[name]):
             raise ValueError('checkpoint identity digest is malformed')
-    if expected['schema_config'] in ('lfg.owned-user-request-sft-config.v1',
-                                      'lfg.owned-multilabel-sft-config.v1'):
+    if expected['schema_config'] == 'lfg.owned-multilabel-sft-config.v1':
         value = identity.get('training_config_sha256')
         if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
             raise ValueError('checkpoint training configuration identity is malformed')
@@ -166,6 +234,8 @@ def validate_sft_result(sft: dict, manifest: object, weights_path: Path) -> None
         'source_checkpoint_manifest_sha256': identity['source_checkpoint_manifest_sha256'],
         'source_checkpoint_weights_sha256': identity['source_checkpoint_weights_sha256'],
         'source_checkpoint_schema': identity['source_checkpoint_schema'],
+        'source_checkpoint_system_linkage': identity['source_checkpoint_system_linkage'],
+        'source_checkpoint_framing_linkage': identity['source_checkpoint_framing_linkage'],
         'code_sha256': identity['code_sha256']}
     if (not isinstance(manifest, dict) or manifest.get('completed') is not True
             or any(manifest.get(key) != expected_value for key, expected_value in expected.items())
@@ -306,7 +376,8 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
         for option in options:
             command.extend(['--' + option.replace('_', '-'), value[option]])
         if kind == 'assessment_sft':
-            command.extend(['--config', value['sft_config']])
+            command.extend(['--config', value['sft_config'], '--max-config-bytes',
+                            str(value.get('max_sft_config_bytes', 65536))])
         if kind == 'distillation' and value.get('teacher_revision'):
             command.extend(['--teacher-revision', value['teacher_revision']])
         if kind == 'distillation' and value.get('initial_checkpoint'):
@@ -315,13 +386,20 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
         if checkpoint:
             command.extend(['--resume', str(checkpoint[1]), '--resume-state-sha256', checkpoint[2]])
         report('training', step=checkpoint[0] if checkpoint else 0, total_steps=total)
-        child = subprocess.Popen(command)
+        try:
+            child = subprocess.Popen(command)
+        except BaseException:
+            lock.close()
+            raise
         def terminate(signum, _frame):
             if child.poll() is None:
                 child.send_signal(signum)
         previous = {sig: signal.signal(sig, terminate) for sig in (signal.SIGTERM, signal.SIGINT)}
         try:
             code = child.wait()
+        except BaseException:
+            lock.close()
+            raise
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
