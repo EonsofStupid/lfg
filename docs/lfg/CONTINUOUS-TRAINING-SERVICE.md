@@ -5,8 +5,13 @@ or assessment fine-tuning job in checkpointed segments. The model, teacher,
 corpus, device and training settings come from private configuration. Extra service-configuration fields
 are accepted but do not acquire behavior unless the service implements them.
 The service selects the highest published checkpoint step by directory name, verifies its metadata and
-tensor digests and passes its state digest to the trainer, which
-checks its full continuation identity. An OS lock prevents two supervisors
+tensor digests, and passes its state digest to the trainer. For SFT jobs, the
+service reads the explicit SFT config schema and accepts only the assessment,
+user-request, and multilabel checkpoint/result schema pairs. Before launching a
+segment it checks the checkpoint identity against the configured dataset,
+starting checkpoint, continuation config, architecture, and trainer code; the
+trainer also checks its full continuation identity, including runtime versions.
+An OS lock prevents two supervisors
 from owning the same state directory. A completed run remains available for
 status inspection; it does not automatically replay its corpus. Use a new
 state directory for a new job or changed service/trainer configuration.

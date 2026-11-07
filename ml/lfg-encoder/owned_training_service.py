@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -15,12 +16,161 @@ import time
 import uuid
 
 
+SFT_CHECKPOINT_SCHEMAS = {
+    'lfg.owned-assessment-sft-config.v1': 'lfg.owned-assessment-sft-checkpoint.v1',
+    'lfg.owned-user-request-sft-config.v1': 'lfg.owned-user-request-sft-checkpoint.v1',
+    'lfg.owned-multilabel-sft-config.v1': 'lfg.owned-multilabel-sft-checkpoint.v1',
+}
+SFT_RESULT_SCHEMAS = {
+    'lfg.owned-assessment-sft-config.v1': 'lfg.owned-assessment-sft-result.v1',
+    'lfg.owned-user-request-sft-config.v1': 'lfg.owned-user-request-sft-result.v1',
+    'lfg.owned-multilabel-sft-config.v1': 'lfg.owned-multilabel-sft-result.v1',
+}
+SFT_MUTABLE_CONFIG_FIELDS = {'steps', 'checkpoint_every', 'max_parameters', 'max_attention_elements',
+    'max_dataset_bytes', 'max_manifest_bytes', 'max_checkpoint_bytes', 'max_optimizer_bytes',
+    'max_examples', 'max_record_bytes'}
+
+
 def digest(path: Path) -> str:
     result = hashlib.sha256()
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             result.update(block)
     return result.hexdigest()
+
+
+def bounded_bytes(path: Path, limit: int) -> bytes:
+    if type(limit) is not int or limit < 1:
+        raise ValueError('invalid configured input byte limit')
+    with path.open('rb') as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f'configured input exceeds byte limit: {path}')
+    return raw
+
+
+def canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                        allow_nan=False) + '\n').encode('utf-8')
+
+
+def sft_context(value: dict) -> dict:
+    """Resolve the trainer's explicit schema and stable continuation identity before launch."""
+    config_path = Path(value['sft_config'])
+    config_raw = bounded_bytes(config_path, value.get('max_sft_config_bytes', 65536))
+    sft = json.loads(config_raw)
+    if not isinstance(sft, dict) or sft.get('schema_version') not in SFT_CHECKPOINT_SCHEMAS:
+        raise ValueError('unsupported SFT configuration schema')
+    schema_config = sft['schema_version']
+    steps = sft.get('steps')
+    if type(steps) is not int or steps < 1:
+        raise ValueError('SFT steps must be positive')
+    dataset = Path(value['dataset'])
+    if schema_config == 'lfg.owned-user-request-sft-config.v1':
+        dataset_raw = bounded_bytes(dataset, sft['max_dataset_bytes'])
+        envelope = json.loads(dataset_raw)
+        if not isinstance(envelope, dict) or not isinstance(envelope.get('train_records'), list):
+            raise ValueError('invalid user-request SFT dataset envelope')
+        training_raw = b''.join(canonical_json(row) for row in envelope['train_records'])
+    else:
+        dataset_raw = bounded_bytes(dataset / 'manifest.json', sft['max_manifest_bytes'])
+        training_raw = bounded_bytes(dataset / 'train.jsonl', sft['max_dataset_bytes'])
+        if (schema_config == 'lfg.owned-multilabel-sft-config.v1'
+                and sft.get('expected_manifest_sha256') != hashlib.sha256(dataset_raw).hexdigest()):
+            raise ValueError('multilabel dataset manifest differs from configured identity')
+    source = Path(value['checkpoint'])
+    source_manifest_raw = bounded_bytes(source / 'manifest.json', sft['max_manifest_bytes'])
+    source_manifest = json.loads(source_manifest_raw)
+    source_weights_sha256 = digest(source / 'weights.safetensors')
+    trainer_dir = Path(value['trainer']).parent
+    if (not isinstance(source_manifest, dict)
+            or source_manifest.get('schema_version') not in {
+                'lfg.owned-student-experiment-result.v1', 'lfg.owned-distillation-result.v1',
+                *SFT_RESULT_SCHEMAS.values()}
+            or source_manifest.get('weights_sha256') != source_weights_sha256
+            or not isinstance(source_manifest.get('architecture'), dict)
+            or not isinstance(source_manifest.get('code_sha256'), dict)
+            or source_manifest['code_sha256'].get('owned_student.py') != digest(trainer_dir / 'owned_student.py')):
+        raise ValueError('configured source checkpoint identity is invalid')
+    linked_sft_source = source_manifest.get('schema_version') in SFT_RESULT_SCHEMAS.values()
+    expected = {
+        'dataset_manifest_sha256': hashlib.sha256(dataset_raw).hexdigest(),
+        'training_file_sha256': hashlib.sha256(training_raw).hexdigest(),
+        'source_checkpoint_manifest_sha256': hashlib.sha256(source_manifest_raw).hexdigest(),
+        'source_checkpoint_weights_sha256': source_weights_sha256,
+        'source_checkpoint_schema': source_manifest.get('schema_version'),
+        'source_checkpoint_system_linkage': (source_manifest.get('system_sha256', 'unknown_unlinked')
+            if linked_sft_source else 'not_applicable'),
+        'source_checkpoint_framing_linkage': (source_manifest.get('framing_sha256', 'unknown_unlinked')
+            if linked_sft_source else 'not_applicable'),
+        'continuation_config_sha256': hashlib.sha256(canonical_json(
+            {key: item for key, item in sft.items() if key not in SFT_MUTABLE_CONFIG_FIELDS})).hexdigest(),
+    }
+    if schema_config in ('lfg.owned-user-request-sft-config.v1', 'lfg.owned-multilabel-sft-config.v1'):
+        expected['training_config_sha256'] = hashlib.sha256(config_raw).hexdigest()
+    architecture = dict(source_manifest['architecture'])
+    if type(sft.get('context')) is not int or sft['context'] < 1:
+        raise ValueError('SFT context must be positive')
+    architecture['context'] = sft['context']
+    expected['architecture'] = architecture
+    code_names = ['train_owned_assessment_sft.py', 'train_owned_student.py',
+                  'owned_student.py', 'owned_sft_checkpoint.py']
+    if schema_config == 'lfg.owned-multilabel-sft-config.v1':
+        code_names.extend(['owned_multilabel_contract.py', 'masked_supervision.py'])
+        expected['multilabel_coverage_sha256'] = None  # The trainer recomputes the complete coverage identity.
+    expected['code_sha256'] = {name: digest(trainer_dir / name) for name in code_names}
+    return {'schema_config': schema_config, 'checkpoint_schema': SFT_CHECKPOINT_SCHEMAS[schema_config],
+            'result_schema': SFT_RESULT_SCHEMAS[schema_config], 'steps': steps,
+            'config_sha256': hashlib.sha256(config_raw).hexdigest(),
+            'identity': expected}
+
+
+def validate_sft_state_identity(state: dict, expected: dict) -> None:
+    identity = state.get('identity')
+    required = {'dataset_manifest_sha256', 'training_file_sha256', 'source_checkpoint_manifest_sha256',
+                'source_checkpoint_weights_sha256', 'source_checkpoint_schema',
+                'source_checkpoint_system_linkage', 'source_checkpoint_framing_linkage', 'code_sha256',
+                'continuation_config_sha256', 'architecture', 'python', 'torch', 'safetensors',
+                'cuda_version', 'cublas_workspace_config', 'cuda_devices'}
+    if expected['schema_config'] in ('lfg.owned-user-request-sft-config.v1',
+                                      'lfg.owned-multilabel-sft-config.v1'):
+        required.add('training_config_sha256')
+    if expected['schema_config'] == 'lfg.owned-multilabel-sft-config.v1':
+        required.add('multilabel_coverage_sha256')
+    if not isinstance(identity, dict) or not required <= set(identity):
+        raise ValueError('checkpoint identity is incomplete for configured SFT schema')
+    for name, wanted in expected['identity'].items():
+        if wanted is not None and identity.get(name) != wanted:
+            raise ValueError(f'checkpoint identity does not match configured SFT {name}')
+    for name in ('dataset_manifest_sha256', 'training_file_sha256', 'source_checkpoint_manifest_sha256',
+                 'source_checkpoint_weights_sha256', 'continuation_config_sha256'):
+        if not isinstance(identity.get(name), str) or not re.fullmatch(r'[0-9a-f]{64}', identity[name]):
+            raise ValueError('checkpoint identity digest is malformed')
+    if expected['schema_config'] in ('lfg.owned-user-request-sft-config.v1',
+                                      'lfg.owned-multilabel-sft-config.v1'):
+        value = identity.get('training_config_sha256')
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+            raise ValueError('checkpoint training configuration identity is malformed')
+    if expected['schema_config'] == 'lfg.owned-multilabel-sft-config.v1':
+        value = identity.get('multilabel_coverage_sha256')
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+            raise ValueError('checkpoint multilabel coverage identity is malformed')
+
+
+def validate_sft_result(sft: dict, manifest: object, weights_path: Path) -> None:
+    identity = sft['identity']
+    expected = {'schema_version': sft['result_schema'], 'steps': sft['steps'],
+        'config_sha256': sft['config_sha256'],
+        'dataset_manifest_sha256': identity['dataset_manifest_sha256'],
+        'training_file_sha256': identity['training_file_sha256'],
+        'source_checkpoint_manifest_sha256': identity['source_checkpoint_manifest_sha256'],
+        'source_checkpoint_weights_sha256': identity['source_checkpoint_weights_sha256'],
+        'source_checkpoint_schema': identity['source_checkpoint_schema'],
+        'code_sha256': identity['code_sha256']}
+    if (not isinstance(manifest, dict) or manifest.get('completed') is not True
+            or any(manifest.get(key) != expected_value for key, expected_value in expected.items())
+            or digest(weights_path) != manifest.get('weights_sha256')):
+        raise ValueError('invalid SFT result identity')
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -62,11 +212,14 @@ def config(path: Path) -> dict:
         raise ValueError('invalid status poll interval')
     if type(value.get('max_checkpoint_state_bytes', 67108864)) is not int or value.get('max_checkpoint_state_bytes', 67108864) < 1:
         raise ValueError('invalid checkpoint state byte limit')
+    if 'max_sft_config_bytes' in value and (type(value['max_sft_config_bytes']) is not int
+                                             or value['max_sft_config_bytes'] < 1):
+        raise ValueError('invalid SFT configuration byte limit')
     return value
 
 
 def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-checkpoint.v1',
-                      max_state_bytes: int = 67108864) -> tuple[int, Path, str] | None:
+                      max_state_bytes: int = 67108864, sft: dict | None = None) -> tuple[int, Path, str] | None:
     if type(max_state_bytes) is not int or max_state_bytes < 1:
         raise ValueError('invalid checkpoint state byte limit')
     candidates = []
@@ -88,9 +241,12 @@ def latest_checkpoint(segments: Path, schema: str = 'lfg.owned-distillation-chec
             if len(raw) > max_state_bytes:
                 raise ValueError('checkpoint state too large')
             state = json.loads(raw)
-            if (state.get('schema_version') != schema or type(state['progress']['step']) is not int
+            if (not isinstance(state, dict) or state.get('schema_version') != schema
+                    or type(state['progress']['step']) is not int
                     or state['progress']['step'] != step):
                 raise ValueError('checkpoint failed validation')
+            if sft is not None:
+                validate_sft_state_identity(state, sft)
             newest.append((step, state_path.parent, hashlib.sha256(raw).hexdigest(), state))
         except (KeyError, TypeError, OSError, json.JSONDecodeError) as exc:
             raise ValueError(f'cannot validate published checkpoint: {state_path}') from exc
@@ -132,11 +288,12 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
                              'updated_unix': time.time(), **extra})
     complete = root / 'complete.json'
     kind = value.get('trainer_kind', 'distillation')
-    schema = ('lfg.owned-distillation-checkpoint.v1' if kind == 'distillation'
-              else 'lfg.owned-assessment-sft-checkpoint.v1')
     while not complete.exists():
-        checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864))
-        student = json.loads(Path(value['student_config'] if kind == 'distillation' else value['sft_config']).read_text(encoding='utf-8'))
+        sft = sft_context(value) if kind == 'assessment_sft' else None
+        schema = 'lfg.owned-distillation-checkpoint.v1' if sft is None else sft['checkpoint_schema']
+        checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864), sft)
+        student = (json.loads(Path(value['student_config']).read_text(encoding='utf-8'))
+                   if sft is None else {'steps': sft['steps']})
         total = student['steps']
         if checkpoint and checkpoint[0] > total:
             report('needs_attention', step=checkpoint[0], reason='checkpoint exceeds configured final step')
@@ -174,18 +331,23 @@ def run(path: Path, *, exit_on_complete: bool = False) -> None:
         manifest_path = output / 'manifest.json'
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-            if not manifest.get('completed') or digest(output / 'weights.safetensors') != manifest.get('weights_sha256'):
+            if sft is not None:
+                validate_sft_result(sft, manifest, output / 'weights.safetensors')
+            elif (not isinstance(manifest, dict) or manifest.get('completed') is not True
+                  or digest(output / 'weights.safetensors') != manifest.get('weights_sha256')):
                 raise ValueError('invalid final model result')
             atomic_json(complete, {'completed_steps': manifest['steps'], 'weights_sha256': manifest['weights_sha256'],
                                    'result_path': str(output), 'assessment_quality_evaluated': False})
             break
-        next_checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864))
+        next_checkpoint = latest_checkpoint(segments, schema, value.get('max_checkpoint_state_bytes', 67108864), sft)
         if not next_checkpoint or next_checkpoint[0] <= (checkpoint[0] if checkpoint else 0):
+            lock.close()
             raise ValueError('segment completed without advancing its checkpoint')
     result = json.loads(complete.read_text(encoding='utf-8'))
     report('complete', step=result['completed_steps'], total_steps=result['completed_steps'], weights_sha256=result['weights_sha256'],
            assessment_quality_evaluated=False)
     if exit_on_complete:
+        lock.close()
         return
     # Keep the user service alive for status inspection, without repeatedly training the same data.
     while True:
