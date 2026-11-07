@@ -1,0 +1,36 @@
+{
+  "schema_version": "lfg.local-model-comparison.v1",
+  "python": "/PATH/TO/PYTHON",
+  "collector": "/PATH/TO/collect_local_teacher.py",
+  "policy": "/PATH/TO/PRIVATE_SCREEN_POLICY.json",
+  "reference_dataset": "/PATH/TO/PRIVATE_TEACHER_DATASET/train.jsonl",
+  "output": "/PATH/TO/NEW_PRIVATE_OUTPUT",
+  "server_command": ["/PATH/TO/llama-server", "-m", "{weights}", "--host", "127.0.0.1", "--port", "{port}", "--alias", "{id}"],
+  "port": 18091,
+  "startup_timeout_seconds": 300,
+  "complexity_levels": {"low": 0, "medium": 1, "high": 2, "very_high": 3, "extreme": 3},
+  "instruction_suffix": " Set complexity to one of: low, medium, high, very_high.",
+  "collection": {
+    "schema_version": "lfg.local-teacher-collection.v1",
+    "source_origin": "owner_chat",
+    "required_fields": ["intent", "complexity", "suggested_models", "agent_count", "reasons"],
+    "json_mode": true,
+    "temperature": 0.0,
+    "max_tokens": 512,
+    "timeout_seconds": 300,
+    "max_requests": 1000,
+    "max_request_bytes": 4096,
+    "max_http_response_bytes": 65536,
+    "max_response_bytes": 8192,
+    "max_manifest_bytes": 1048576,
+    "on_incomplete": "skip"
+  },
+  "models": [
+    {
+      "id": "REPLACE_WITH_MODEL_ID",
+      "weights": "/PATH/TO/MODEL.gguf",
+      "server_args": ["-ngl", "99", "--ctx-size", "8192", "--parallel", "1", "--jinja", "--metrics"],
+      "request_extensions": {"chat_template_kwargs": {"enable_thinking": false}}
+    }
+  ]
+}
