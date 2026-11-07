@@ -82,6 +82,72 @@ class OwnedMappingTests(unittest.TestCase):
         self.assertEqual(compare._owned_prediction("ok", None, True, "build.software"), (None, "malformed_contract"))
         self.assertEqual(compare._owned_prediction("ok", {"intent": 4}, True, "build.software"), (None, "malformed_contract"))
 
+    def test_atomic_contract_scores_only_explicit_identity_bound_decisions(self):
+        contract = {"field": "intents", "label": "build.software",
+                    "taxonomy_sha256": "a" * 64, "guide_sha256": "b" * 64}
+        explicit = {"schema_version": "lfg.owned-multilabel-response.v1",
+                    "taxonomy_sha256": "a" * 64, "guide_sha256": "b" * 64,
+                    "decisions": [{"field": "intents", "label": "build.software", "value": "positive"}],
+                    "extensions": {"inert": True}}
+        self.assertEqual(compare._atomic_prediction("ok", explicit, contract), (1, "explicit_positive"))
+        missing_guide = {key: value for key, value in explicit.items() if key != "guide_sha256"}
+        self.assertEqual(compare._atomic_prediction("ok", missing_guide, contract),
+                         (None, "unknown_contract_identity_missing"))
+        null_contract = {**contract, "guide_sha256": None}
+        null_response = {**explicit, "guide_sha256": None}
+        self.assertEqual(compare._atomic_prediction("ok", null_response, null_contract),
+                         (1, "explicit_positive"))
+        self.assertEqual(compare._atomic_prediction("ok", missing_guide, null_contract),
+                         (None, "unknown_contract_identity_missing"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "decisions": [
+            {"field": "intents", "label": "build.software", "value": "negative"}]}, contract),
+            (0, "explicit_negative"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "taxonomy_sha256": "c" * 64}, contract),
+                         (None, "unknown_contract_identity_mismatch"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "decisions": []}, contract),
+                         (None, "unknown_missing_decision"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "abstain": True,
+            "decisions": [{"field": "intents", "label": "build.software", "value": "unknown"}]}, contract),
+            (None, "unknown_abstained"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "decisions": [
+            explicit["decisions"][0], explicit["decisions"][0]]}, contract),
+            (None, "malformed_contract"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "decisions": [
+            {"field": "intents", "label": "other.label", "value": "positive"}]}, contract),
+            (None, "malformed_contract"))
+        self.assertEqual(compare._atomic_prediction("ok", {**explicit, "decisions": [
+            {"field": "intents", "label": "build.software", "value": "unknown"}]}, contract),
+            (None, "unknown_decision"))
+        self.assertEqual(compare._atomic_prediction("truncated", explicit, contract),
+                         (None, "truncated"))
+        self.assertEqual(compare._atomic_prediction("ok", {"intent": "build.software"}, contract),
+                         (None, "unknown_contract_identity_missing"))
+        self.assertEqual(compare._owned_prediction("ok", {"intent": "build.software"}, False,
+                                                   "build.software"), (None, "unknown_unmapped_taxonomy"))
+
+    def test_atomic_query_config_pins_template_checkpoint_and_target(self):
+        template = "For {field}, decide {label}."
+        pinned = {"expected_model_sha256": "a" * 64,
+                  "expected_cached_manifest_sha256": "b" * 64,
+                  "expected_training_manifest_sha256": "c" * 64}
+        contract = {"schema_version": "lfg.owned-atomic-query-config.v1", "field": "intents",
+                    "label": "build.software", "taxonomy_sha256": "d" * 64, "guide_sha256": None,
+                    "guide_provenance_status": "explicitly_none",
+                    "instruction_template": template,
+                    "instruction_template_sha256": compare.sha(template.encode()),
+                    "system_sha256": "e" * 64, "framing_sha256": "f" * 64,
+                    "checkpoint_manifest_sha256": "c" * 64, "weights_sha256": "a" * 64,
+                    "cached_manifest_sha256": "b" * 64, "training_manifest_sha256": "c" * 64}
+        accepted = compare._atomic_query_config(contract, "intents", "build.software", pinned)
+        self.assertEqual(compare._atomic_query_instruction(accepted), "For intents, decide build.software.")
+        self.assertIsNone(compare._atomic_query_config(None, "intents", "build.software", pinned))
+        with self.assertRaises(ValueError):
+            compare._atomic_query_config({**contract, "label": "different.label"}, "intents",
+                                         "build.software", pinned)
+        with self.assertRaises(ValueError):
+            compare._atomic_query_config({**contract, "instruction_template_sha256": "9" * 64},
+                                         "intents", "build.software", pinned)
+
     def test_owned_response_requires_pinned_worker_lifecycle_measurements(self):
         complete = {
             "schemaVersion": "lfg.owned-run-measurement.v1", "status": "ok",
@@ -190,7 +256,10 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
             "target_mask_sha256": "7" * 64, "classical_report": {"data": {"validation_sha256": "8" * 64}},
             "deterministic_assessment_sha256": "9" * 64, "deterministic_rule_ids": ["build.software"],
             "deterministic_rules_sha256": "a" * 64, "deterministic_fallback_id": "respond.general",
-            "classical_config": {"selected_labels": ["build.software"], "max_text_bytes": 128},
+            "classical_config": {"selected_labels": ["build.software"], "max_text_bytes": 128,
+                                 "target_field": "intents"},
+            "corpus": {"taxonomy_sha256": "0" * 64, "guide_provenance_status": "not_declared",
+                       "guide_sha256": None},
         }
         production = json.loads(compare._make_payload(config, bound, "a" * 32))
         empty = json.loads(compare._empty_probe_payload(
@@ -202,6 +271,55 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         self.assertEqual(compare._payload_output_text_byte_bucket_boundaries(empty), expected)
         self.assertEqual(len(production["records"]), 1)
         self.assertEqual(empty["records"], [])
+
+    def test_make_payload_requires_verified_or_explicitly_absent_guide_for_atomic_mode(self):
+        config = {"classical_report_sha256": "a" * 64, "classical_config_sha256": "b" * 64,
+                  "comparison_12b_report_sha256": "c" * 64, "comparison_12b_config_sha256": "d" * 64,
+                  "private_source_root": "/private/root", "service_binary": "/private/root/server",
+                  "service_binary_sha256": "e" * 64, "service_config_template": "/private/root/service.json",
+                  "service_config_template_sha256": "f" * 64, "metadata_directory": "/private/root/metadata",
+                  "expected_model_sha256": "a" * 64, "expected_framing_sha256": "b" * 64,
+                  "expected_cached_manifest_sha256": "b" * 64, "expected_runtime_config_sha256": "c" * 64,
+                  "expected_training_manifest_sha256": "c" * 64, "coexisting_service_unit": "lfg.service",
+                  "resource_cpu_quota_percent": 100, "resource_memory_max_bytes": 1000,
+                  "min_memory_available_bytes": 1, "min_disk_free_bytes": 1,
+                  "per_request_deadline_seconds": 10, "total_runtime_deadline_seconds": 100,
+                  "max_response_bytes": 10000, "max_payload_bytes": 100000,
+                  "atomic_query_contract": {"schema_version": "lfg.owned-atomic-query-config.v1",
+                    "field": "intents", "label": "build.software", "taxonomy_sha256": "d" * 64,
+                    "guide_sha256": "e" * 64, "guide_provenance_status": "verified_sha256",
+                    "instruction_template": "For {field}, decide {label}.",
+                    "instruction_template_sha256": compare.sha(b"For {field}, decide {label}."),
+                    "system_sha256": "f" * 64, "framing_sha256": "0" * 64,
+                    "checkpoint_manifest_sha256": "c" * 64, "weights_sha256": "a" * 64,
+                    "cached_manifest_sha256": "b" * 64, "training_manifest_sha256": "c" * 64}}
+        class Matrix:
+            def tolist(self):
+                return [[1]]
+        bound = {"validation_rows": [{"id": "fixture-row", "text": "fixture input"}],
+                 "y_validation": Matrix(), "target_known": Matrix(), "target_label": "build.software",
+                 "classical_config_sha256": "1" * 64, "comparison_12b_config_sha256": "2" * 64,
+                 "validation_id_set_sha256": "3" * 64, "target_mask_sha256": "4" * 64,
+                 "classical_report": {"data": {"validation_sha256": "5" * 64}},
+                 "deterministic_assessment_sha256": "6" * 64, "deterministic_rule_ids": ["build.software"],
+                 "deterministic_rules_sha256": "7" * 64, "deterministic_fallback_id": "respond.general",
+                 "classical_config": {"selected_labels": ["build.software"], "max_text_bytes": 128,
+                                      "target_field": "intents"},
+                 "corpus": {"taxonomy_sha256": "d" * 64, "guide_sha256": "e" * 64,
+                            "guide_provenance_status": "verified_sha256"}}
+        payload = json.loads(compare._make_payload(config, bound, "a" * 32))
+        self.assertEqual(payload["binding"]["atomic_query_contract"]["guide_sha256"], "e" * 64)
+        bound["corpus"]["guide_sha256"] = None
+        with self.assertRaisesRegex(ValueError, "guide"):
+            compare._make_payload(config, bound, "b" * 32)
+        bound["corpus"]["guide_provenance_status"] = "explicitly_none"
+        config["atomic_query_contract"]["guide_sha256"] = None
+        config["atomic_query_contract"]["guide_provenance_status"] = "explicitly_none"
+        payload = json.loads(compare._make_payload(config, bound, "c" * 32))
+        self.assertIsNone(payload["binding"]["atomic_query_contract"]["guide_sha256"])
+        bound["corpus"]["guide_provenance_status"] = "not_declared"
+        with self.assertRaisesRegex(ValueError, "guide"):
+            compare._make_payload(config, bound, "d" * 32)
 
     def test_generated_worker_counts_only_allowlisted_diagnostics_and_never_emits_sentinels(self):
         namespace = {"__name__": "generated_worker_test"}
@@ -333,7 +451,8 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         import io
         from types import SimpleNamespace
 
-        def run_worker(owned_responses):
+        def run_worker(owned_responses, atomic_query=None, mutate_training=None, mutate_graph=None,
+                       mutate_engine=None, mutate_output=None):
             namespace = {"__name__": "generated_worker_test"}
             exec(compare._remote_worker_source(), namespace)
             boundaries = [8, 32]
@@ -352,6 +471,7 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
             payload = {"schema_version": "lfg.owned-matched-worker-input.v1", "run_id": "f" * 32,
                        "binding": {"rows": 2, "validation_record_id_set_sha256": ids_digest,
                                    "target_mask_sha256": mask_digest, "target_label": "build.software",
+                                   "target_field": "intents",
                                    "rule_ids": ["build.software"], "fallback_id": "respond.general",
                                    "assessment_sha256": "1" * 64, "rules_sha256": "2" * 64},
                        "remote": {}, "diagnostics": {"output_text_utf8_byte_bucket_boundaries": boundaries},
@@ -368,11 +488,88 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                 framing = metadata / "framing.json"
                 runtime = metadata / "runtime.json"
                 training = metadata / "training.json"
-                for path, content in ((framing, b'{"system":"fixture"}'),
+                cached_manifest_path = metadata / "cached-manifest.json"
+                system_text = "fixture atomic classifier system" if atomic_query is not None else "fixture"
+                if atomic_query is None:
+                    framing_raw = b'{"system":"fixture"}'
+                    training_raw = b'{"fixture":true}'
+                else:
+                    framing_values = {"system_prefix": "<s>", "system_suffix": "</s>",
+                                      "user_prefix": "<u>", "user_suffix": "</u>",
+                                      "assistant_prefix": "<a>", "assistant_suffix": "</a>"}
+                    framing_digest = compare.sha(json.dumps(framing_values, sort_keys=True, ensure_ascii=False,
+                                                           separators=(",", ":")).encode())
+                    template_text = "For {field}, decide whether {label} applies."
+                    taxonomy_digest = "1" * 64
+                    guide_status = atomic_query.get("guide_provenance_status", "verified_sha256")
+                    guide_digest = "2" * 64 if guide_status == "verified_sha256" else None
+                    instruction_digest = compare.sha(template_text.encode())
+                    source_checkpoint_digest, source_weights_digest = "3" * 64, "4" * 64
+                    code_names = ("train_owned_assessment_sft.py", "train_owned_student.py", "owned_student.py",
+                                  "owned_sft_checkpoint.py", "owned_multilabel_contract.py", "masked_supervision.py")
+                    code_sha = {name: f"{index + 5:x}" * 64 for index, name in enumerate(code_names)}
+                    model_sha = compare.sha(binary.read_bytes())
+                    target_support = {"positive": 1, "negative": 1, "unknown": 0}
+                    historical_adapter_sha = "e" * 64
+                    historical_response_sha = "f" * 64
+                    self.assertNotEqual(historical_adapter_sha, code_sha["owned_multilabel_contract.py"])
+                    self.assertNotEqual(historical_response_sha, code_sha["owned_multilabel_contract.py"])
+                    coverage = {"system_sha256": compare.sha(system_text.encode()),
+                        "framing_sha256": framing_digest, "taxonomy_sha256": taxonomy_digest,
+                        "guide_sha256": guide_digest, "instruction_template_sha256": instruction_digest,
+                        "source_checkpoint_manifest_sha256": source_checkpoint_digest,
+                        "source_checkpoint_weights_sha256": source_weights_digest,
+                        "config_sha256": "7" * 64, "dataset_manifest_sha256": "8" * 64,
+                        "training_file_sha256": "9" * 64, "source_quality": "unverified",
+                        "adapter_code_sha256": historical_adapter_sha,
+                        "response_contract_code_sha256": historical_response_sha,
+                        "target_support_claim": target_support, "code_sha256": code_sha,
+                        "live_masked_supervision_code_sha256": code_sha["masked_supervision.py"]}
+                    training_info = {"schema_version": "lfg.owned-multilabel-sft-result.v1",
+                        "completed": True, "training_task": "owned_multilabel", "promotion_eligible": False,
+                        "classifier_quality_evaluated": False, "validation_opened": False, "test_opened": False,
+                        "heldout_separation": "unknown", "source_quality": "unverified",
+                        "weights_sha256": model_sha, "system_sha256": compare.sha(system_text.encode()),
+                        "framing_sha256": framing_digest, "taxonomy_sha256": taxonomy_digest,
+                        "guide_sha256": guide_digest, "instruction_template_sha256": instruction_digest,
+                        "source_checkpoint_manifest_sha256": source_checkpoint_digest,
+                        "source_checkpoint_weights_sha256": source_weights_digest,
+                        "config_sha256": "7" * 64, "dataset_manifest_sha256": "8" * 64,
+                        "training_file_sha256": "9" * 64, "steps": 1, "code_sha256": code_sha,
+                        "target_support_claim": target_support,
+                        "adapter_code_sha256": historical_adapter_sha,
+                        "response_contract_code_sha256": historical_response_sha,
+                        "coverage": coverage}
+                    self.assertNotIn("training_task", coverage)
+                    self.assertNotIn("weights_sha256", coverage)
+                    if mutate_training is not None:
+                        mutate_training(training_info)
+                    training_raw = json.dumps(training_info, sort_keys=True).encode()
+                    training_digest = compare.sha(training_raw)
+                    graph_manifest = {"schema_version": "lfg.owned-byte-cached-onnx.v1",
+                        "model_sha256": model_sha, "source_manifest_sha256": training_digest,
+                        "source_model_code_sha256": code_sha["owned_student.py"],
+                        "prefill_onnx_sha256": "a" * 64, "decode_onnx_sha256": "b" * 64}
+                    if mutate_graph is not None:
+                        mutate_graph(graph_manifest)
+                    cached_manifest_raw = json.dumps(graph_manifest, sort_keys=True, separators=(",", ":"),
+                                                     ensure_ascii=False).encode() + b"\n"
+                    framing_raw = json.dumps({"system": system_text, "framing": framing_values},
+                                             sort_keys=True).encode()
+                    atomic_query.update({"schema_version": "lfg.owned-atomic-query-config.v1",
+                        "field": "intents", "label": "build.software", "taxonomy_sha256": taxonomy_digest,
+                        "guide_sha256": guide_digest, "guide_provenance_status": guide_status,
+                        "instruction_template": template_text,
+                        "instruction_template_sha256": instruction_digest, "system_sha256": compare.sha(system_text.encode()),
+                        "framing_sha256": framing_digest})
+                for path, content in ((framing, framing_raw),
                                       (runtime, b'{"fixture":true}'),
-                                      (training, b'{"fixture":true}')):
+                                      (training, training_raw)):
                     path.write_bytes(content)
                     path.chmod(0o600)
+                if atomic_query is not None:
+                    cached_manifest_path.write_bytes(cached_manifest_raw)
+                    cached_manifest_path.chmod(0o600)
                 service = {"schemaVersion": "lfg.owned-assessment-service.v1", "enabled": True,
                            "backend": "cached_onnx", "artifactMode": "embedded",
                            "expectedModelSha256": expected_hashes["model"],
@@ -381,7 +578,10 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                            "maxConcurrent": 1, "workerThreads": 1, "timeoutMs": 500,
                            "maxRequestBytes": 1000, "maxContextBytes": 2000, "maxGeneratedBytes": 3000,
                            "maxCachedGraphBytes": 4000, "maxCacheStateBytesPerRequest": 5000,
-                           "requiredOutputFields": [{"name": "intent", "valueType": "string", "nonEmpty": True}]}
+                           "requiredOutputFields": ([{"name": "schema_version", "valueType": "string"},
+                               {"name": "taxonomy_sha256", "valueType": "string"},
+                               {"name": "decisions", "valueType": "array"}] if atomic_query is not None else
+                               [{"name": "intent", "valueType": "string", "nonEmpty": True}])}
                 template = root / "service.json"
                 template.write_text(json.dumps(service), encoding="utf-8")
                 template.chmod(0o600)
@@ -391,6 +591,13 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                                         "framing": compare.sha(framing.read_bytes()),
                                         "runtime": compare.sha(runtime.read_bytes()),
                                         "training": compare.sha(training.read_bytes())})
+                if atomic_query is not None:
+                    atomic_query.update({"checkpoint_manifest_sha256": expected_hashes["training"],
+                                         "weights_sha256": expected_hashes["model"],
+                                         "cached_manifest_sha256": compare.sha(cached_manifest_raw),
+                                         "training_manifest_sha256": expected_hashes["training"]})
+                    expected_hashes["cached"] = atomic_query["cached_manifest_sha256"]
+                    payload["binding"]["atomic_query_contract"] = atomic_query
                 service.update({"expectedModelSha256": expected_hashes["model"],
                                 "expectedFramingSha256": expected_hashes["framing"],
                                 "expectedCachedManifestSha256": expected_hashes["cached"]})
@@ -413,9 +620,14 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                           "modelSha256": expected_hashes["model"],
                           "sourceWeightsSha256": expected_hashes["model"],
                           "cachedManifestSha256": expected_hashes["cached"],
+                          "modelManifestSha256": expected_hashes["cached"],
+                          "prefillOnnxSha256": graph_manifest.get("prefill_onnx_sha256") if atomic_query is not None else None,
+                          "decodeOnnxSha256": graph_manifest.get("decode_onnx_sha256") if atomic_query is not None else None,
                           "framingSha256": expected_hashes["framing"],
                           "runtimeConfigSha256": expected_hashes["runtime"],
                           "trainingManifestSha256": expected_hashes["training"]}
+                if mutate_engine is not None:
+                    mutate_engine(engine)
                 limits = {"backend": "cached_onnx", "maxRequestBytes": service["maxRequestBytes"],
                           "maxContextBytes": service["maxContextBytes"], "maxGeneratedBytes": service["maxGeneratedBytes"],
                           "maxCachedGraphBytes": service["maxCachedGraphBytes"],
@@ -425,17 +637,26 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                         "rulesSha256": payload["binding"]["rules_sha256"],
                         "assessmentRevision": "fixture", "rulesRevision": "fixture"}
 
+                explicit_output = ({"schema_version": "lfg.owned-multilabel-response.v1",
+                    "taxonomy_sha256": atomic_query["taxonomy_sha256"], "guide_sha256": atomic_query["guide_sha256"],
+                    "decisions": [{"field": atomic_query["field"], "label": atomic_query["label"],
+                                   "value": "positive"}]} if atomic_query is not None else
+                    {"intent": "sentinel-output"})
                 def response(status="ok", stop_reason="stop_sequence", output_text='{"intent":"sentinel-output"}',
                              *, completed=True, byte_count=24):
+                    output = dict(explicit_output)
+                    if mutate_output is not None:
+                        mutate_output(output)
                     return {"schemaVersion": "lfg.owned-assessment.v1", "status": status,
                             "engine": engine, "stopReason": stop_reason, "outputText": output_text,
-                            "output": {"intent": "sentinel-output"},
+                            "output": output,
                             "measurement": {"schemaVersion": "lfg.owned-run-measurement.v1",
                                             "status": status, "workerStarted": True,
                                             "workerCompletedSuccessfully": completed,
                                             "outputTextUtf8Bytes": byte_count}}
 
                 response_queue = list(owned_responses(response))
+                request_bodies = []
                 def http(_port, path, _method="GET", _body=None, token=None, **_kwargs):
                     headers = {"cache-control": "no-store"}
                     if path.endswith("/api/lfg/assess/owned/status"):
@@ -448,6 +669,7 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                     if path == "/api/lfg/assess":
                         return 200, headers, b"{}"
                     if path == "/api/lfg/assess/owned":
+                        request_bodies.append(json.loads(_body))
                         next_response = response_queue.pop(0)
                         if isinstance(next_response, BaseException):
                             raise next_response
@@ -482,7 +704,13 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                                                "_terminate_process_group": lambda _child: {"verified": True, "exit_code": 0},
                                                "_loopback_port_closed": lambda _port: True,
                                                "resource_sample": lambda: {"cgroup": None}}):
-                    return namespace["main"]()
+                    result = namespace["main"]()
+                    payload_raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":"), allow_nan=False).encode()
+                    compare._validate_atomic_query_aggregate(
+                        result, payload["binding"].get("atomic_query_contract"), payload_raw, len(rows))
+                    result["_test_request_bodies"] = request_bodies
+                    return result
 
         def response_factory(response):
             first = response()
@@ -515,6 +743,61 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         self.assertTrue(terminal["aborted"])
         self.assertNotIn("private-sentinel-exception", json.dumps(terminal))
         self.assertNotIn("sentinel-output", json.dumps(terminal))
+
+        contract = {"field": "intents", "label": "build.software"}
+        def atomic_factory(response):
+            return [response(), response()]
+        atomic = run_worker(atomic_factory, contract)
+        self.assertEqual(atomic["owned_metrics"]["coverage"], 1.0)
+        self.assertEqual(atomic["owned_mapping_outcome_counts"], {"explicit_positive": 2})
+        self.assertEqual(atomic["atomic_query"]["model_calls_per_owned_request"], 1)
+        self.assertEqual(atomic["_test_request_bodies"][0]["text"],
+                         "For intents, decide whether build.software applies.\nfixture row one")
+        public_result = {key: value for key, value in atomic.items() if key != "_test_request_bodies"}
+        self.assertNotIn("sentinel-output", json.dumps(public_result))
+        self.assertNotIn("For intents, decide", json.dumps(public_result))
+        explicit_none_contract = {"field": "intents", "label": "build.software",
+                                  "guide_provenance_status": "explicitly_none"}
+        explicit_none = run_worker(atomic_factory, explicit_none_contract)
+        self.assertEqual(explicit_none["owned_metrics"]["coverage"], 1.0)
+        missing_response_guide = run_worker(
+            atomic_factory, explicit_none_contract, mutate_output=lambda output: output.pop("guide_sha256"))
+        self.assertEqual(missing_response_guide["owned_metrics"]["coverage"], 0.0)
+        self.assertEqual(missing_response_guide["owned_mapping_outcome_counts"],
+                         {"unknown_contract_identity_missing": 2})
+
+        for description, mutate_training, mutate_graph in (
+                ("partial", lambda value: value.update(completed=False), None),
+                ("top-level guide missing", lambda value: value.pop("guide_sha256"), None),
+                ("coverage guide missing", lambda value: value["coverage"].pop("guide_sha256"), None),
+                ("wrong schema", lambda value: value.update(schema_version="lfg.owned-assessment-sft-result.v1"), None),
+                ("contradictory coverage", lambda value: value["coverage"].update(taxonomy_sha256="0" * 64), None),
+                ("contradictory source checkpoint", lambda value: value["coverage"].update(
+                    source_checkpoint_manifest_sha256="0" * 64), None),
+                ("historical adapter top/coverage mismatch", lambda value: value.update(
+                    adapter_code_sha256="0" * 64), None),
+                ("historical response top/coverage mismatch", lambda value: value.update(
+                    response_contract_code_sha256="0" * 64), None),
+                ("historical response coverage mismatch", lambda value: value["coverage"].update(
+                    response_contract_code_sha256="0" * 64), None),
+                ("invalid historical adapter digest", lambda value: value.update(
+                    adapter_code_sha256="not-a-sha"), None),
+                ("invalid historical response digest", lambda value: value.update(
+                    response_contract_code_sha256="not-a-sha"), None),
+                ("weights link", lambda value: value.update(weights_sha256="0" * 64), None),
+                ("graph source link", None, lambda value: value.update(source_manifest_sha256="0" * 64))):
+            with self.subTest(description=description), self.assertRaisesRegex(RuntimeError, "atomic query identities"):
+                run_worker(atomic_factory, {"field": "intents", "label": "build.software"},
+                           mutate_training=mutate_training, mutate_graph=mutate_graph)
+        with self.assertRaisesRegex(RuntimeError, "loaded cached graph identity"):
+            run_worker(atomic_factory, {"field": "intents", "label": "build.software"},
+                       mutate_engine=lambda engine: engine.update(prefillOnnxSha256="0" * 64))
+        with self.assertRaisesRegex(RuntimeError, "atomic query identities"):
+            run_worker(atomic_factory, {"field": "intents", "label": "build.software"},
+                       mutate_graph=lambda manifest: manifest.update(model_sha256="0" * 64))
+        with self.assertRaisesRegex(RuntimeError, "atomic query identities"):
+            run_worker(atomic_factory, {"field": "intents", "label": "build.software"},
+                       mutate_graph=lambda manifest: manifest.update(source_model_code_sha256="0" * 64))
 
 
 class BoundaryTests(unittest.TestCase):

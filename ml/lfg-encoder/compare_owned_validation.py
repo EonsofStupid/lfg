@@ -28,9 +28,12 @@ from typing import Any
 
 import compare_local_12b as comparison_12b
 import classifier_comparison as classical_comparison
+import owned_multilabel_contract as multilabel_contract
+validate_response = multilabel_contract.validate_response
 
 SCHEMA = "lfg.owned-matched-validation-config.v1"
 REPORT_SCHEMA = "lfg.owned-matched-validation-report.v1"
+ATOMIC_QUERY_SCHEMA = "lfg.owned-atomic-query-config.v1"
 HEX = re.compile(r"^[0-9a-f]{64}$")
 HOST_PART = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
 CURRENT_STAGE = "configuration"
@@ -534,6 +537,184 @@ def _owned_terminal_prediction(status: Any, output: Any, measurement: Any,
     return prediction, outcome, True
 
 
+def _atomic_query_config(value: Any, target_field: str, target_label: str,
+                         config: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the opt-in, checkpoint-bound atomic query extension.
+
+    The ordinary comparator configuration deliberately remains compatible: in
+    its absence, legacy free-form outputs remain unscorable.
+    """
+    if value is None:
+        return None
+    required = {
+        "schema_version", "field", "label", "taxonomy_sha256", "guide_sha256", "guide_provenance_status",
+        "instruction_template", "instruction_template_sha256", "system_sha256",
+        "framing_sha256", "checkpoint_manifest_sha256", "weights_sha256",
+        "cached_manifest_sha256", "training_manifest_sha256",
+    }
+    if (not isinstance(value, dict) or not required <= set(value)
+            or value.get("schema_version") != ATOMIC_QUERY_SCHEMA
+            or value.get("field") != target_field or value.get("label") != target_label):
+        raise ValueError("invalid atomic query contract or target identity")
+    for name in ("taxonomy_sha256", "instruction_template_sha256", "system_sha256",
+                 "framing_sha256", "checkpoint_manifest_sha256", "weights_sha256",
+                 "cached_manifest_sha256", "training_manifest_sha256"):
+        if not isinstance(value[name], str) or HEX.fullmatch(value[name]) is None:
+            raise ValueError(f"invalid atomic query {name}")
+    guide = value["guide_sha256"]
+    if guide is not None and (not isinstance(guide, str) or HEX.fullmatch(guide) is None):
+        raise ValueError("invalid atomic query guide_sha256")
+    if value["guide_provenance_status"] not in ("verified_sha256", "explicitly_none") or \
+            (value["guide_provenance_status"] == "verified_sha256") != (guide is not None):
+        raise ValueError("atomic query guide provenance is not verified")
+    template = value["instruction_template"]
+    if (not isinstance(template, str) or not template.strip() or len(template.encode("utf-8")) > 65536
+            or "{field}" not in template or "{label}" not in template
+            or sha(template.encode("utf-8")) != value["instruction_template_sha256"]):
+        raise ValueError("invalid atomic query instruction template")
+    pinned = {
+        "weights_sha256": "expected_model_sha256",
+        "cached_manifest_sha256": "expected_cached_manifest_sha256",
+        "training_manifest_sha256": "expected_training_manifest_sha256",
+    }
+    if any(value[name] != config[config_name] for name, config_name in pinned.items()):
+        raise ValueError("atomic query checkpoint identity differs from pinned service configuration")
+    normalized = {name: value[name] for name in required}
+    normalized["checkpoint_manifest_sha256"] = value["checkpoint_manifest_sha256"]
+    return normalized
+
+
+def _atomic_query_instruction(contract: dict[str, Any]) -> str:
+    """Render exactly the instruction text used by the train-only adapter."""
+    template = contract["instruction_template"]
+    if sha(template.encode("utf-8")) != contract.get("instruction_template_sha256"):
+        raise ValueError("atomic query template digest mismatch")
+    return template.format(field=contract["field"], label=contract["label"])
+
+
+def _atomic_training_identity_valid(training: Any, training_sha256: Any, contract: Any,
+                                    cached_manifest: Any, cached_manifest_sha256: Any) -> bool:
+    """Require completed multilabel training and the actual cached graph manifest to link."""
+    if not isinstance(training, dict) or not isinstance(contract, dict) or not isinstance(cached_manifest, dict):
+        return False
+    coverage = training.get("coverage")
+    code = training.get("code_sha256")
+    if (training.get("schema_version") != "lfg.owned-multilabel-sft-result.v1"
+            or training.get("completed") is not True or training.get("training_task") != "owned_multilabel"
+            or training.get("promotion_eligible") is not False or training.get("classifier_quality_evaluated") is not False
+            or training.get("validation_opened") is not False or training.get("test_opened") is not False
+            or training.get("weights_sha256") != contract.get("weights_sha256")
+            or training.get("system_sha256") != contract.get("system_sha256")
+            or training.get("framing_sha256") != contract.get("framing_sha256")
+            or training.get("taxonomy_sha256") != contract.get("taxonomy_sha256")
+            or training.get("guide_sha256") != contract.get("guide_sha256")
+            or training.get("instruction_template_sha256") != contract.get("instruction_template_sha256")
+            or training_sha256 != contract.get("training_manifest_sha256")
+            or training_sha256 != contract.get("checkpoint_manifest_sha256")
+            or not isinstance(coverage, dict) or not isinstance(code, dict)
+            or "guide_sha256" not in training or "guide_sha256" not in coverage
+            or any(coverage.get(name) != training.get(name) for name in
+                   ("system_sha256", "framing_sha256", "taxonomy_sha256", "guide_sha256",
+                    "instruction_template_sha256", "source_checkpoint_manifest_sha256",
+                    "source_checkpoint_weights_sha256", "config_sha256", "dataset_manifest_sha256",
+                    "training_file_sha256", "adapter_code_sha256", "response_contract_code_sha256"))
+            or coverage.get("code_sha256") != code
+            or not {"train_owned_assessment_sft.py", "train_owned_student.py", "owned_student.py",
+                    "owned_sft_checkpoint.py", "owned_multilabel_contract.py", "masked_supervision.py"} <= set(code)
+            or any(not isinstance(value, str) or HEX.fullmatch(value) is None for value in code.values())
+            or coverage.get("live_masked_supervision_code_sha256") != code.get("masked_supervision.py")
+            or not isinstance(training.get("adapter_code_sha256"), str)
+            or HEX.fullmatch(training["adapter_code_sha256"]) is None
+            or not isinstance(training.get("response_contract_code_sha256"), str)
+            or HEX.fullmatch(training["response_contract_code_sha256"]) is None
+            or training.get("adapter_code_sha256") != coverage.get("adapter_code_sha256")
+            or training.get("response_contract_code_sha256") != coverage.get("response_contract_code_sha256")
+            or training.get("source_quality") != "unverified"
+            or training.get("heldout_separation") != "unknown"
+            or training.get("target_support_claim") != coverage.get("target_support_claim")
+            or not isinstance(coverage.get("target_support_claim"), dict)
+            or coverage["target_support_claim"].keys() != {"positive", "negative", "unknown"}
+            or any(type(count) is not int or count < 0 for count in coverage["target_support_claim"].values())
+            or not isinstance(training.get("source_checkpoint_manifest_sha256"), str)
+            or HEX.fullmatch(training["source_checkpoint_manifest_sha256"]) is None
+            or not isinstance(training.get("source_checkpoint_weights_sha256"), str)
+            or HEX.fullmatch(training["source_checkpoint_weights_sha256"]) is None
+            or not isinstance(training.get("config_sha256"), str) or HEX.fullmatch(training["config_sha256"]) is None
+            or not isinstance(training.get("dataset_manifest_sha256"), str)
+            or HEX.fullmatch(training["dataset_manifest_sha256"]) is None
+            or not isinstance(training.get("training_file_sha256"), str)
+            or HEX.fullmatch(training["training_file_sha256"]) is None
+            or type(training.get("steps")) is not int or training["steps"] < 1):
+        return False
+    graph_hash = cached_manifest.get("model_sha256")
+    if (cached_manifest.get("schema_version") != "lfg.owned-byte-cached-onnx.v1"
+            or cached_manifest_sha256 != contract.get("cached_manifest_sha256")
+            or cached_manifest.get("source_manifest_sha256") != training_sha256
+            or graph_hash != training.get("weights_sha256")
+            or cached_manifest.get("source_model_code_sha256") != code.get("owned_student.py")
+            or not isinstance(cached_manifest.get("prefill_onnx_sha256"), str)
+            or HEX.fullmatch(cached_manifest["prefill_onnx_sha256"]) is None
+            or not isinstance(cached_manifest.get("decode_onnx_sha256"), str)
+            or HEX.fullmatch(cached_manifest["decode_onnx_sha256"]) is None):
+        return False
+    guide_state = contract.get("guide_provenance_status")
+    if guide_state == "verified_sha256":
+        if not isinstance(contract.get("guide_sha256"), str) or HEX.fullmatch(contract["guide_sha256"]) is None:
+            return False
+    elif guide_state == "explicitly_none":
+        if contract.get("guide_sha256") is not None:
+            return False
+    else:
+        return False
+    return True
+
+
+def _atomic_prediction(status: Any, output: Any, contract: Any) -> tuple[int | None, str]:
+    """Score only an explicit, identity-matched known single-cell decision."""
+    if status != "ok":
+        return None, status if isinstance(status, str) else "invalid_status"
+    if not isinstance(contract, dict):
+        return None, "unknown_atomic_contract"
+    if not isinstance(output, dict) or "guide_sha256" not in output:
+        return None, "unknown_contract_identity_missing"
+    try:
+        normalized = validate_response(
+            output, [{"field": contract["field"], "label": contract["label"]}], allow_abstention=True)
+    except (KeyError, TypeError, ValueError, RecursionError):
+        return None, "malformed_contract"
+    if (normalized.get("taxonomy_sha256") != contract.get("taxonomy_sha256")
+            or normalized.get("guide_sha256") != contract.get("guide_sha256")):
+        return None, "unknown_contract_identity_mismatch"
+    if normalized.get("abstain") is True:
+        return None, "unknown_abstained"
+    decisions = normalized.get("decisions")
+    if not isinstance(decisions, list) or len(decisions) != 1:
+        return None, "unknown_missing_decision"
+    value = decisions[0].get("value")
+    if value == "positive":
+        return 1, "explicit_positive"
+    if value == "negative":
+        return 0, "explicit_negative"
+    return None, "unknown_decision"
+
+
+def _atomic_terminal_prediction(status: Any, output: Any, measurement: Any, contract: Any,
+                                lifecycle_outcome_counts: dict[str, int] | None = None,
+                                response_status_counts: dict[str, int] | None = None) -> tuple[int | None, str, bool]:
+    """Keep contract decisions unknown unless the worker proves completion."""
+    if response_status_counts is not None and isinstance(status, str):
+        response_status_counts[status] = response_status_counts.get(status, 0) + 1
+    completed, lifecycle = _owned_lifecycle_complete(status, measurement)
+    if not completed:
+        if lifecycle_outcome_counts is not None:
+            lifecycle_outcome_counts[lifecycle] = lifecycle_outcome_counts.get(lifecycle, 0) + 1
+        return None, lifecycle, False
+    if lifecycle_outcome_counts is not None:
+        lifecycle_outcome_counts["completed"] = lifecycle_outcome_counts.get("completed", 0) + 1
+    prediction, outcome = _atomic_prediction(status, output, contract)
+    return prediction, outcome, True
+
+
 def _deterministic_prediction(response: Any, rule_ids: list[str], fallback_id: str, target_label: str,
                               assessment_sha256: str, rules_sha256: str,
                               assessment_revision: str, session_id: str) -> tuple[int | None, str, dict[str, str] | None]:
@@ -786,6 +967,13 @@ def _bind_inputs(config: dict[str, Any]) -> dict[str, Any]:
         cc["max_source_bytes"], cc["max_total_source_bytes"], cc["max_manifest_bytes"],
         cc["max_screened_file_bytes"], cc["near_duplicate_similarity"], cc["max_near_duplicate_pairs"],
         cc["max_near_duplicate_work"], Path(cc["screen_policy"]), cc["max_policy_bytes"])
+    audit_report, _audit_queue = classical_comparison.screen_private_corpus.corpus_audit.audit(
+        Path(cc["label_plan"]), development_only=True)
+    if (audit_report.get("plan_sha256") != source_identity.get("plan_sha256")
+            or audit_report.get("taxonomy_sha256") != corpus.get("taxonomy_sha256")):
+        raise ValueError("development audit plan or taxonomy identity changed")
+    corpus["guide_provenance_status"] = audit_report.get("label_guide_status", "not_declared")
+    corpus["guide_sha256"] = audit_report.get("label_guide_sha256")
     ledger, ledger_digest = classical_comparison._load_review_ledger(Path(cc["review_ledger"]), cc["max_ledger_bytes"])
     if set(ledger) != {row["id"] for row in train_rows + validation_rows}:
         raise ValueError("selected review ledger row set drifted")
@@ -908,6 +1096,18 @@ def _make_payload(config: dict[str, Any], bound: dict[str, Any], run_id: str) ->
     values = bound["y_validation"].tolist()
     known = bound["target_known"].tolist()
     target_label = bound["target_label"]
+    target_field = bound["classical_config"].get("target_field")
+    atomic_query = _atomic_query_config(config.get("atomic_query_contract"), target_field,
+                                        target_label, config)
+    guide_status = bound["corpus"].get("guide_provenance_status", "not_declared")
+    guide_matches = ((guide_status == "verified_sha256"
+                      and isinstance(atomic_query.get("guide_sha256"), str)
+                      and atomic_query["guide_sha256"] == bound["corpus"].get("guide_sha256"))
+                     or (guide_status == "explicitly_none" and atomic_query.get("guide_sha256") is None
+                         and atomic_query.get("guide_provenance_status") == "explicitly_none")) if atomic_query is not None else True
+    if atomic_query is not None and (atomic_query["taxonomy_sha256"] != bound["corpus"]["taxonomy_sha256"]
+                                     or not guide_matches):
+        raise ValueError("atomic query taxonomy or guide differs from the bound development sources")
     label_index = sorted(bound["classical_config"]["selected_labels"]).index(target_label)
     records = []
     for index, row in enumerate(validation):
@@ -930,6 +1130,8 @@ def _make_payload(config: dict[str, Any], bound: dict[str, Any], run_id: str) ->
                            "validation_record_id_set_sha256": bound["validation_id_set_sha256"],
                            "target_mask_sha256": bound["target_mask_sha256"],
                            "target_label": target_label,
+                           "target_field": target_field,
+                           "atomic_query_contract": atomic_query,
                            "rows": len(records), "assessment_sha256": bound["deterministic_assessment_sha256"],
                            "rules_sha256": bound["deterministic_rules_sha256"],
                            "rule_ids": bound["deterministic_rule_ids"],
@@ -1183,12 +1385,20 @@ def _remote_worker_source() -> str:
                          (_validated_output_text_byte_bucket_boundaries, _payload_output_text_byte_bucket_boundaries,
                           _new_owned_response_diagnostics,
                           _record_owned_response_diagnostics, _owned_prediction, _owned_lifecycle_complete, _owned_terminal_prediction,
+                          _atomic_query_instruction, _atomic_training_identity_valid, _atomic_prediction, _atomic_terminal_prediction,
                           _deterministic_prediction, _metrics, _http_loopback,
                           _descendant_pids, _process_alive, _terminate_process_group, _loopback_port_closed))
+    contract_source = "\n".join((
+        f"CONTRACT_SCHEMA = {multilabel_contract.CONTRACT_SCHEMA!r}",
+        f"MAX_EXTENSION_BYTES = {multilabel_contract.MAX_EXTENSION_BYTES!r}",
+        inspect.getsource(multilabel_contract._json_bytes),
+        inspect.getsource(multilabel_contract.validate_response),
+    ))
     constants = (f"DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = {DEFAULT_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES!r}\n"
                  f"MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES = {MAX_OUTPUT_TEXT_BYTE_BUCKET_BOUNDARIES}\n"
-                 f"MAX_OUTPUT_TEXT_BYTE_BOUNDARY = {MAX_OUTPUT_TEXT_BYTE_BOUNDARY}\n")
-    return REMOTE_WORKER + "\n" + constants + helpers + "\n" + _remote_worker_body()
+                 f"MAX_OUTPUT_TEXT_BYTE_BOUNDARY = {MAX_OUTPUT_TEXT_BYTE_BOUNDARY}\n"
+                 "HEX = re.compile(r'^[0-9a-f]{64}$')\n")
+    return REMOTE_WORKER + "\n" + constants + contract_source + "\n" + helpers + "\n" + _remote_worker_body()
 
 
 FILE_WORKER_HELPERS = r'''
@@ -1277,9 +1487,9 @@ def _file_worker_source() -> str:
                  " except Exception: sys.exit(31)")
     old_spawn = "env=env,start_new_session=True,close_fds=True)"
     new_spawn = "env=env,start_new_session=True,close_fds=True,preexec_fn=lambda: check_child_before_exec(static))"
-    old_copy = "  for name in ('framing.json','runtime.json','training.json'):\n   shutil.copyfile(md/name,metadata/name); os.chmod(metadata/name,0o600)\n  shutil.copyfile(binary,ownerdir/'lfg-server'); os.chmod(ownerdir/'lfg-server',0o700)"
-    new_copy = ("  for name,expected in (('framing.json',q['expected_framing_sha256']),('runtime.json',q['expected_runtime_config_sha256']),('training.json',q['expected_training_manifest_sha256'])):\n"
-                "   _copy_pinned_source(md/name,metadata/name,static['max_metadata_bytes'],expected)\n"
+    old_copy = "  for name in metadata_names:\n   shutil.copyfile(md/name,metadata/name); os.chmod(metadata/name,0o600)\n  shutil.copyfile(binary,ownerdir/'lfg-server'); os.chmod(ownerdir/'lfg-server',0o700)"
+    new_copy = ("  expected_by_name={'framing.json':q['expected_framing_sha256'],'runtime.json':q['expected_runtime_config_sha256'],'training.json':q['expected_training_manifest_sha256'],'cached-manifest.json':q['expected_cached_manifest_sha256']}\n"
+                "  for name in metadata_names:\n   _copy_pinned_source(md/name,metadata/name,static['max_metadata_bytes'],expected_by_name[name])\n"
                 "  _copy_pinned_source(binary,ownerdir/'lfg-server',static['max_binary_bytes'],q['service_binary_sha256']); os.chmod(ownerdir/'lfg-server',0o700)")
     for old, new in ((old_start, new_start), (" route_isolated()\n root=", " root="), (old_deadline, new_deadline),
                      (old_spawn, new_spawn), (old_copy, new_copy),
@@ -1287,6 +1497,8 @@ def _file_worker_source() -> str:
                      ("sha((md/'framing.json').read_bytes())", "_hash_private_source(md/'framing.json',static['max_metadata_bytes'])"),
                      ("sha((md/'runtime.json').read_bytes())", "_hash_private_source(md/'runtime.json',static['max_metadata_bytes'])"),
                      ("sha((md/'training.json').read_bytes())", "_hash_private_source(md/'training.json',static['max_metadata_bytes'])"),
+                     ("cached_raw=(md/'cached-manifest.json').read_bytes()", "cached_raw=_read_private_file(md/'cached-manifest.json',static['max_metadata_bytes'])"),
+                     ("cached_manifest=readjson(md/'cached-manifest.json')", "cached_manifest=_json(_read_private_file(md/'cached-manifest.json',static['max_metadata_bytes']),'cached manifest')"),
                      ("service=readjson(template)", "template_raw=_read_private_file(template,static['max_metadata_bytes'])\n if sha(template_raw)!=q['service_config_template_sha256']: raise RuntimeError('service template digest mismatch')\n service=_json(template_raw,'service template')"),
                      ("framing=readjson(md/'framing.json')", "framing=_json(_read_private_file(md/'framing.json',static['max_metadata_bytes']),'framing')"),
                      ("sha((ownerdir/'lfg-server').read_bytes())", "_hash_private_source(ownerdir/'lfg-server',static['max_binary_bytes'])"),
@@ -1533,7 +1745,9 @@ def main():
  root=pathlib.Path(q['private_source_root']).resolve(strict=True)
  binary=contained(q['service_binary'],root); template=contained(q['service_config_template'],root); md=contained(q['metadata_directory'],root)
  if not md.is_dir() or binary.stat().st_uid!=os.geteuid() or binary.stat().st_mode&0o077 or md.stat().st_uid!=os.geteuid() or md.stat().st_mode&0o077: raise RuntimeError('binary source ownership or privacy check failed')
- for name in ('framing.json','runtime.json','training.json'):
+ atomic_contract=b.get('atomic_query_contract')
+ metadata_names=('framing.json','runtime.json','training.json')+((('cached-manifest.json',) if atomic_contract is not None else ()))
+ for name in metadata_names:
   source=md/name
   if source.is_symlink() or not source.is_file() or source.stat().st_uid!=os.geteuid() or source.stat().st_mode&0o077: raise RuntimeError('metadata ownership or privacy check failed')
  if sha(binary.read_bytes())!=q['service_binary_sha256']: raise RuntimeError('owned service binary digest mismatch')
@@ -1546,19 +1760,50 @@ def main():
   if service.get(key)!=expected: raise RuntimeError('owned service template identity mismatch')
  if service.get('maxConcurrent')!=1 or service.get('workerThreads')!=1: raise RuntimeError('service template is not single flight')
  if q['per_request_deadline_seconds']*1000<=service.get('timeoutMs',0) or q['total_runtime_deadline_seconds']<len(rows)*q['per_request_deadline_seconds']+60: raise RuntimeError('configured client and whole-run deadlines are not above the service limits')
- framing=readjson(md/'framing.json'); system=framing.get('system','')
- # The current service configuration enforces only a nonempty string for
- # intent. Text mentioning a label cannot prove an exhaustive, same-meaning
- # taxonomy; the mapping therefore stays disabled for this checkpoint.
+ framing=readjson(md/'framing.json'); training=readjson(md/'training.json'); system=framing.get('system','')
  mapping_supported=False
- if not isinstance(service.get('requiredOutputFields'),list) or not any(isinstance(x,dict) and x.get('name')=='intent' and x.get('valueType')=='string' and x.get('nonEmpty') is True for x in service['requiredOutputFields']): raise RuntimeError('intent output contract missing')
+ if atomic_contract is not None:
+  if not isinstance(atomic_contract,dict): raise RuntimeError('atomic query contract is malformed')
+  identity_pairs=(('schema_version',atomic_contract.get('schema_version'),'lfg.owned-atomic-query-config.v1'),
+      ('field',atomic_contract.get('field'),b.get('target_field')),('label',atomic_contract.get('label'),b.get('target_label')),
+      ('weights_sha256',atomic_contract.get('weights_sha256'),q['expected_model_sha256']),
+      ('cached_manifest_sha256',atomic_contract.get('cached_manifest_sha256'),q['expected_cached_manifest_sha256']),
+      ('training_manifest_sha256',atomic_contract.get('training_manifest_sha256'),q['expected_training_manifest_sha256']),
+      ('checkpoint_manifest_sha256',atomic_contract.get('checkpoint_manifest_sha256'),q['expected_training_manifest_sha256']),
+      ('framing_sha256',atomic_contract.get('framing_sha256'),training.get('coverage',{}).get('framing_sha256')),
+      ('system_sha256',atomic_contract.get('system_sha256'),sha(system.encode('utf-8'))),
+      ('taxonomy_sha256',atomic_contract.get('taxonomy_sha256'),training.get('coverage',{}).get('taxonomy_sha256')),
+      ('guide_sha256',atomic_contract.get('guide_sha256'),training.get('coverage',{}).get('guide_sha256')),
+      ('instruction_template_sha256',atomic_contract.get('instruction_template_sha256'),training.get('coverage',{}).get('instruction_template_sha256')))
+  training_raw=(md/'training.json').read_bytes(); cached_raw=(md/'cached-manifest.json').read_bytes()
+  cached_manifest=readjson(md/'cached-manifest.json')
+  if (any(actual!=expected for _,actual,expected in identity_pairs)
+      or not _atomic_training_identity_valid(training,sha(training_raw),atomic_contract,
+                                             cached_manifest,sha(cached_raw))):
+   raise RuntimeError('atomic query identities do not match loaded metadata: '+','.join(name for name,actual,expected in identity_pairs if actual!=expected))
+  framing_fields=('system_prefix','system_suffix','user_prefix','user_suffix','assistant_prefix','assistant_suffix')
+  framed=framing.get('framing')
+  if (not isinstance(framed,dict) or any(not isinstance(framed.get(k),str) for k in framing_fields)
+      or sha(json.dumps({k:framed[k] for k in framing_fields},sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8'))!=atomic_contract.get('framing_sha256')):
+   raise RuntimeError('atomic query framing differs from the trained framing')
+  template_text=atomic_contract.get('instruction_template')
+  if not isinstance(template_text,str) or sha(template_text.encode('utf-8'))!=atomic_contract.get('instruction_template_sha256'):
+   raise RuntimeError('atomic query template digest mismatch')
+  policy=service.get('requiredOutputFields')
+  typed={item.get('name'):item.get('valueType') for item in policy if isinstance(item,dict)} if isinstance(policy,list) else {}
+  if any(typed.get(name)!=kind for name,kind in (('schema_version','string'),('taxonomy_sha256','string'),('decisions','array'))):
+   raise RuntimeError('atomic query service output policy does not enforce the response contract')
+  mapping_supported=True
+ else:
+  # A free-form intent string does not prove a complete, same-meaning taxonomy.
+  if not isinstance(service.get('requiredOutputFields'),list) or not any(isinstance(x,dict) and x.get('name')=='intent' and x.get('valueType')=='string' and x.get('nonEmpty') is True for x in service['requiredOutputFields']): raise RuntimeError('intent output contract missing')
  ownerdir=pathlib.Path(p['run_directory']).resolve(strict=True)
  if ownerdir.parent!=root or ownerdir.stat().st_uid!=os.geteuid() or ownerdir.stat().st_mode&0o077: raise RuntimeError('isolated run directory owner or mode check failed')
  child=None; report=None; started=time.monotonic(); token=secrets.token_hex(32); port=24000+(secrets.randbelow(40000))
  try:
   metadata=ownerdir/'metadata'; metadata.mkdir(mode=0o700)
   state_dir=ownerdir/'state'; state_dir.mkdir(mode=0o700)
-  for name in ('framing.json','runtime.json','training.json'):
+  for name in metadata_names:
    shutil.copyfile(md/name,metadata/name); os.chmod(metadata/name,0o600)
   shutil.copyfile(binary,ownerdir/'lfg-server'); os.chmod(ownerdir/'lfg-server',0o700)
   service['framingFile']=str(metadata/'framing.json'); service['runtimeConfigFile']=str(metadata/'runtime.json'); service['trainingManifestFile']=str(metadata/'training.json')
@@ -1584,6 +1829,11 @@ def main():
       or engine.get('framingSha256')!=q['expected_framing_sha256']
       or engine.get('runtimeConfigSha256')!=q['expected_runtime_config_sha256']
       or engine.get('trainingManifestSha256')!=q['expected_training_manifest_sha256']): raise RuntimeError('loaded engine identity does not match pinned artifacts')
+  if atomic_contract is not None and (engine.get('modelManifestSha256')!=sha(cached_raw)
+      or engine.get('cachedManifestSha256')!=sha(cached_raw)
+      or engine.get('prefillOnnxSha256')!=cached_manifest.get('prefill_onnx_sha256')
+      or engine.get('decodeOnnxSha256')!=cached_manifest.get('decode_onnx_sha256')):
+   raise RuntimeError('loaded cached graph identity differs from the actual cached manifest')
   expected_limits={'backend':'cached_onnx','maxRequestBytes':service['maxRequestBytes'],'maxContextBytes':service['maxContextBytes'],'maxGeneratedBytes':service['maxGeneratedBytes'],'maxCachedGraphBytes':service['maxCachedGraphBytes'],'maxCacheStateBytesPerRequest':service['maxCacheStateBytesPerRequest'],'timeoutMs':service['timeoutMs'],'maxConcurrent':1,'workerThreads':1}
   if not isinstance(limits,dict) or any(limits.get(k)!=v for k,v in expected_limits.items()): raise RuntimeError('isolated service limits differ from pinned single-flight config')
   unauth_code,unauth_headers,_=_http_loopback(port,'/api/lfg/assess/owned/status',timeout=10,max_bytes=q['max_response_bytes'])
@@ -1617,7 +1867,9 @@ def main():
      if det_identity is None: det_identity=identity
      elif det_identity!=identity: raise RuntimeError('deterministic config identity drift')
     deterministic.append(pred); det_statuses[outcome]=det_statuses.get(outcome,0)+1
-    body=json.dumps({'text':row['text']},ensure_ascii=False,separators=(',',':')).encode()
+    atomic_instruction=_atomic_query_instruction(atomic_contract) if atomic_contract is not None else None
+    owned_user_text=(atomic_instruction+'\n'+row['text']) if atomic_instruction is not None else row['text']
+    body=json.dumps({'text':owned_user_text},ensure_ascii=False,separators=(',',':')).encode()
     active_endpoint='owned'
     owned_requests_started+=1
     t0=time.monotonic(); code,headers,raw=_http_loopback(port,'/api/lfg/assess/owned','POST',body,token=token,timeout=q['per_request_deadline_seconds'],max_bytes=q['max_response_bytes']); elapsed=(time.monotonic()-t0)*1000
@@ -1632,7 +1884,10 @@ def main():
     # Only a confirmed completed worker is a completed attempt. Any timeout,
     # busy state, missing child, or incomplete child aborts the remaining rows.
     _record_owned_response_diagnostics(out.get('stopReason'),out.get('outputText'),measurement,boundaries,response_diagnostics)
-    owned[ix],outcome,completed = _owned_terminal_prediction(state,out.get('output'),measurement,mapping_supported,b['target_label'],owned_statuses,owned_lifecycle_outcomes)
+    if atomic_contract is not None:
+     owned[ix],outcome,completed = _atomic_terminal_prediction(state,out.get('output'),measurement,atomic_contract,owned_lifecycle_outcomes,owned_statuses)
+    else:
+     owned[ix],outcome,completed = _owned_terminal_prediction(state,out.get('output'),measurement,mapping_supported,b['target_label'],owned_statuses,owned_lifecycle_outcomes)
     if not completed:
      aborted=True; abort_reason=outcome
      break
@@ -1660,7 +1915,8 @@ def main():
   report={'rows_attempted':rows_attempted,'rows_total':len(rows),'deterministic_requests_started':deterministic_requests_started,'owned_requests_started':owned_requests_started,'aborted':aborted,'abort_reason':abort_reason,'deterministic_rule_status_counts':det_statuses,'deterministic_cache_control_counts':det_cache_headers,'owned_response_status_counts':owned_statuses,'owned_lifecycle_outcome_counts':owned_lifecycle_outcomes,'owned_mapping_outcome_counts':mapping_outcomes,'owned_response_diagnostics':response_diagnostics,
    'deterministic_metrics':_metrics(targets,known,deterministic),'owned_metrics':_metrics(targets,known,owned),
    'deterministic_latency_ms':stats(det_ms),'owned_end_to_end_latency_ms':stats(owned_e2e_ms),'owned_handler_elapsed_ms':stats(owned_handler_ms),
-   'owned_mapping':{'supported':mapping_supported,'status':'exact_taxonomy_not_established_by_checkpoint_framing' if not mapping_supported else 'exact_label_contract_seen'},
+   'owned_mapping':{'supported':mapping_supported,'status':'checkpoint_bound_atomic_contract' if atomic_contract is not None else 'exact_taxonomy_not_established_by_checkpoint_framing'},
+   'atomic_query':None if atomic_contract is None else {'schema_version':atomic_contract['schema_version'],'field':atomic_contract['field'],'label':atomic_contract['label'],'taxonomy_sha256':atomic_contract['taxonomy_sha256'],'guide_sha256':atomic_contract['guide_sha256'],'guide_provenance_status':atomic_contract['guide_provenance_status'],'instruction_template_sha256':atomic_contract['instruction_template_sha256'],'instruction_added_to_same_screened_text':True,'instruction_bytes_are_separate_from_source_text':True,'deterministic_request_uses_same_screened_text_without_atomic_instruction':True,'model_calls_per_owned_request':1,'completed_inference_requests':owned_lifecycle_outcomes.get('completed',0),'timing_scope':'owned end-to-end includes the single atomic-query request; it does not isolate prompt augmentation cost','timing':{'end_to_end':stats(owned_e2e_ms),'handler_reported':stats(owned_handler_ms)},'target_support':{'positive':sum(1 for row in rows if row.get('target_known') and row.get('target_value')==1),'negative':sum(1 for row in rows if row.get('target_known') and row.get('target_value')==0),'unknown':sum(1 for row in rows if row.get('target_known') is False)},'checkpoint_manifest_sha256':atomic_contract['checkpoint_manifest_sha256'],'weights_sha256':atomic_contract['weights_sha256'],'cached_manifest_sha256':atomic_contract['cached_manifest_sha256'],'training_manifest_sha256':atomic_contract['training_manifest_sha256'],'source_manifest_sha256':cached_manifest['source_manifest_sha256'],'prefill_onnx_sha256':cached_manifest['prefill_onnx_sha256'],'decode_onnx_sha256':cached_manifest['decode_onnx_sha256'],'system_sha256':atomic_contract['system_sha256'],'framing_sha256':atomic_contract['framing_sha256']},
    'owned_engine_identity':engine,'owned_status_limits':limits,'deterministic_identity':det_identity,
    'namespace':{'private_network':True,'netns_inode':netns,'interfaces':['lo'],'default_routes':False},
    'runtime':{'binary_sha256':sha((ownerdir/'lfg-server').read_bytes()),'framing_sha256':sha((metadata/'framing.json').read_bytes()),'runtime_config_sha256':sha((metadata/'runtime.json').read_bytes()),'training_manifest_sha256':sha((metadata/'training.json').read_bytes()),'service_config_sha256':sha(conf.read_bytes()),'status':'ready'},
@@ -2201,6 +2457,8 @@ def _empty_probe_payload(config: dict[str, Any], classical_config: dict[str, Any
     if (not rule_ids or any(not isinstance(x, str) for x in rule_ids) or len(set(rule_ids)) != len(rule_ids)
             or labels[0] not in rule_ids or not isinstance(fallback, str) or fallback in rule_ids):
         raise ValueError("probe rule identity is invalid")
+    atomic_query = _atomic_query_config(config.get("atomic_query_contract"),
+                                        classical_config["target_field"], labels[0], config)
     remote_fields = ("private_source_root", "service_binary", "service_binary_sha256", "service_config_template", "service_config_template_sha256",
                      "metadata_directory", "expected_model_sha256", "expected_framing_sha256",
                      "expected_cached_manifest_sha256", "expected_runtime_config_sha256",
@@ -2215,6 +2473,8 @@ def _empty_probe_payload(config: dict[str, Any], classical_config: dict[str, Any
                            "comparison_12b_config_sha256": config["comparison_12b_config_sha256"],
                            "validation_sha256": None, "validation_record_id_set_sha256": empty_digest,
                            "target_mask_sha256": empty_digest, "target_label": labels[0], "rows": 0,
+                           "target_field": classical_config["target_field"],
+                           "atomic_query_contract": atomic_query,
                            "assessment_sha256": _canonical_digest(assessment), "rules_sha256": _canonical_digest(rules),
                            "rule_ids": rule_ids, "fallback_id": fallback},
                "remote": {field: config[field] for field in remote_fields},
@@ -2444,6 +2704,67 @@ def _validate_worker_aggregate(value: Any, total: int,
     return value
 
 
+def _validate_atomic_query_aggregate(value: Any, contract: Any, payload: bytes,
+                                     total: int) -> None:
+    """Check aggregate-only atomic evidence against the exact submitted contract."""
+    summary = value.get("atomic_query") if isinstance(value, dict) else None
+    if contract is None:
+        if summary is not None:
+            raise ValueError("worker reported atomic-query evidence without a pinned contract")
+        return
+    if value.get("supervisor_failure") is True:
+        if summary is not None:
+            raise ValueError("untrusted supervisor result contains atomic-query evidence")
+        return
+    keys = {"schema_version", "field", "label", "taxonomy_sha256", "guide_sha256", "guide_provenance_status",
+            "instruction_template_sha256", "instruction_added_to_same_screened_text",
+            "instruction_bytes_are_separate_from_source_text",
+            "deterministic_request_uses_same_screened_text_without_atomic_instruction",
+            "model_calls_per_owned_request", "completed_inference_requests", "timing_scope",
+            "timing", "target_support", "checkpoint_manifest_sha256", "weights_sha256",
+            "cached_manifest_sha256", "training_manifest_sha256", "source_manifest_sha256",
+            "prefill_onnx_sha256", "decode_onnx_sha256", "system_sha256", "framing_sha256"}
+    if not isinstance(summary, dict) or set(summary) != keys:
+        raise ValueError("atomic query aggregate schema is invalid")
+    for name in ("schema_version", "field", "label", "taxonomy_sha256", "guide_sha256", "guide_provenance_status",
+                 "instruction_template_sha256", "checkpoint_manifest_sha256", "weights_sha256",
+                 "cached_manifest_sha256", "training_manifest_sha256", "system_sha256", "framing_sha256"):
+        if summary.get(name) != contract.get(name):
+            raise ValueError("atomic query aggregate differs from its pinned contract")
+    if (summary.get("source_manifest_sha256") != contract.get("training_manifest_sha256")
+            or any(not isinstance(summary.get(name), str) or HEX.fullmatch(summary[name]) is None
+                   for name in ("prefill_onnx_sha256", "decode_onnx_sha256"))):
+        raise ValueError("atomic graph manifest linkage is invalid")
+    if (summary.get("instruction_added_to_same_screened_text") is not True
+            or summary.get("instruction_bytes_are_separate_from_source_text") is not True
+            or summary.get("deterministic_request_uses_same_screened_text_without_atomic_instruction") is not True
+            or summary.get("model_calls_per_owned_request") != 1
+            or summary.get("timing_scope") != "owned end-to-end includes the single atomic-query request; it does not isolate prompt augmentation cost"):
+        raise ValueError("atomic query aggregate prompt or timing semantics are invalid")
+    support = summary.get("target_support")
+    records = _json(payload, "worker payload").get("records")
+    expected_support = {"positive": sum(1 for row in records if row.get("target_known") and row.get("target_value") == 1),
+                        "negative": sum(1 for row in records if row.get("target_known") and row.get("target_value") == 0),
+                        "unknown": sum(1 for row in records if row.get("target_known") is False)}
+    if (not isinstance(support, dict) or set(support) != {"positive", "negative", "unknown"}
+            or support != expected_support or sum(support.values()) != total):
+        raise ValueError("atomic query target support differs from the bound source mask")
+    completed = summary.get("completed_inference_requests")
+    lifecycle = value.get("owned_lifecycle_outcome_counts")
+    if (type(completed) is not int or not 0 <= completed <= total or not isinstance(lifecycle, dict)
+            or completed != lifecycle.get("completed", 0)):
+        raise ValueError("atomic query completion count differs from worker lifecycle accounting")
+    timing = summary.get("timing")
+    if not isinstance(timing, dict) or set(timing) != {"end_to_end", "handler_reported"}:
+        raise ValueError("atomic query timing aggregate is invalid")
+    for item in timing.values():
+        if (not isinstance(item, dict) or set(item) != {"count", "median_ms", "p95_ms", "min_ms", "max_ms"}
+                or type(item["count"]) is not int or not 0 <= item["count"] <= value.get("owned_requests_started", -1)
+                or any(v is not None and (type(v) not in (int, float) or not math.isfinite(v))
+                       for k, v in item.items() if k != "count")):
+            raise ValueError("atomic query timing count or values are invalid")
+
+
 def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], result: dict[str, Any],
             payload: bytes, code_sha256: str, output_dir: Path) -> dict[str, Any]:
     result = _validate_worker_aggregate(
@@ -2451,6 +2772,10 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
         _validated_output_text_byte_bucket_boundaries(
             config.get("output_text_utf8_byte_bucket_boundaries")
             if "output_text_utf8_byte_bucket_boundaries" in config else None))
+    payload_value = _json(payload, "worker payload")
+    payload_binding = payload_value.get("binding") if isinstance(payload_value, dict) else None
+    atomic_contract = payload_binding.get("atomic_query_contract") if isinstance(payload_binding, dict) else None
+    _validate_atomic_query_aggregate(result, atomic_contract, payload, len(bound["validation_rows"]))
     baseline = bound["classical_report"]
     report12 = bound["comparison_12b_report"]
     selected = sorted(bound["classical_config"]["selected_labels"])
@@ -2481,6 +2806,7 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
         "owned": {"mapping": result.get("owned_mapping"), "status_counts": result.get("owned_response_status_counts"),
                   "lifecycle_outcome_counts": result.get("owned_lifecycle_outcome_counts"),
                   "mapping_outcome_counts": result.get("owned_mapping_outcome_counts"),
+                  "atomic_query": result.get("atomic_query"),
                   "response_diagnostics": ({**result["owned_response_diagnostics"],
                                             "output_text_utf8_byte_bucket_boundaries":
                                                 _validated_output_text_byte_bucket_boundaries(
