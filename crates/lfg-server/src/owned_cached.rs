@@ -142,6 +142,7 @@ pub struct CachedIdentity {
     pub manifest_sha256: String,
     pub model_sha256: String,
     pub source_manifest_sha256: String,
+    pub source_model_code_sha256: String,
     pub prefill_onnx_sha256: String,
     pub decode_onnx_sha256: String,
     pub context: usize,
@@ -744,6 +745,7 @@ fn validate_manifest_and_graph_bytes(
         manifest_sha256: expected_manifest_sha256.to_owned(),
         model_sha256: manifest.model_sha256.clone(),
         source_manifest_sha256: manifest.source_manifest_sha256.clone(),
+        source_model_code_sha256: manifest.source_model_code_sha256.clone(),
         prefill_onnx_sha256: manifest.prefill_onnx_sha256.clone(),
         decode_onnx_sha256: manifest.decode_onnx_sha256.clone(),
         context: manifest.context,
@@ -856,6 +858,166 @@ pub fn validate_embedded(
     _max_cache_bytes: u64,
 ) -> Result<CachedIdentity> {
     Err("embedded cached runtime was not built")
+}
+
+#[cfg(test)]
+pub(crate) fn write_test_cached_artifact(
+    root: &Path,
+    model_sha256: &str,
+    source_manifest_sha256: &str,
+    source_model_code_sha256: &str,
+) -> String {
+    fn value_info(name: &str, elem_type: i32, dims: &[&str]) -> pb::ValueInfoProto {
+        pb::ValueInfoProto {
+            name: name.to_owned(),
+            r#type: Some(pb::TypeProto {
+                denotation: String::new(),
+                value: Some(TypeValue::TensorType(pb::type_proto::Tensor {
+                    elem_type,
+                    shape: Some(pb::TensorShapeProto {
+                        dim: dims
+                            .iter()
+                            .map(|dim| pb::tensor_shape_proto::Dimension {
+                                value: Some(pb::tensor_shape_proto::dimension::Value::DimParam(
+                                    (*dim).to_owned(),
+                                )),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }),
+                })),
+            }),
+            ..Default::default()
+        }
+    }
+    fn model(input: Vec<pb::ValueInfoProto>, output: Vec<pb::ValueInfoProto>) -> Vec<u8> {
+        pb::ModelProto {
+            ir_version: 9,
+            opset_import: vec![pb::OperatorSetIdProto {
+                domain: String::new(),
+                version: 13,
+            }],
+            graph: Some(pb::GraphProto {
+                input,
+                output,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    let architecture = Architecture {
+        width: 8,
+        layers: 1,
+        heads: 2,
+        conv_kernel: 1,
+        context: 4,
+        ff_multiplier: 2,
+        attention_every: 1,
+    };
+    let states = expected_states(&architecture).unwrap();
+    let prefill = model(
+        vec![value_info("tokens", 7, &["batch", "sequence"])],
+        vec![
+            value_info("logits", 1, &["batch", "vocabulary"]),
+            value_info("key_0", 1, &["batch", "heads", "position", "head_dim"]),
+            value_info("value_0", 1, &["batch", "heads", "position", "head_dim"]),
+        ],
+    );
+    let decode = model(
+        vec![
+            value_info("token", 7, &["batch"]),
+            value_info("position", 7, &[]),
+            value_info("key_0", 1, &["batch", "heads", "position", "head_dim"]),
+            value_info("value_0", 1, &["batch", "heads", "position", "head_dim"]),
+        ],
+        vec![
+            value_info("logits", 1, &["batch", "vocabulary"]),
+            value_info("key_0_out", 1, &["batch", "heads", "position", "head_dim"]),
+            value_info(
+                "value_0_out",
+                1,
+                &["batch", "heads", "position", "head_dim"],
+            ),
+        ],
+    );
+    let max_state_bytes = expected_state_bytes(&architecture, &states).unwrap();
+    let states_json = serde_json::Value::Array(
+        states
+            .iter()
+            .map(|state| {
+                serde_json::json!({
+                    "name": state.name,
+                    "kind": state.kind,
+                    "layer": state.layer,
+                    "dtype": state.dtype,
+                    "shape": state.shape,
+                    "capacity": state.capacity
+                })
+            })
+            .collect(),
+    );
+    let manifest = serde_json::json!({
+        "schema_version": "lfg.owned-byte-cached-onnx.v1",
+        "artifact_version": 1,
+        "promotion_eligible": false,
+        "model_sha256": model_sha256,
+        "source_manifest_sha256": source_manifest_sha256,
+        "source_model_code_sha256": source_model_code_sha256,
+        "prefill_onnx_sha256": sha256(&prefill),
+        "decode_onnx_sha256": sha256(&decode),
+        "prefill": {
+            "file": "prefill.onnx",
+            "inputs": ["tokens"],
+            "outputs": ["logits", "key_0", "value_0"],
+            "input_dtype": "int64",
+            "logit_dtype": "float32",
+            "input_shape": ["batch", "sequence"],
+            "sequence_min": 1,
+            "sequence_max": architecture.context
+        },
+        "decode": {
+            "file": "decode.onnx",
+            "inputs": ["token", "position", "key_0", "value_0"],
+            "outputs": ["logits", "key_0_out", "value_0_out"],
+            "token_dtype": "int64",
+            "position_dtype": "int64",
+            "logit_dtype": "float32",
+            "token_shape": ["batch"],
+            "position_shape": [],
+            "consumes_one_token": true
+        },
+        "cache": {
+            "states": states_json,
+            "attention_cache_length_must_equal_position": true,
+            "capacity": architecture.context,
+            "maximum_state_bytes_per_batch": max_state_bytes,
+            "overflow": "reject",
+            "eviction": "none",
+            "initial_attention_cache_shape": ["batch", "heads", 0, "head_dim"],
+            "initial_convolution_cache": "zeros with declared fixed shape"
+        },
+        "architecture": {
+            "width": architecture.width,
+            "layers": architecture.layers,
+            "heads": architecture.heads,
+            "conv_kernel": architecture.conv_kernel,
+            "context": architecture.context,
+            "ff_multiplier": architecture.ff_multiplier,
+            "attention_every": architecture.attention_every
+        },
+        "context": architecture.context,
+        "vocabulary": BYTE_VOCABULARY,
+        "dtype": "float32",
+        "opset": 13
+    });
+    let manifest = serde_json::to_vec(&manifest).unwrap();
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(root.join("manifest.json"), &manifest).unwrap();
+    std::fs::write(root.join("prefill.onnx"), &prefill).unwrap();
+    std::fs::write(root.join("decode.onnx"), &decode).unwrap();
+    sha256(&manifest)
 }
 
 fn configure_prefill(raw: &[u8]) -> Result<Runnable> {
