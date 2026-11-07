@@ -527,7 +527,17 @@ main()
             compare._remote_cleanup_script("lfg-owned-cached-assessment.service", "/home/hades")
 
     def test_dirty_or_untracked_adapter_does_not_claim_head_revision(self):
-        self.assertIsNone(compare._git_revision())
+        tracked = subprocess.CompletedProcess([], 0, stdout="compare_owned_validation.py\n")
+        dirty = subprocess.CompletedProcess([], 0, stdout=" M compare_owned_validation.py\n")
+        with patch.object(compare.subprocess, "run", side_effect=[tracked, dirty]):
+            self.assertIsNone(compare._git_revision())
+        untracked = subprocess.CalledProcessError(1, ["git", "ls-files"])
+        with patch.object(compare.subprocess, "run", side_effect=untracked):
+            self.assertIsNone(compare._git_revision())
+        clean = subprocess.CompletedProcess([], 0, stdout="")
+        head = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n")
+        with patch.object(compare.subprocess, "run", side_effect=[tracked, clean, head]):
+            self.assertEqual(compare._git_revision(), "a" * 40)
 
     def test_generated_worker_executes_multiple_terminal_rows_and_abstains_incomplete(self):
         namespace = {"__name__": "generated_worker_test"}
