@@ -589,6 +589,87 @@ class CoordinatorEntryTests(unittest.TestCase):
             self.assertEqual(result, sentinel)
             self.assertTrue(worker.call_args.args[9])
 
+    def test_main_emits_only_fixed_sanitized_diagnostic_for_controller_failure(self):
+        stderr = io.StringIO()
+        sentinel = "PRIVATE_SENTINEL C:\\private\\prompt --token=secret"
+        with mock.patch.object(sys, "argv", ["train_teacher_proposals.py", "--config", sentinel,
+                                               "--zero-row-probe"]), \
+             mock.patch.object(adapter, "load_config", side_effect=adapter.ProposalError(sentinel)), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                adapter.main()
+        self.assertIn("Teacher proposal task failed", str(raised.exception))
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {
+            "schema_version": adapter.DIAGNOSTIC_SCHEMA,
+            "phase": "config_validation",
+            "category": "validation_or_protocol_failure",
+            "cleanup": "not_started",
+        })
+        self.assertNotIn(sentinel, stderr.getvalue())
+
+    def test_worker_failure_reports_fixed_worker_phase_to_controller_protocol(self):
+        stderr, stdout = io.StringIO(), io.StringIO()
+        sentinel = "PRIVATE_SENTINEL /private/config prompt"
+        with mock.patch.object(sys, "argv", ["train_teacher_proposals.py", "--worker", "--config",
+                                               "/private/config", "--config-sha256", "a" * 64]), \
+             mock.patch.object(adapter.comparator, "load_config", side_effect=adapter.ProposalError(sentinel)), \
+             contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit):
+                adapter.main()
+        diagnostic = json.loads(stdout.getvalue().splitlines()[0])
+        self.assertEqual(diagnostic["phase"], "worker_diagnostic")
+        self.assertEqual(diagnostic["worker_phase"], "worker_config_validation")
+        self.assertNotIn(sentinel, stdout.getvalue() + stderr.getvalue())
+
+    def test_cleanup_failure_does_not_replace_primary_controller_error(self):
+        primary = adapter.ProposalError("primary private sentinel")
+        comp = {"min_memory_available_bytes": 1, "min_disk_free_bytes": 1,
+                "resource_memory_max_bytes": 1, "resource_cpu_quota_percent": 100,
+                "remote_scope_tasks_max": 1, "remote_sudo_path": "/usr/bin/sudo",
+                "remote_systemd_run_path": "/usr/bin/systemd-run", "remote_true_path": "/usr/bin/true",
+                "remote_home": "/home/owner", "remote_workdir": "/home/owner/work", "ssh_port": 22,
+                "remote_user": "owner", "remote_host": "worker.test"}
+        snapshot = {"memory_available_bytes": 10, "home_disk_free_bytes": 10,
+                    "loaded_model_count": 0, "hostname": "worker", "architecture": "x86_64"}
+        cfg = {"export_manifest_sha256": "a" * 64, "export_train_sha256": "b" * 64,
+               "taxonomy_sha256": "c" * 64, "export_config_sha256": "d" * 64,
+               "selected_columns": [], "max_rows": 1, "screening_policy_sha256": "e" * 64,
+               "screening_code_sha256": "f" * 64, "max_prompt_bytes": 10,
+               "max_output_bytes": 10, "max_protocol_bytes": 100,
+               "assume_exhaustive_labels": False}
+        paths = {"workdir": "/home/owner/work/run-x", "teacher": "/home/owner/work/run-x/a.py",
+                 "comparator": "/home/owner/work/run-x/b.py", "config": "/home/owner/work/run-x/c.json"}
+        with mock.patch.object(adapter, "_remote_identity_snapshot", return_value=snapshot), \
+             mock.patch.object(adapter.comparator, "_remote_port_closed", return_value=True), \
+             mock.patch.object(adapter.comparator, "_ssh_run", return_value=SimpleNamespace(returncode=0)), \
+             mock.patch.object(adapter, "_remote_stage_paths", return_value=paths), \
+             mock.patch.object(adapter, "_worker_config", return_value={}), \
+             mock.patch.object(adapter, "_remote_create_workdir"), \
+             mock.patch.object(adapter, "_private_temp_directory", side_effect=primary), \
+             mock.patch.object(adapter, "_remote_cleanup_worker", side_effect=OSError("cleanup secret")):
+            with self.assertRaises(adapter.ProposalError) as raised:
+                adapter._run_transient_worker(cfg, "x", comp, "y", {}, "z", None, None, None, True)
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(adapter._DIAGNOSTIC_CLEANUP, "failed")
+
+    def test_worker_diagnostic_protocol_accepts_only_allowlisted_stage_values(self):
+        safe = {"phase": "worker_diagnostic", "schema_version": adapter.DIAGNOSTIC_SCHEMA,
+                "worker_phase": "worker_warmup", "category": "timeout", "cleanup": "succeeded"}
+        lines = __import__("queue").Queue()
+        lines.put(json.dumps(safe))
+        with self.assertRaises(adapter.WorkerDiagnosticError) as raised:
+            adapter._read_worker_line(None, lines, 0)
+        record = adapter._diagnostic_record(raised.exception)
+        self.assertEqual(record["worker_phase"], "worker_warmup")
+        self.assertEqual(record["worker_cleanup"], "succeeded")
+        safe["worker_phase"] = "worker_warmup PRIVATE_SENTINEL"
+        lines = __import__("queue").Queue()
+        lines.put(json.dumps(safe))
+        with self.assertRaises(adapter.ProposalError):
+            adapter._read_worker_line(None, lines, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
