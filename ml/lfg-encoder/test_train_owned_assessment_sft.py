@@ -2,12 +2,14 @@
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import random
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -91,6 +93,278 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
 
     def write_config(self):
         self.config_path.write_text(json.dumps(self.config))
+
+    def multilabel_fixture(self):
+        import masked_supervision as masked
+        import owned_multilabel_contract as contract
+
+        export = self.root / 'multilabel-export'; export.mkdir()
+        taxonomy = {'schema_version': 'lfg.encoder-evaluation-taxonomy.v1',
+                    'intents': ['build.software', 'other', 'negative']}
+        taxonomy_raw = (json.dumps(taxonomy, sort_keys=True) + '\n').encode()
+        taxonomy_path = self.root / 'taxonomy.json'; taxonomy_path.write_bytes(taxonomy_raw)
+        export_train = b'{"fixture":true}\n'
+        guide_sha = hashlib.sha256(b'fixture guide').hexdigest()
+        columns = [{'field': 'intents', 'label': label} for label in taxonomy['intents']]
+        export_manifest = {'schema_version': masked.EXPORT_SCHEMA, 'config_sha256': 'c' * 64,
+            'taxonomy_sha256': hashlib.sha256(taxonomy_raw).hexdigest(), 'label_guide_sha256': guide_sha,
+            'selected_columns': columns,
+            'source_artifacts': [{'path': 'project-a.jsonl', 'split': 'train', 'sha256': 'd' * 64,
+                'project_claim_sha256': 'e' * 64, 'project_group_claim_sha256': 'f' * 64}],
+            'screening_policy_sha256': '3' * 64,
+            'output_files': {'train.jsonl': {'sha256': hashlib.sha256(export_train).hexdigest(),
+                                              'bytes': len(export_train)}}}
+        (export / 'manifest.json').write_bytes(masked._json_bytes(export_manifest))
+        source = {'split': 'train', 'text': 'screened fixture request',
+            'text_sha256': hashlib.sha256(b'screened fixture request').hexdigest(),
+            'original_text_sha256': hashlib.sha256(b'original fixture request').hexdigest(),
+            'family': '4' * 64, 'columns': columns, 'targets': [1, None, 0],
+            'known_mask': [True, False, True], 'weights': [1.25, 0.0, 1.5],
+            'target_origins': ['owner_authorized_unreviewed_positive', 'unspecified_unknown',
+                               'source_attested_complete_array_negative'],
+            'target_reviewer_claims': [None, None,
+                masked._claim_digest('reviewer', 'source_target_completeness_claim')],
+            'verified_source_claim': False,
+            'source_identity': {'artifact_path': 'project-a.jsonl', 'artifact_sha256': 'd' * 64,
+                'project_claim_sha256': 'e' * 64, 'project_group_claim_sha256': 'f' * 64,
+                'record_id_sha256': '1' * 64, 'source_claim_sha256': '2' * 64},
+            'screening': {'policy_sha256': '3' * 64, 'redaction_counts': {}, 'text_changed': True},
+            'partial_review_provenance': None, 'full_review_provenance': None}
+        adapter_config = {'schema_version': contract.CONFIG_SCHEMA, 'export_dir': str(export),
+            'export_manifest_sha256': hashlib.sha256((export / 'manifest.json').read_bytes()).hexdigest(),
+            'taxonomy_file': str(taxonomy_path), 'taxonomy_sha256': hashlib.sha256(taxonomy_raw).hexdigest(),
+            'selected_columns': columns, 'instruction_template': 'For {field}, decide {label}.',
+            'output': str(self.root / 'multilabel-dataset'), 'max_rows': 10, 'max_output_bytes': 100000,
+            'default_weight': 2.0, 'per_label_weights': {}}
+        adapter_config_path = self.root / 'adapter-config.json'
+        adapter_config_path.write_bytes(masked._json_bytes(adapter_config))
+        with patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(masked, 'load_export', return_value=(export_manifest, {'train': [source]})):
+            result = contract.build_dataset(adapter_config_path)
+        dataset = Path(adapter_config['output'])
+        self.config.update(schema_version=self.subject.MULTILABEL_CONFIG_SCHEMA,
+            expected_manifest_sha256=result['manifest_sha256'],
+            multilabel_system_prompt='Classify only the requested taxonomy cell.', context=1024,
+            batch_size=2, steps=2, checkpoint_every=1, max_attention_elements=5000000,
+            max_parameters=100000, cpu_threads=1)
+        self.write_config()
+        return dataset, result
+
+    def test_multilabel_reader_frames_only_known_cells_and_preserves_weight_once(self):
+        import masked_supervision as masked
+        dataset, _ = self.multilabel_fixture()
+        with patch.object(masked, '_verify_owner_private_access'):
+            records, manifest_raw, train_raw, coverage = self.subject.read_training(dataset, self.config)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(sorted(item['weight'] for item in records), [2.5, 3.0])
+        self.assertEqual(coverage['claims'], {'decision:negative': 1, 'decision:positive': 1})
+        self.assertEqual(coverage['target_support_claim'], {'positive': 1, 'negative': 1, 'unknown': 1})
+        self.assertEqual(coverage['source_quality'], 'unverified')
+        self.assertIn(b'For intents, decide build.software.\nscreened fixture request', records[0]['bytes'])
+        self.assertTrue(all(b'"value":"unknown"' not in item['bytes'] for item in records))
+        class CaptureWeights:
+            def choices(self, population, weights, k):
+                self.weights = list(weights)
+                return population
+            def randrange(self, start, stop):
+                return start
+        capture = CaptureWeights()
+        self.subject.sample_batch(records, capture, 2, 128)
+        self.assertEqual(capture.weights, [2.5, 3.0])
+        rows = [json.loads(line) for line in train_raw.splitlines()]
+        for record, row in zip(records, rows, strict=True):
+            self.assertEqual(record['bytes'][record['response_start']:],
+                             (row['target_response'] + self.config['framing']['assistant_suffix']).encode())
+            self.assertEqual(record['weight'], row['weight'])
+            source, targets, corrections = self.subject.sample_batch([record], random.Random(11), 1, 128)
+            self.assertTrue(any(target != -100 for target in targets[0]))
+            self.assertTrue(all(value == -100 for target, value in zip(targets[0], corrections[0], strict=True)
+                                if target == -100))
+            response_bytes = set(record['bytes'][record['response_start']:])
+            self.assertTrue(all(value == -100 or value in response_bytes for value in targets[0]))
+        self.assertTrue(manifest_raw)
+        self.assertTrue(train_raw)
+
+    def test_multilabel_experiment_resumes_and_binds_source_and_configuration(self):
+        import masked_supervision as masked
+        dataset, _ = self.multilabel_fixture()
+        validation = dataset / 'validation.jsonl'
+        validation.write_text('must never be opened')
+        original_open = Path.open
+        def reject_validation(path, *args, **kwargs):
+            if path == validation:
+                raise AssertionError('validation file opened')
+            return original_open(path, *args, **kwargs)
+        partial_root = self.root / 'multilabel-partial'
+        with patch.object(Path, 'open', reject_validation), \
+             patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            partial = self.subject.experiment(dataset, self.checkpoint, self.config_path, partial_root,
+                                              max_steps_this_run=1)
+            self.assertEqual(partial['schema_version'], 'lfg.owned-multilabel-sft-partial.v1')
+            pointer = json.loads((partial_root / 'latest.json').read_bytes())
+            state = partial_root / 'checkpoints' / pointer['checkpoint']
+            checkpoint_identity = json.loads((state / 'state.json').read_bytes())['identity']
+            self.assertIn('multilabel_coverage_sha256', checkpoint_identity)
+            self.assertIn('training_config_sha256', checkpoint_identity)
+            self.assertIn('owned_multilabel_contract.py', checkpoint_identity['code_sha256'])
+            self.assertEqual(checkpoint_identity['dataset_manifest_sha256'], self.config['expected_manifest_sha256'])
+            resumed = self.subject.experiment(dataset, self.checkpoint, self.config_path,
+                self.root / 'multilabel-resumed', resume=state, resume_state_sha256=pointer['state_sha256'])
+        self.assertTrue(resumed['completed'])
+        self.assertEqual(resumed['schema_version'], 'lfg.owned-multilabel-sft-result.v1')
+        self.assertEqual(resumed['source_quality'], 'unverified')
+        self.assertFalse(resumed['classifier_quality_evaluated'])
+        self.assertEqual(resumed['coverage']['target_support_claim']['negative'], 1)
+        self.assertTrue(all(math.isfinite(value) for value in resumed['losses']))
+        self.assertIn('owned_multilabel_contract.py', resumed['coverage']['code_sha256'])
+        self.assertEqual(resumed['dataset_manifest_sha256'], self.config['expected_manifest_sha256'])
+        self.assertNotIn('screened fixture request', json.dumps(resumed))
+        self.assertNotIn('For intents', json.dumps(resumed))
+
+    def test_multilabel_pin_and_resume_reject_drift(self):
+        import masked_supervision as masked
+        dataset, _ = self.multilabel_fixture()
+        self.config['expected_manifest_sha256'] = '0' * 64
+        with patch.object(masked, '_verify_owner_private_access'):
+            with self.assertRaisesRegex(ValueError, 'caller-pinned digest'):
+                self.subject.read_training(dataset, self.config)
+        self.config['expected_manifest_sha256'] = hashlib.sha256((dataset / 'manifest.json').read_bytes()).hexdigest()
+        original_manifest_raw = (dataset / 'manifest.json').read_bytes()
+        original_train_raw = (dataset / 'train.jsonl').read_bytes()
+        with patch.object(masked, '_verify_owner_private_access'):
+            (dataset / 'train.jsonl').write_bytes(original_train_raw + b' ')
+            with self.assertRaisesRegex(ValueError, 'private training rows'):
+                self.subject.read_training(dataset, self.config)
+            (dataset / 'train.jsonl').write_bytes(original_train_raw)
+            for identity_field in ('taxonomy_sha256', 'guide_sha256'):
+                changed = json.loads(original_manifest_raw)
+                changed[identity_field] = 'a' * 64
+                changed_raw = masked._json_bytes(changed)
+                (dataset / 'manifest.json').write_bytes(changed_raw)
+                self.config['expected_manifest_sha256'] = hashlib.sha256(changed_raw).hexdigest()
+                with self.assertRaisesRegex(ValueError, 'target identity mismatch'):
+                    self.subject.read_training(dataset, self.config)
+            (dataset / 'manifest.json').write_bytes(original_manifest_raw)
+        self.write_config()
+        self.config['expected_manifest_sha256'] = hashlib.sha256(original_manifest_raw).hexdigest()
+        self.write_config()
+        with patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            partial = self.subject.experiment(dataset, self.checkpoint, self.config_path, self.root / 'multi-partial',
+                                              max_steps_this_run=1)
+            self.config['framing']['assistant_suffix'] = '<changed>'
+            self.write_config()
+            with self.assertRaisesRegex(ValueError, 'checkpoint identity'):
+                self.subject.experiment(dataset, self.checkpoint, self.config_path, self.root / 'multi-bad-resume',
+                    resume=Path(partial['latest_checkpoint']),
+                    resume_state_sha256=partial['latest_checkpoint_state_sha256'])
+
+    def test_multilabel_completed_result_can_seed_next_run_and_invalid_provenance_fails(self):
+        import masked_supervision as masked
+        dataset, _ = self.multilabel_fixture()
+        with patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            first_dir = self.root / 'multilabel-stage-one'
+            first = self.subject.experiment(dataset, self.checkpoint, self.config_path, first_dir)
+            manifest_path = first_dir / 'manifest.json'
+            historical = json.loads(manifest_path.read_bytes())
+            historical_code = dict(historical['code_sha256'])
+            historical_code['owned_multilabel_contract.py'] = 'a' * 64
+            historical_code['masked_supervision.py'] = 'b' * 64
+            historical['code_sha256'] = historical_code
+            historical['coverage']['code_sha256'] = historical_code
+            historical['coverage']['live_masked_supervision_code_sha256'] = 'b' * 64
+            historical['adapter_code_sha256'] = 'c' * 64
+            historical['coverage']['adapter_code_sha256'] = 'c' * 64
+            manifest_path.write_text(json.dumps(historical))
+            second = self.subject.experiment(dataset, first_dir, self.config_path, self.root / 'multilabel-stage-two')
+            self.assertEqual(first['schema_version'], 'lfg.owned-multilabel-sft-result.v1')
+            self.assertEqual(second['source_checkpoint_schema'], 'lfg.owned-multilabel-sft-result.v1')
+            self.assertEqual(second['source_checkpoint_system_linkage'], 'verified_linked')
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest['promotion_eligible'] = True
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'completed multilabel checkpoint provenance'):
+                self.subject.experiment(dataset, first_dir, self.config_path,
+                                        self.root / 'multilabel-invalid-source')
+
+    def test_multilabel_cli_redacts_private_os_error_in_subprocess(self):
+        self.multilabel_fixture()
+        trainer = Path(self.subject.__file__)
+        missing_config = self.root / 'PRIVATE_CONFIG_MISSING_DO_NOT_LOG' / 'config.json'
+        missing_dataset = self.root / 'PRIVATE_DATASET_MISSING_DO_NOT_LOG' / 'dataset'
+        missing_checkpoint = self.root / 'PRIVATE_CHECKPOINT_MISSING_DO_NOT_LOG' / 'checkpoint'
+        missing_output = self.root / 'PRIVATE_OUTPUT_MISSING_DO_NOT_LOG' / 'output'
+        markers = ('PRIVATE_CONFIG_MISSING_DO_NOT_LOG', 'PRIVATE_DATASET_MISSING_DO_NOT_LOG',
+                   'PRIVATE_CHECKPOINT_MISSING_DO_NOT_LOG', 'PRIVATE_OUTPUT_MISSING_DO_NOT_LOG')
+        command = [sys.executable, str(trainer), '--dataset', str(missing_dataset),
+                   '--checkpoint', str(missing_checkpoint), '--config', str(missing_config),
+                   '--output', str(missing_output)]
+        missing = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn('filesystem operation failed (errno=2)', missing.stderr)
+        self.assertTrue(all(marker not in missing.stderr for marker in markers))
+
+        malformed_config = self.root / 'PRIVATE_CONFIG_MALFORMED_DO_NOT_LOG' / 'config.json'
+        malformed_config.parent.mkdir()
+        malformed_config.write_text('{')
+        malformed = subprocess.run([sys.executable, str(trainer), '--dataset', str(missing_dataset),
+            '--checkpoint', str(missing_checkpoint), '--config', str(malformed_config),
+            '--output', str(missing_output)], capture_output=True, text=True)
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertNotIn('PRIVATE_CONFIG_MALFORMED_DO_NOT_LOG', malformed.stderr)
+        self.assertTrue(all(marker not in malformed.stderr for marker in markers))
+
+        unreadable_config = self.root / 'PRIVATE_CONFIG_UNREADABLE_DO_NOT_LOG'
+        unreadable_config.mkdir()
+        unreadable = subprocess.run([sys.executable, str(trainer), '--dataset', str(missing_dataset),
+            '--checkpoint', str(missing_checkpoint), '--config', str(unreadable_config),
+            '--output', str(missing_output)], capture_output=True, text=True)
+        self.assertNotEqual(unreadable.returncode, 0)
+        self.assertTrue(all(marker not in unreadable.stderr for marker in
+            (*markers, 'PRIVATE_CONFIG_UNREADABLE_DO_NOT_LOG')))
+
+    def test_multilabel_live_loader_drift_is_identity_bound_and_rechecked(self):
+        import masked_supervision as masked
+        dataset, _ = self.multilabel_fixture()
+        loader_path = Path(masked.__file__).resolve()
+        with patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            partial = self.subject.experiment(dataset, self.checkpoint, self.config_path,
+                self.root / 'multilabel-loader-partial', max_steps_this_run=1)
+        drifted_loader = self.root / 'masked_supervision_drift.py'
+        drifted_loader.write_bytes(loader_path.read_bytes() + b'\n# changed loader identity fixture\n')
+        with patch.object(masked, '__file__', str(drifted_loader)), \
+             patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            with self.assertRaisesRegex(ValueError, 'checkpoint identity'):
+                self.subject.experiment(dataset, self.checkpoint, self.config_path,
+                    self.root / 'multilabel-loader-mismatched-resume',
+                    resume=Path(partial['latest_checkpoint']),
+                    resume_state_sha256=partial['latest_checkpoint_state_sha256'])
+        original_read = Path.read_bytes
+        reads = 0
+        def drift_after_identity(path):
+            nonlocal reads
+            raw = original_read(path)
+            if path.resolve() == loader_path:
+                reads += 1
+                return raw if reads == 1 else raw + b'\n# runtime drift fixture\n'
+            return raw
+        with patch.object(Path, 'read_bytes', drift_after_identity), \
+             patch.object(masked, '_verify_owner_private_access'), \
+             patch.object(self.subject, 'os', SimpleNamespace(name='posix', environ=os.environ,
+                open=os.open, fdopen=os.fdopen, O_WRONLY=os.O_WRONLY, O_CREAT=os.O_CREAT, O_EXCL=os.O_EXCL)):
+            with self.assertRaisesRegex(ValueError, 'training inputs changed during execution'):
+                self.subject.experiment(dataset, self.checkpoint, self.config_path,
+                                        self.root / 'multilabel-loader-drift')
+        self.assertEqual(reads, 2)
 
     def test_sample_masks_prompt_and_padding(self):
         records = [{'bytes': b'promptANSWER', 'response_start': 6, 'weight': 1.0}]
@@ -281,7 +555,7 @@ class OwnedAssessmentSFTTests(unittest.TestCase):
             '--config', str(self.config_path), '--output', str(self.root / 'legacy-output')],
             capture_output=True, text=True)
         self.assertNotEqual(legacy_run.returncode, 0)
-        self.assertIn(str(missing_checkpoint), legacy_run.stderr)
+        self.assertIn(str(missing_checkpoint), legacy_run.stderr.replace('\\\\', '\\'))
 
     def test_additional_input_and_config_fields_are_accepted(self):
         train_path = self.dataset / 'train.jsonl'
