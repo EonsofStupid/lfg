@@ -31,7 +31,7 @@ const CONFIG_ENV: &str = "LFG_OWNED_ASSESSMENT_CONFIG";
 const TOKEN_ENV: &str = "LFG_OWNED_ASSESSMENT_TOKEN";
 const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Backend {
     LegacyFullPrefix,
@@ -51,6 +51,14 @@ enum ArtifactMode {
 
 fn default_artifact_mode() -> ArtifactMode {
     ArtifactMode::Directory
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum TrainingManifestSchema {
+    #[serde(rename = "lfg.owned-assessment-sft-result.v1")]
+    OwnedAssessmentSftResultV1,
+    #[serde(rename = "lfg.owned-multilabel-sft-result.v1")]
+    OwnedMultilabelSftResultV1,
 }
 
 #[derive(Clone)]
@@ -80,6 +88,8 @@ struct Config {
     max_cached_graph_bytes: Option<u64>,
     #[serde(default, rename = "maxCacheStateBytesPerRequest")]
     max_cache_bytes: Option<u64>,
+    #[serde(default)]
+    training_manifest_schema: Option<TrainingManifestSchema>,
     framing_file: PathBuf,
     training_manifest_file: PathBuf,
     runtime_config_file: PathBuf,
@@ -1122,6 +1132,168 @@ fn provenance_links_valid(
         && framing["training_file_sha256"].as_str() == training["training_file_sha256"].as_str()
 }
 
+fn valid_hash_map(value: &Value, expected_names: &[&str], nullable: bool) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    if expected_names.iter().any(|name| !map.contains_key(*name)) {
+        return false;
+    }
+    // The whole manifest is already bounded by maxMetadataBytes. Unknown entries
+    // remain inert, but digest maps retain their hash-or-explicit-null value type.
+    map.values()
+        .all(|value| (nullable && value.is_null()) || is_sha256_value(value))
+}
+
+fn valid_known_hash_extensions(value: &Value, expected_names: &[&str]) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    expected_names.iter().all(|name| {
+        map.get(*name)
+            .is_some_and(|value| value.is_null() || is_sha256_value(value))
+    })
+}
+
+fn multilabel_provenance_links_valid(
+    manifest: &Value,
+    framing: &Value,
+    training: &Value,
+    system: &str,
+    actual_framing: &Framing,
+    training_digest: &str,
+) -> bool {
+    const CODE_NAMES: &[&str] = &[
+        "train_owned_assessment_sft.py",
+        "train_owned_student.py",
+        "owned_student.py",
+        "owned_sft_checkpoint.py",
+        "owned_multilabel_contract.py",
+        "masked_supervision.py",
+    ];
+    const SOURCE_CODE_NAMES: &[&str] = &[
+        "screening_policy_sha256",
+        "screening_code_sha256",
+        "taxonomy_loader_sha256",
+        "partial_review_code_sha256",
+        "exporter_code_sha256",
+        "comparison_semantics_code_sha256",
+    ];
+    const IDENTITY_NAMES: &[&str] = &[
+        "taxonomy_sha256",
+        "instruction_template_sha256",
+        "adapter_code_sha256",
+        "response_contract_code_sha256",
+    ];
+    let Some(coverage) = training.get("coverage").and_then(Value::as_object) else {
+        return false;
+    };
+    let Some(training_object) = training.as_object() else {
+        return false;
+    };
+    if training["schema_version"] != "lfg.owned-multilabel-sft-result.v1"
+        || training["completed"] != true
+        || training["training_task"] != "owned_multilabel"
+        || manifest["source_manifest_sha256"].as_str() != Some(training_digest)
+        || !is_sha256_value(&manifest["source_manifest_sha256"])
+        || !is_sha256_value(&manifest["source_model_code_sha256"])
+        || !is_sha256_value(&manifest["source_weights_sha256"])
+        || manifest["source_model_code_sha256"] != training["code_sha256"]["owned_student.py"]
+        || training["weights_sha256"] != manifest["source_weights_sha256"]
+        || !is_sha256_value(&training["weights_sha256"])
+        || !is_sha256_value(&training["config_sha256"])
+        || !is_sha256_value(&training["training_file_sha256"])
+        || !is_sha256_value(&training["dataset_manifest_sha256"])
+        || !is_sha256_value(&training["source_checkpoint_manifest_sha256"])
+        || !is_sha256_value(&training["source_checkpoint_weights_sha256"])
+        || !is_sha256_value(&training["system_sha256"])
+        || !is_sha256_value(&training["framing_sha256"])
+        || training["system_sha256"].as_str() != Some(digest(system.as_bytes()).as_str())
+        || training["framing_sha256"].as_str() != Some(framing_digest(actual_framing).as_str())
+        || framing["system_sha256"] != training["system_sha256"]
+        || framing["config_sha256"] != training["config_sha256"]
+        || framing["training_file_sha256"] != training["training_file_sha256"]
+        || coverage.get("system_sha256") != Some(&training["system_sha256"])
+        || coverage.get("framing_sha256") != Some(&training["framing_sha256"])
+        || coverage.get("config_sha256") != Some(&training["config_sha256"])
+        || coverage.get("training_file_sha256") != Some(&training["training_file_sha256"])
+        || coverage.get("dataset_manifest_sha256") != Some(&training["dataset_manifest_sha256"])
+        || coverage.get("source_checkpoint_manifest_sha256")
+            != Some(&training["source_checkpoint_manifest_sha256"])
+        || coverage.get("source_checkpoint_weights_sha256")
+            != Some(&training["source_checkpoint_weights_sha256"])
+    {
+        return false;
+    }
+    for name in IDENTITY_NAMES {
+        let Some(value) = training_object.get(*name) else {
+            return false;
+        };
+        if !is_sha256_value(value) || coverage.get(*name) != Some(value) {
+            return false;
+        }
+    }
+    let Some(guide) = training_object.get("guide_sha256") else {
+        return false;
+    };
+    if !(guide.is_null() || is_sha256_value(guide)) || coverage.get("guide_sha256") != Some(guide) {
+        return false;
+    }
+    let Some(code) = training_object.get("code_sha256") else {
+        return false;
+    };
+    if !valid_hash_map(code, CODE_NAMES, false)
+        || coverage.get("code_sha256") != Some(code)
+        || coverage.get("live_masked_supervision_code_sha256") != code.get("masked_supervision.py")
+    {
+        return false;
+    }
+    if let Some(source_code) = coverage.get("source_code_digests") {
+        // Unknown values are inert extensions; maxMetadataBytes bounds their
+        // total serialized size. Keep every recognized claim strictly typed.
+        if !valid_known_hash_extensions(source_code, SOURCE_CODE_NAMES) {
+            return false;
+        }
+    }
+    true
+}
+
+fn selected_provenance_valid(
+    schema: Option<TrainingManifestSchema>,
+    backend: Backend,
+    manifest: &Value,
+    framing: &Value,
+    training: &Value,
+    system: &str,
+    actual_framing: &Framing,
+    training_digest: &str,
+) -> bool {
+    match schema {
+        Some(TrainingManifestSchema::OwnedMultilabelSftResultV1) => {
+            backend == Backend::CachedOnnx
+                && multilabel_provenance_links_valid(
+                    manifest,
+                    framing,
+                    training,
+                    system,
+                    actual_framing,
+                    training_digest,
+                )
+        }
+        Some(TrainingManifestSchema::OwnedAssessmentSftResultV1) | None => {
+            training["schema_version"] == "lfg.owned-assessment-sft-result.v1"
+                && provenance_links_valid(
+                    manifest,
+                    framing,
+                    training,
+                    system,
+                    actual_framing,
+                    training_digest,
+                )
+        }
+    }
+}
+
 fn digest_file(path: &Path, limit: u64) -> Result<(String, u64), &'static str> {
     use std::io::Read;
     let meta = std::fs::symlink_metadata(path).map_err(|_| "asset_unavailable")?;
@@ -1293,6 +1465,7 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
                 let manifest = json!({
                     "source_weights_sha256":identity.model_sha256,
                     "source_manifest_sha256":identity.source_manifest_sha256,
+                    "source_model_code_sha256":identity.source_model_code_sha256,
                     "context":identity.context
                 });
                 (
@@ -1325,9 +1498,10 @@ fn load_service(config_path: PathBuf) -> Result<Option<Service>, &'static str> {
     let training_raw = read_bounded(&config.training_manifest_file, config.max_metadata_bytes)?;
     let training: Value =
         serde_json::from_slice(&training_raw).map_err(|_| "invalid_training_manifest")?;
-    if training["schema_version"] != "lfg.owned-assessment-sft-result.v1"
-        || framing_json["schema_version"] != "lfg.private-assessment-framing.v1"
-        || !provenance_links_valid(
+    if framing_json["schema_version"] != "lfg.private-assessment-framing.v1"
+        || !selected_provenance_valid(
+            config.training_manifest_schema,
+            config.backend,
             &manifest,
             &framing_json,
             &training,
@@ -1545,6 +1719,7 @@ mod tests {
             expected_cached_manifest_sha256: None,
             max_cached_graph_bytes: None,
             max_cache_bytes: None,
+            training_manifest_schema: None,
             framing_file: PathBuf::new(),
             training_manifest_file: PathBuf::new(),
             runtime_config_file: PathBuf::new(),
@@ -1917,6 +2092,601 @@ mod tests {
             &actual_framing,
             &digest(&raw)
         ));
+    }
+
+    fn multilabel_provenance_fixture(
+        guide: Value,
+    ) -> (Value, Value, Value, String, Framing, String) {
+        let system = "synthetic multilabel service system".to_owned();
+        let actual_framing = Framing {
+            system_prefix: "<s>".into(),
+            system_suffix: "</s>".into(),
+            user_prefix: "<u>".into(),
+            user_suffix: "</u>".into(),
+            assistant_prefix: "<a>".into(),
+            assistant_suffix: "</a>".into(),
+        };
+        let h = "a".repeat(64);
+        let code = json!({
+            "train_owned_assessment_sft.py": h,
+            "train_owned_student.py": h,
+            "owned_student.py": h,
+            "owned_sft_checkpoint.py": h,
+            "owned_multilabel_contract.py": h,
+            "masked_supervision.py": h
+        });
+        let source_code = json!({
+            "screening_policy_sha256": h,
+            "screening_code_sha256": Value::Null,
+            "taxonomy_loader_sha256": h,
+            "partial_review_code_sha256": h,
+            "exporter_code_sha256": h,
+            "comparison_semantics_code_sha256": h
+        });
+        let training = json!({
+            "schema_version": "lfg.owned-multilabel-sft-result.v1",
+            "completed": true,
+            "training_task": "owned_multilabel",
+            "weights_sha256": h,
+            "config_sha256": h,
+            "training_file_sha256": h,
+            "dataset_manifest_sha256": h,
+            "source_checkpoint_manifest_sha256": h,
+            "source_checkpoint_weights_sha256": h,
+            "system_sha256": digest(system.as_bytes()),
+            "framing_sha256": framing_digest(&actual_framing),
+            "taxonomy_sha256": h,
+            "guide_sha256": guide,
+            "instruction_template_sha256": h,
+            "adapter_code_sha256": h,
+            "response_contract_code_sha256": h,
+            "code_sha256": code,
+            "coverage": {
+                "system_sha256": digest(system.as_bytes()),
+                "framing_sha256": framing_digest(&actual_framing),
+                "config_sha256": h,
+                "training_file_sha256": h,
+                "dataset_manifest_sha256": h,
+                "source_checkpoint_manifest_sha256": h,
+                "source_checkpoint_weights_sha256": h,
+                "taxonomy_sha256": h,
+                "guide_sha256": guide,
+                "instruction_template_sha256": h,
+                "adapter_code_sha256": h,
+                "response_contract_code_sha256": h,
+                "code_sha256": code,
+                "live_masked_supervision_code_sha256": h,
+                "source_code_digests": source_code
+            }
+        });
+        let framing = json!({
+            "schema_version": "lfg.private-assessment-framing.v1",
+            "system_sha256": digest(system.as_bytes()),
+            "config_sha256": h,
+            "training_file_sha256": h
+        });
+        // The trainer emits the source-code mapping only within coverage.
+        assert!(training.get("source_code_digests").is_none());
+        let training_digest = digest(&serde_json::to_vec(&training).unwrap());
+        let manifest = json!({
+            "source_weights_sha256": h,
+            "source_manifest_sha256": training_digest,
+            "source_model_code_sha256": h
+        });
+        (
+            manifest,
+            framing,
+            training,
+            system,
+            actual_framing,
+            training_digest,
+        )
+    }
+
+    #[cfg(feature = "owned-byte-onnx")]
+    fn write_cached_load_fixture(
+        training: &Value,
+        system: &str,
+        framing: &Framing,
+        schema: Option<&str>,
+        cached_source_code: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = root.path().join("cached");
+        let training_raw = serde_json::to_vec(training).unwrap();
+        let training_sha = digest(&training_raw);
+        let model_sha = training["weights_sha256"].as_str().unwrap();
+        let source_code_sha = cached_source_code.unwrap_or_else(|| {
+            training["code_sha256"]["owned_student.py"]
+                .as_str()
+                .unwrap()
+        });
+        let cached_manifest_sha = super::super::owned_cached::write_test_cached_artifact(
+            &artifact,
+            model_sha,
+            &training_sha,
+            source_code_sha,
+        );
+        let framing_json = json!({
+            "schema_version": "lfg.private-assessment-framing.v1",
+            "system": system,
+            "system_sha256": digest(system.as_bytes()),
+            "config_sha256": training["config_sha256"],
+            "training_file_sha256": training["training_file_sha256"],
+            "framing": {
+                "system_prefix": framing.system_prefix,
+                "system_suffix": framing.system_suffix,
+                "user_prefix": framing.user_prefix,
+                "user_suffix": framing.user_suffix,
+                "assistant_prefix": framing.assistant_prefix,
+                "assistant_suffix": framing.assistant_suffix
+            }
+        });
+        let framing_raw = serde_json::to_vec(&framing_json).unwrap();
+        let runtime_path = root.path().join("runtime.json");
+        std::fs::write(
+            &runtime_path,
+            serde_json::to_vec(&json!({
+                "schema_version": "lfg.owned-byte-runtime.v1",
+                "max_manifest_bytes": 1_048_576,
+                "max_model_bytes": 1_048_576,
+                "max_context": 4,
+                "max_line_bytes": 4096,
+                "max_generation_bytes": 32
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let framing_path = root.path().join("framing.json");
+        let training_path = root.path().join("training.json");
+        std::fs::write(&framing_path, &framing_raw).unwrap();
+        std::fs::write(&training_path, &training_raw).unwrap();
+        let mut config = json!({
+            "schemaVersion": "lfg.owned-assessment-service.v1",
+            "enabled": true,
+            "backend": "cached_onnx",
+            "artifactMode": "directory",
+            "artifactDirectory": artifact,
+            "expectedCachedManifestSha256": cached_manifest_sha,
+            "maxCachedGraphBytes": 1_048_576,
+            "maxCacheStateBytesPerRequest": 1024,
+            "framingFile": framing_path,
+            "trainingManifestFile": training_path,
+            "runtimeConfigFile": runtime_path,
+            "maxRuntimeConfigBytes": 1_048_576,
+            "expectedModelSha256": model_sha,
+            "expectedFramingSha256": digest(&framing_raw),
+            "maxMetadataBytes": 1_048_576,
+            "requiredOutputFields": [{"name":"intent","valueType":"string"}],
+            "maxHttpBodyBytes": 4096,
+            "maxRequestBytes": 1024,
+            "maxContextBytes": 4,
+            "maxGeneratedBytes": 32,
+            "maxWorkerOutputBytes": 2048,
+            "timeoutMs": 1000,
+            "maxConcurrent": 1,
+            "workerThreads": 1,
+            "unrecognizedExtension": {"ignored": true}
+        });
+        if let Some(schema) = schema {
+            config["trainingManifestSchema"] = json!(schema);
+        }
+        let config_path = root.path().join("service.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        (root, config_path)
+    }
+
+    #[cfg(feature = "owned-byte-onnx")]
+    fn write_legacy_load_fixture() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = root.path().join("legacy");
+        std::fs::create_dir_all(&artifact).unwrap();
+        let model_raw = b"synthetic legacy graph bytes";
+        let training = json!({
+            "schema_version": "lfg.owned-assessment-sft-result.v1",
+            "weights_sha256": "a".repeat(64),
+            "config_sha256": "b".repeat(64),
+            "training_file_sha256": "c".repeat(64)
+        });
+        let training_raw = serde_json::to_vec(&training).unwrap();
+        let legacy_manifest = json!({
+            "schema_version": "lfg.owned-byte-onnx.v1",
+            "model_sha256": digest(model_raw),
+            "source_weights_sha256": training["weights_sha256"],
+            "source_manifest_sha256": digest(&training_raw),
+            "context": 4
+        });
+        std::fs::write(
+            artifact.join("manifest.json"),
+            serde_json::to_vec(&legacy_manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(artifact.join("model.onnx"), model_raw).unwrap();
+        let system = "legacy test system";
+        let framing = Framing {
+            system_prefix: String::new(),
+            system_suffix: String::new(),
+            user_prefix: String::new(),
+            user_suffix: String::new(),
+            assistant_prefix: String::new(),
+            assistant_suffix: "STOP".into(),
+        };
+        let framing_json = json!({
+            "schema_version": "lfg.private-assessment-framing.v1",
+            "system": system,
+            "system_sha256": digest(system.as_bytes()),
+            "config_sha256": training["config_sha256"],
+            "training_file_sha256": training["training_file_sha256"],
+            "framing": {
+                "system_prefix": framing.system_prefix,
+                "system_suffix": framing.system_suffix,
+                "user_prefix": framing.user_prefix,
+                "user_suffix": framing.user_suffix,
+                "assistant_prefix": framing.assistant_prefix,
+                "assistant_suffix": framing.assistant_suffix
+            }
+        });
+        let framing_raw = serde_json::to_vec(&framing_json).unwrap();
+        let framing_path = root.path().join("framing.json");
+        let training_path = root.path().join("training.json");
+        let runtime_path = root.path().join("runtime.json");
+        std::fs::write(&framing_path, &framing_raw).unwrap();
+        std::fs::write(&training_path, &training_raw).unwrap();
+        std::fs::write(
+            &runtime_path,
+            serde_json::to_vec(&json!({
+                "schema_version": "lfg.owned-byte-runtime.v1",
+                "max_manifest_bytes": 1_048_576,
+                "max_model_bytes": 1_048_576,
+                "max_context": 4,
+                "max_line_bytes": 4096,
+                "max_generation_bytes": 32
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let config = json!({
+            "schemaVersion": "lfg.owned-assessment-service.v1",
+            "enabled": true,
+            "artifactDirectory": artifact,
+            "framingFile": framing_path,
+            "trainingManifestFile": training_path,
+            "runtimeConfigFile": runtime_path,
+            "maxRuntimeConfigBytes": 1_048_576,
+            "expectedModelSha256": digest(model_raw),
+            "expectedFramingSha256": digest(&framing_raw),
+            "maxMetadataBytes": 1_048_576,
+            "requiredOutputFields": [{"name":"intent","valueType":"string"}],
+            "maxHttpBodyBytes": 4096,
+            "maxRequestBytes": 1024,
+            "maxContextBytes": 4,
+            "maxGeneratedBytes": 32,
+            "maxWorkerOutputBytes": 2048,
+            "timeoutMs": 1000,
+            "maxConcurrent": 1,
+            "workerThreads": 1
+        });
+        let config_path = root.path().join("service.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        (root, config_path)
+    }
+
+    #[test]
+    fn opted_in_multilabel_accepts_current_trainer_shape_and_explicit_guide_null() {
+        for guide in [Value::Null, json!("b".repeat(64))] {
+            let (manifest, framing, training, system, actual, training_digest) =
+                multilabel_provenance_fixture(guide);
+            assert!(selected_provenance_valid(
+                Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+                Backend::CachedOnnx,
+                &manifest,
+                &framing,
+                &training,
+                &system,
+                &actual,
+                &training_digest
+            ));
+        }
+    }
+
+    #[test]
+    fn multilabel_provenance_rejects_missing_mismatched_and_malformed_identity() {
+        let (manifest, framing, training, system, actual, _) =
+            multilabel_provenance_fixture(Value::Null);
+        let validate = |manifest: &Value, framing: &Value, training: &Value| {
+            let training_digest = digest(&serde_json::to_vec(training).unwrap());
+            let mut bound_manifest = manifest.clone();
+            bound_manifest["source_manifest_sha256"] = json!(training_digest);
+            selected_provenance_valid(
+                Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+                Backend::CachedOnnx,
+                &bound_manifest,
+                framing,
+                training,
+                &system,
+                &actual,
+                &training_digest,
+            )
+        };
+        for (name, value) in [
+            ("completed", json!(false)),
+            ("training_task", json!("assessment")),
+            ("schema_version", json!("unknown")),
+            ("weights_sha256", Value::Null),
+            ("config_sha256", json!(7)),
+            ("training_file_sha256", Value::Null),
+            ("system_sha256", json!("f".repeat(64))),
+            ("framing_sha256", json!("f".repeat(64))),
+            ("taxonomy_sha256", Value::Null),
+            ("instruction_template_sha256", Value::Null),
+            ("adapter_code_sha256", Value::Null),
+            ("response_contract_code_sha256", Value::Null),
+        ] {
+            let mut bad = training.clone();
+            bad[name] = value;
+            assert!(
+                !validate(&manifest, &framing, &bad),
+                "accepted {name} drift"
+            );
+        }
+        let mut missing_guide = training.clone();
+        missing_guide
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_sha256");
+        assert!(!validate(&manifest, &framing, &missing_guide));
+        let mut null_guide_mismatch = training.clone();
+        null_guide_mismatch["coverage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_sha256");
+        assert!(!validate(&manifest, &framing, &null_guide_mismatch));
+        let mut coverage_drift = training.clone();
+        coverage_drift["coverage"]["taxonomy_sha256"] = json!("f".repeat(64));
+        assert!(!validate(&manifest, &framing, &coverage_drift));
+        let mut code_drift = training.clone();
+        code_drift["coverage"]["live_masked_supervision_code_sha256"] = json!("f".repeat(64));
+        assert!(!validate(&manifest, &framing, &code_drift));
+        let mut source_map_drift = training.clone();
+        source_map_drift["coverage"]["source_code_digests"]["screening_policy_sha256"] =
+            json!("bad");
+        assert!(!validate(&manifest, &framing, &source_map_drift));
+        let mut unknown_source_claim = training.clone();
+        unknown_source_claim["coverage"]["source_code_digests"]["unrecognized"] =
+            json!({"note":"inert extension","values":["text",7,null]});
+        unknown_source_claim["coverage"]["source_code_digests"]["source_note"] =
+            json!("uninterpreted source metadata");
+        unknown_source_claim["coverage"]["source_code_digests"]["source_count"] = json!(7);
+        unknown_source_claim["coverage"]["source_code_digests"]["source_flag"] = Value::Null;
+        assert!(validate(&manifest, &framing, &unknown_source_claim));
+        let mut code_extension = training.clone();
+        code_extension["code_sha256"]["additional_tool.py"] = json!("b".repeat(64));
+        code_extension["coverage"]["code_sha256"]["additional_tool.py"] = json!("b".repeat(64));
+        assert!(validate(&manifest, &framing, &code_extension));
+        let mut malformed_code_extension = training.clone();
+        malformed_code_extension["code_sha256"]["additional_tool.py"] = json!("unhashed");
+        malformed_code_extension["coverage"]["code_sha256"]["additional_tool.py"] =
+            json!("unhashed");
+        assert!(!validate(&manifest, &framing, &malformed_code_extension));
+        let mut code_map_drift = training.clone();
+        code_map_drift["code_sha256"]["additional_tool.py"] = json!("b".repeat(64));
+        assert!(!validate(&manifest, &framing, &code_map_drift));
+        let mut optional_source_map = training.clone();
+        optional_source_map["coverage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_code_digests");
+        assert!(validate(&manifest, &framing, &optional_source_map));
+        let mut changed_framing_link = framing.clone();
+        changed_framing_link["training_file_sha256"] = json!("f".repeat(64));
+        assert!(!validate(&manifest, &changed_framing_link, &training));
+        let mut changed_training_bytes = training.clone();
+        changed_training_bytes["config_sha256"] = json!("f".repeat(64));
+        let changed_digest = digest(&serde_json::to_vec(&changed_training_bytes).unwrap());
+        assert!(!selected_provenance_valid(
+            Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+            Backend::CachedOnnx,
+            &manifest,
+            &framing,
+            &changed_training_bytes,
+            &system,
+            &actual,
+            &changed_digest
+        ));
+        let mut wrong_graph_weights = manifest.clone();
+        wrong_graph_weights["source_weights_sha256"] = json!("f".repeat(64));
+        assert!(!validate(&wrong_graph_weights, &framing, &training));
+        let mut wrong_source_manifest = manifest.clone();
+        wrong_source_manifest["source_manifest_sha256"] = json!("f".repeat(64));
+        let original_training_digest = digest(&serde_json::to_vec(&training).unwrap());
+        assert!(!selected_provenance_valid(
+            Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+            Backend::CachedOnnx,
+            &manifest,
+            &framing,
+            &training,
+            &system,
+            &actual,
+            &"f".repeat(64)
+        ));
+        assert!(!selected_provenance_valid(
+            Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+            Backend::CachedOnnx,
+            &wrong_source_manifest,
+            &framing,
+            &training,
+            &system,
+            &actual,
+            &original_training_digest
+        ));
+        assert!(!selected_provenance_valid(
+            Some(TrainingManifestSchema::OwnedMultilabelSftResultV1),
+            Backend::LegacyFullPrefix,
+            &manifest,
+            &framing,
+            &training,
+            &system,
+            &actual,
+            manifest["source_manifest_sha256"].as_str().unwrap()
+        ));
+        assert!(serde_json::from_value::<TrainingManifestSchema>(json!("unknown")).is_err());
+    }
+
+    #[test]
+    fn missing_opt_in_preserves_legacy_missing_system_and_framing_links() {
+        let system = "legacy";
+        let actual = Framing {
+            system_prefix: String::new(),
+            system_suffix: String::new(),
+            user_prefix: String::new(),
+            user_suffix: String::new(),
+            assistant_prefix: String::new(),
+            assistant_suffix: String::new(),
+        };
+        let training = json!({
+            "schema_version": "lfg.owned-assessment-sft-result.v1",
+            "weights_sha256": "a".repeat(64),
+            "config_sha256": "b".repeat(64),
+            "training_file_sha256": "c".repeat(64)
+        });
+        let raw = serde_json::to_vec(&training).unwrap();
+        let manifest = json!({
+            "source_weights_sha256": "a".repeat(64),
+            "source_manifest_sha256": digest(&raw)
+        });
+        let framing = json!({
+            "system_sha256": digest(system.as_bytes()),
+            "config_sha256": "b".repeat(64),
+            "training_file_sha256": "c".repeat(64)
+        });
+        assert!(selected_provenance_valid(
+            None,
+            Backend::LegacyFullPrefix,
+            &manifest,
+            &framing,
+            &training,
+            system,
+            &actual,
+            &digest(&raw)
+        ));
+    }
+
+    #[test]
+    fn config_opt_in_is_explicit_unknown_schema_fails_and_extensions_stay_inert() {
+        let mut example: Value = serde_json::from_str(include_str!(
+            "../config/owned-assessment-service.example.json"
+        ))
+        .unwrap();
+        let legacy: Config = serde_json::from_value(example.clone()).unwrap();
+        assert_eq!(legacy.training_manifest_schema, None);
+        assert_eq!(legacy.backend, Backend::LegacyFullPrefix);
+
+        example["trainingManifestSchema"] = json!("lfg.owned-multilabel-sft-result.v1");
+        example["operatorExtension"] = json!({"ignored": true});
+        let opted_in: Config = serde_json::from_value(example.clone()).unwrap();
+        assert_eq!(
+            opted_in.training_manifest_schema,
+            Some(TrainingManifestSchema::OwnedMultilabelSftResultV1)
+        );
+        assert_eq!(opted_in.backend, Backend::LegacyFullPrefix);
+
+        example["trainingManifestSchema"] = json!("lfg.unsupported-training-result.v1");
+        assert!(serde_json::from_value::<Config>(example).is_err());
+    }
+
+    #[cfg(feature = "owned-byte-onnx")]
+    #[test]
+    fn load_service_validates_cached_multilabel_identity_end_to_end() {
+        for guide in [Value::Null, json!("b".repeat(64))] {
+            let (_, _, training, system, framing, _) = multilabel_provenance_fixture(guide);
+            let (_root, config_path) = write_cached_load_fixture(
+                &training,
+                &system,
+                &framing,
+                Some("lfg.owned-multilabel-sft-result.v1"),
+                None,
+            );
+            let service = load_service(config_path).unwrap().unwrap();
+            assert_eq!(
+                service.engine["sourceWeightsSha256"],
+                training["weights_sha256"]
+            );
+            assert!(service.engine["trainingManifestSha256"].is_string());
+        }
+
+        let (_, _, mut extended_training, system, framing, _) =
+            multilabel_provenance_fixture(Value::Null);
+        extended_training["coverage"]["source_code_digests"]["annotation"] =
+            json!({"label":"inert","extra":[1,"text",null]});
+        extended_training["coverage"]["source_code_digests"]["note"] = json!("opaque extension");
+        extended_training["coverage"]["source_code_digests"]["count"] = json!(5);
+        extended_training["coverage"]["source_code_digests"]["flag"] = Value::Null;
+        let (_root, extension_path) = write_cached_load_fixture(
+            &extended_training,
+            &system,
+            &framing,
+            Some("lfg.owned-multilabel-sft-result.v1"),
+            None,
+        );
+        assert!(load_service(extension_path).unwrap().is_some());
+
+        let (_, _, training, system, framing, _) = multilabel_provenance_fixture(Value::Null);
+        let (_root, drifted_graph_path) = write_cached_load_fixture(
+            &training,
+            &system,
+            &framing,
+            Some("lfg.owned-multilabel-sft-result.v1"),
+            Some(&"d".repeat(64)),
+        );
+        assert!(matches!(
+            load_service(drifted_graph_path),
+            Err("provenance_mismatch")
+        ));
+
+        let (_root, no_opt_in_path) =
+            write_cached_load_fixture(&training, &system, &framing, None, None);
+        assert!(matches!(
+            load_service(no_opt_in_path),
+            Err("provenance_mismatch")
+        ));
+
+        let mut missing_guide = training.clone();
+        missing_guide
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_sha256");
+        let (_root, missing_guide_path) = write_cached_load_fixture(
+            &missing_guide,
+            &system,
+            &framing,
+            Some("lfg.owned-multilabel-sft-result.v1"),
+            None,
+        );
+        assert!(matches!(
+            load_service(missing_guide_path),
+            Err("provenance_mismatch")
+        ));
+
+        let (_root, unknown_path) = write_cached_load_fixture(
+            &training,
+            &system,
+            &framing,
+            Some("lfg.unsupported-result.v1"),
+            None,
+        );
+        assert!(matches!(
+            load_service(unknown_path),
+            Err("invalid_configuration")
+        ));
+    }
+
+    #[cfg(feature = "owned-byte-onnx")]
+    #[test]
+    fn load_service_legacy_default_remains_compatible() {
+        let (_root, config_path) = write_legacy_load_fixture();
+        let service = load_service(config_path).unwrap().unwrap();
+        assert_eq!(service.backend, Backend::LegacyFullPrefix);
+        assert!(service.engine["cachedManifestSha256"].is_null());
     }
 
     #[tokio::test]

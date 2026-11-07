@@ -1,6 +1,7 @@
 {
   "schemaVersion": "lfg.owned-assessment-service.v1",
   "enabled": false,
+  "trainingManifestSchema": null,
   "artifactDirectory": "C:/path/to/private/onnx",
   "framingFile": "C:/path/to/private/assessment-framing.json",
   "trainingManifestFile": "C:/path/to/private/training-manifest.json",
