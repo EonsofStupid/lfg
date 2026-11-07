@@ -18,8 +18,11 @@ async function openReview() {
     agent_range: {min: 0, max: 4}}
   const item = {id: 'one', text: 'fixture request', project: 'fixture', split: 'train', source: {},
     labels: {intents: ['build'], capabilities: [], risks: []}, labels_pending: false,
-    annotation_sha256: 'b'.repeat(64), redaction_suggestions: [], assessment_targets: null}
-  const itemResponse = {item, pending: 1, offset: 0, taxonomy: {intents: ['build'], capabilities: [], risks: []},
+    annotation_sha256: 'b'.repeat(64), redaction_suggestions: [{label: 'Preview redaction', start: 0, end: 7, replacement: '[redacted]'}], assessment_targets: null,
+    partial_review: {enabled: true, state: 'not_reviewed', binding: {source_sha256: '1'.repeat(64),
+      annotation_sha256: 'b'.repeat(64), taxonomy_sha256: '2'.repeat(64), text_sha256: '3'.repeat(64),
+      proposal_sha256: '4'.repeat(64), guide_sha256: null}, context_checks: []}}
+  const itemResponse = {item, pending: 1, offset: 0, taxonomy: {intents: ['build'], capabilities: ['write'], risks: []},
     guide: null, guide_sha256: null, assessment_profile: profile, assessment_config_sha256: 'a'.repeat(64)}
   let submitted
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
@@ -28,6 +31,7 @@ async function openReview() {
     if (String(url) === '/api/following-source-context') return {ok: true, json: async () => ({observed_through_line: 4,
       observed_prefix_sha256: 'c'.repeat(64), truncated: false, messages: [{source_line: 4, text: '<script>later correction</script>'}]})}
     if (String(url) === '/api/decision') { submitted = JSON.parse(options.body); return {ok: true, json: async () => ({saved: true})} }
+    if (String(url) === '/api/partial-decision') { submitted = JSON.parse(options.body); return {ok: true, json: async () => ({saved: true})} }
     throw new Error('unexpected request')
   }))
   vi.spyOn(window, 'prompt').mockReturnValue('APPROVE')
@@ -49,6 +53,38 @@ test('reviewer can submit project-configured assessment values', async () => {
   await waitFor(() => expect(submitted()).toBeDefined())
   expect(submitted().assessment_values).toEqual({complexity: 'c1', models: [{id: 'm1', effort: 'e1'}], agent_count: 0})
   expect(submitted().assessment_config_sha256).toBe('a'.repeat(64))
+})
+
+test('partial mode records explicit judgments separately from rejected suggestions', async () => {
+  const submitted = await openReview()
+  vi.mocked(window.prompt).mockReturnValue('REVIEW PARTIAL LABELS')
+  expect(document.querySelector('#partial-mode-label').hidden).toBe(false)
+  document.querySelector('#partial-mode').click()
+  expect(document.querySelector('#labels').hidden).toBe(true)
+  const intent = document.querySelector('[aria-label="intents build judgment"]')
+  expect(intent.value).toBe('')
+  intent.value = 'positive'
+  const proposal = document.querySelector('[aria-label="intents build proposal action"]')
+  proposal.value = 'rejected'
+  document.querySelector('[aria-label="capabilities write judgment"]').value = 'unknown'
+  document.querySelector('#partial-attest').checked = true
+  document.querySelector('#save-partial').click()
+  await waitFor(() => expect(submitted()).toBeDefined())
+  expect(submitted().judgments).toEqual({intents: {build: 'positive'}, capabilities: {write: 'unknown'}})
+  expect(submitted().proposal_actions).toEqual({intents: {build: 'rejected'}})
+  expect(submitted().attestation).toBe('REVIEW PARTIAL LABELS')
+  expect(vi.mocked(fetch).mock.calls.find(([url]) => String(url) === '/api/partial-decision')).toBeDefined()
+})
+
+test('partial judgment cannot be saved against a redacted preview', async () => {
+  const submitted = await openReview()
+  document.querySelector('#partial-mode').click()
+  document.querySelector('#partial-attest').checked = true
+  document.querySelector('#partial-label-controls select[data-field]').value = 'negative'
+  document.querySelector('#suggestions button').click()
+  document.querySelector('#save-partial').click()
+  await waitFor(() => expect(document.querySelector('#notice').textContent).toContain('bound to the original request'))
+  expect(submitted()).toBeUndefined()
 })
 
 test('blank assessment controls remain explicitly unknown', async () => {

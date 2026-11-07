@@ -14,6 +14,7 @@ import corpus_audit
 import inventory_checkpoint_prompts
 import review_corpus
 import review_web
+import train
 
 
 class ReviewWebTests(unittest.TestCase):
@@ -33,6 +34,9 @@ class ReviewWebTests(unittest.TestCase):
         (root / 'plan.json').write_text(json.dumps(plan), encoding='utf-8')
         self.workspace = root / 'workspace'
         review_corpus.init_workspace(root / 'plan.json', self.workspace)
+        self.workspace_lock = train.run_lock(self.workspace / 'review')
+        self.workspace_lock.__enter__()
+        self.addCleanup(lambda: self.workspace_lock.__exit__(None, None, None))
         self.token = secrets.token_urlsafe(32)
         config = review_web.load_config(review_web.DEFAULT_CONFIG)
         self.server = review_web.ReviewServer(self.workspace, 'fixture-reviewer', 0, config, self.token)
@@ -177,6 +181,20 @@ class ReviewWebTests(unittest.TestCase):
         config['redaction_suggestions'] = []
         path.write_text(json.dumps(config))
         self.assertEqual(review_web.load_config(path)['redaction_suggestions'], [])
+
+    def test_partial_review_config_is_optional_for_legacy_workspaces(self):
+        path = Path(self.temp.name) / 'legacy-web-config.json'
+        config = json.loads(review_web.DEFAULT_CONFIG.read_bytes())
+        config.pop('max_partial_review_bytes')
+        path.write_text(json.dumps(config), encoding='utf-8')
+        self.assertNotIn('max_partial_review_bytes', review_web.load_config(path))
+        self.server.config.pop('max_partial_review_bytes')
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        item = json.loads(raw)['item']
+        self.assertFalse(item['partial_review']['enabled'])
+        body = {'id': item['id'], 'binding': {}, 'judgments': {'intents': {'build': 'positive'}},
+                'proposal_actions': {}, 'attestation': 'REVIEW PARTIAL LABELS'}
+        self.assertEqual(self.request('POST', '/api/partial-decision', body=body, origin=self.server.origin)[0], 400)
 
     def test_oversized_decision_is_rejected_without_approval(self):
         self.server.config['max_request_bytes'] = 10
@@ -614,6 +632,27 @@ class ReviewWebTests(unittest.TestCase):
                 'decision': 'approved', 'confirmation': 'APPROVE', 'labels': current['labels']}
         self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 400)
         self.assertEqual(review_corpus.status(self.workspace)['decisions']['pending'], 1)
+
+    def test_partial_api_saves_mask_and_proposal_separately_under_lock(self):
+        status, headers, raw = self.request('GET', '/api/item?offset=0')
+        item = json.loads(raw)['item']
+        self.assertTrue(item['partial_review']['enabled'])
+        self.assertEqual(item['partial_review']['state'], 'not_reviewed')
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        body = {'id': item['id'], 'binding': item['partial_review']['binding'],
+                'judgments': {'intents': {'build': 'positive', 'explain': 'unknown'}},
+                'proposal_actions': {'intents': {'build': 'rejected'}},
+                'attestation': 'REVIEW PARTIAL LABELS'}
+        self.assertEqual(self.request('POST', '/api/partial-decision', body=body, origin='https://evil.example')[0], 403)
+        status, headers, raw = self.request('POST', '/api/partial-decision', body=body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['pending'], 1)
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        stored = json.loads(raw)['item']['partial_review']
+        self.assertEqual(stored['state'], 'current')
+        self.assertEqual(stored['event']['judgments'], body['judgments'])
+        self.assertEqual(stored['event']['proposal_actions'], body['proposal_actions'])
 
 
 if __name__ == '__main__':

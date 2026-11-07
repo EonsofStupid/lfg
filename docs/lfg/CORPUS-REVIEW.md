@@ -1108,3 +1108,31 @@ python ml/lfg-encoder/inventory_checkpoint_prompts.py --repo REPO_PATH --revisio
 Add `--output PRIVATE_NEW_FILE.jsonl` only when a private review copy is needed.
 The destination must not already exist. The scanner reports source and code
 hashes, but those hashes and session identifiers are also sensitive metadata.
+
+### Partial per-label review
+
+The local review server can opt into partial decisions by setting the configured
+`max_partial_review_bytes` limit in `review-web-config.v1.json`. When enabled,
+the reviewer can record a positive, negative, or unknown judgment for selected
+taxonomy labels and can separately accept or reject a draft proposal. A rejected
+proposal does not imply a negative label. Unset cells are not judgments.
+
+Partial decisions are stored in the workspace's private
+`partial-reviews.v1.jsonl` sidecar under the active review lock. Each event binds
+the source artifact, current annotation, text, taxonomy, guide, and proposal
+digests; it contains only digest/status/count context provenance, not source
+context text. The sidecar write is atomic and Windows ACLs are restricted to
+the current user (POSIX permissions are owner-only). If a binding changes, the earlier event is shown as stale and is
+not active. A partial review cannot be edited twice for the same record; start
+a new review workspace if a correction is required.
+
+Partial decisions do not alter source rows, `verified`, or the full-review
+ledger. They are not approved records, are not exported by the existing
+approved-record export, and cannot be consumed by `train.py`. The current
+training loader does not support these partial masks. A future mask-aware
+consumer must preserve unknown cells explicitly before partial judgments can
+be used for training. Reviewer identity, source rights, screening, and label
+accuracy remain claims; this workflow does not independently verify them. A
+redacted preview changes the text binding, so partial review is blocked until
+the original request is restored. Legacy full approval/rejection remains a
+separate workflow with its existing checkbox semantics.

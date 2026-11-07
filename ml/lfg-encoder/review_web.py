@@ -55,7 +55,7 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes', 'developer_ui_origins'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes', 'developer_ui_origins', 'max_partial_review_bytes'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
@@ -67,6 +67,9 @@ def load_config(path: Path) -> dict[str, Any]:
     if 'max_assessment_profile_bytes' in value and (type(value['max_assessment_profile_bytes']) is not int
                                                      or value['max_assessment_profile_bytes'] < 1):
         raise ValueError('invalid assessment profile byte limit')
+    if 'max_partial_review_bytes' in value and (type(value['max_partial_review_bytes']) is not int
+                                                 or value['max_partial_review_bytes'] < 1):
+        raise ValueError('invalid partial review byte limit')
     if 'source_verification' in value:
         limits = value['source_verification']
         if (not isinstance(limits, dict) or set(limits) != {'max_session_bytes', 'max_line_bytes'}
@@ -248,6 +251,7 @@ class ReviewServer(HTTPServer):
         self.guide_path = guide_path.resolve(strict=True) if guide_path is not None else None
         self.guide, self.guide_sha256 = load_guide(self.guide_path, taxonomy) if self.guide_path else (None, None)
         self.assessment_path = assessment_path.resolve(strict=True) if assessment_path is not None else None
+        self.context_checks: dict[str, list[dict[str, Any]]] = {}
         if self.assessment_path:
             limit = self.config.get('max_assessment_profile_bytes')
             if type(limit) is not int or limit < 1:
@@ -391,6 +395,15 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 config, config_sha = (assessment_targets.load_config(self.server.assessment_path, self.server.config['max_assessment_profile_bytes'])
                                       if self.server.assessment_path else (None, None))
                 profile = assessment_targets.project_profile(config, source['project']) if config else None
+                partial = {'enabled': 'max_partial_review_bytes' in self.server.config,
+                           'state': 'disabled'}
+                if partial['enabled'] and not stale:
+                    guide_sha = self.server.guide_sha256
+                    if self.server.guide_path is not None:
+                        _, guide_sha = load_guide(self.server.guide_path, taxonomy)
+                    partial = review_corpus.partial_review_state(
+                        self.server.workspace, identifier, self.server.config['max_partial_review_bytes'], guide_sha)
+                partial['context_checks'] = self.server.context_checks.get(identifier, [])
                 self.json_reply(200, {'item': {'id': identifier, 'text': row['text'], 'source': row['source'],
                                                'review_note': row.get('review_note'), 'labels': {k: row[k] for k in evaluate.FIELDS},
                                                'labels_pending': row.get('labels_pending', False),
@@ -398,6 +411,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                                                'assessment_targets': row.get('assessment_targets'),
                                                'annotation_sha256': annotation,
                                                'redaction_suggestions': suggestions,
+                                               'partial_review': partial,
                                                'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,
                                                'interrupted_write': bool(row['verified'])},
                                       'taxonomy': {k: sorted(v) for k, v in taxonomy.items()},
@@ -414,7 +428,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not self.authorized(post=True):
             self.reject_unauthorized_post(self.server.config['max_request_bytes'])
             return
-        if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context', '/api/following-source-context') or self.headers.get('Transfer-Encoding') or \
+        if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context', '/api/following-source-context', '/api/partial-decision') or self.headers.get('Transfer-Encoding') or \
                 self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})
             return
@@ -429,6 +443,27 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
+            if self.path == '/api/partial-decision':
+                if 'max_partial_review_bytes' not in self.server.config:
+                    raise ValueError('partial review is not enabled by local configuration')
+                required = {'id', 'binding', 'judgments', 'proposal_actions', 'attestation'}
+                if not isinstance(value, dict) or set(value) != required or not isinstance(value['id'], str):
+                    raise ValueError('invalid partial review')
+                plan, _, _ = review_corpus.load_workspace(self.server.workspace)
+                taxonomy, taxonomy_hash = evaluate.load_taxonomy(
+                    review_corpus.private_path(self.server.workspace, plan['taxonomy']))
+                if taxonomy_hash != self.server.taxonomy_hash:
+                    raise ValueError('workspace taxonomy changed; restart review')
+                guide_sha = None
+                if self.server.guide_path is not None:
+                    _, guide_sha = load_guide(self.server.guide_path, taxonomy)
+                review_corpus.record_partial_decision(
+                    self.server.workspace, value['id'], self.server.reviewer, value['binding'],
+                    value['judgments'], value['proposal_actions'], guide_sha,
+                    self.server.context_checks.get(value['id'], []),
+                    self.server.config['max_partial_review_bytes'], value['attestation'])
+                self.json_reply(200, {'saved': True, 'decision': 'partial'})
+                return
             if self.path in ('/api/verify-source', '/api/source-context', '/api/following-source-context'):
                 if (not isinstance(value, dict) or set(value) != {'id', 'annotation_sha256'}
                         or not isinstance(value['id'], str) or not isinstance(value['annotation_sha256'], str)):
@@ -439,6 +474,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         raise ValueError('following source context is not configured')
                     result = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
                                            self.server.config.get('source_verification'), following_limits=limits)
+                    self.server.context_checks[value['id']] = [{'kind': 'following_user_context', 'status': 'viewed',
+                        'count': len(result.get('messages', [])), 'digest': hashlib.sha256(json.dumps(
+                            result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()}]
                     self.json_reply(200, result)
                 elif self.path == '/api/source-context':
                     limits = self.server.config.get('source_context')
@@ -446,6 +484,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         raise ValueError('source context is not configured')
                     result = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
                                            self.server.config.get('source_verification'), limits)
+                    self.server.context_checks[value['id']] = [{'kind': 'prior_user_context', 'status': 'viewed',
+                        'count': len(result.get('messages', [])), 'digest': hashlib.sha256(json.dumps(
+                            result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()}]
                     self.json_reply(200, result)
                 else:
                     status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],

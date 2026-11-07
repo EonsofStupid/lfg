@@ -73,6 +73,55 @@
     }
   }
 
+  function partialLabels(taxonomy, proposals, guide) {
+    const container = el('partial-label-controls');
+    container.replaceChildren();
+    for (const field of ['intents', 'capabilities', 'risks']) {
+      const group = document.createElement('fieldset');
+      const legend = document.createElement('legend');
+      legend.textContent = `${field}: reviewer judgment`;
+      group.append(legend);
+      for (const name of taxonomy[field]) {
+        const row = document.createElement('div');
+        row.className = 'partial-choice';
+        const title = document.createElement('strong');
+        title.textContent = name;
+        const state = document.createElement('select');
+        state.dataset.field = field;
+        state.dataset.label = name;
+        state.setAttribute('aria-label', `${field} ${name} judgment`);
+        state.add(new Option('No judgment recorded', ''));
+        state.add(new Option('Unknown', 'unknown'));
+        state.add(new Option('Positive', 'positive'));
+        state.add(new Option('Negative', 'negative'));
+        row.append(title, state);
+        if (proposals[field]?.includes(name)) {
+          const proposal = document.createElement('select');
+          proposal.dataset.proposalField = field;
+          proposal.dataset.proposalLabel = name;
+          proposal.setAttribute('aria-label', `${field} ${name} proposal action`);
+          proposal.add(new Option('Draft suggestion: no action', ''));
+          proposal.add(new Option('Accept suggestion', 'accepted'));
+          proposal.add(new Option('Reject suggestion', 'rejected'));
+          row.append(proposal);
+          const claim = document.createElement('span');
+          claim.className = 'hint';
+          claim.textContent = 'Unverified suggestion';
+          row.append(claim);
+        }
+        if (guide) {
+          const definition = guide.labels[field][name];
+          const help = document.createElement('span');
+          help.className = 'label-guidance';
+          help.textContent = `Apply: ${definition.apply} Boundary: ${definition.boundary}`;
+          row.append(help);
+        }
+        group.append(row);
+      }
+      container.append(group);
+    }
+  }
+
   function renderAssessment(profile, configHash) {
     assessmentProfile = profile;
     assessmentModels = [];
@@ -191,6 +240,8 @@
     if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
     if (current.pending_changed) el('notice').textContent = 'This pending record changed. Reinitialize the workspace before deciding.';
+    if (current.partial_review?.state === 'current') el('notice').textContent = 'A partial review is already recorded. It does not approve the record or make it training-ready.';
+    if (current.partial_review?.state === 'stale') el('notice').textContent = 'An earlier partial review is stale because its source or guide changed. Its judgments are not active.';
     if (current.assessment_targets && !result.assessment_profile) el('notice').textContent = 'This record has assessment targets. Configure its project profile before approving.';
     if (current.assessment_targets && result.assessment_profile && current.assessment_targets.config_sha256 !== result.assessment_config_sha256)
       el('notice').textContent = 'The assessment profile changed. Previous targets were not prefilled; review them again.';
@@ -199,6 +250,17 @@
     el('guide-notice').textContent = result.guide ? `${result.guide.notice} Guide revision: ${result.guide.revision}.` :
       'No label guide was configured for this review server.';
     labels(result.taxonomy, current.labels, result.guide);
+    const partialAvailable = current.partial_review?.enabled === true && current.partial_review.state === 'not_reviewed' &&
+      current.pending_changed !== true && current.interrupted_write !== true;
+    el('partial-mode-label').hidden = !partialAvailable;
+    el('partial-mode').checked = false;
+    el('partial-labels').hidden = true;
+    el('labels').hidden = false;
+    el('attest').closest('label').hidden = false;
+    el('skip').hidden = false;
+    el('reject').hidden = false;
+    el('approve').hidden = false;
+    if (partialAvailable) partialLabels(result.taxonomy, current.labels, result.guide);
     current.assessment_config_sha256 = result.assessment_config_sha256;
     renderAssessment(result.assessment_profile, result.assessment_config_sha256);
   }
@@ -232,6 +294,41 @@
     await api('/api/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data) });
     await refresh();
+  }
+
+  async function savePartial() {
+    if (!current || !current.partial_review?.enabled || !el('partial-mode').checked) return;
+    if (redactions.length || modelText !== current.text) {
+      el('notice').textContent = 'Partial judgments are bound to the original request. Reset the redaction preview before saving.';
+      return;
+    }
+    if (!el('partial-attest').checked) {
+      el('notice').textContent = 'Check the partial-review attestation after reviewing the source and labels.';
+      return;
+    }
+    const judgments = {};
+    for (const control of document.querySelectorAll('#partial-label-controls select[data-field]')) {
+      if (!control.value) continue;
+      const field = control.dataset.field;
+      judgments[field] ||= {};
+      judgments[field][control.dataset.label] = control.value;
+    }
+    const proposal_actions = {};
+    for (const control of document.querySelectorAll('#partial-label-controls select[data-proposal-field]')) {
+      if (!control.value) continue;
+      const field = control.dataset.proposalField;
+      proposal_actions[field] ||= {};
+      proposal_actions[field][control.dataset.proposalLabel] = control.value;
+    }
+    if (!Object.keys(judgments).length && !Object.keys(proposal_actions).length) {
+      el('notice').textContent = 'Choose at least one explicit judgment or proposal action.';
+      return;
+    }
+    if (prompt('Type REVIEW PARTIAL LABELS to save this partial review.') !== 'REVIEW PARTIAL LABELS') return;
+    await api('/api/partial-decision', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: current.id, binding: current.partial_review.binding, judgments,
+        proposal_actions, attestation: 'REVIEW PARTIAL LABELS'})});
+    await refresh(current.id);
   }
 
   function handle(promise) { promise.catch(error => { el('notice').textContent = error.message; }); }
@@ -332,6 +429,17 @@
   el('restart').addEventListener('click', () => { offset = 0; handle(refresh()); });
   el('approve').addEventListener('click', () => handle(decide('approved')));
   el('reject').addEventListener('click', () => handle(decide('rejected')));
+  el('partial-mode').addEventListener('change', () => {
+    const enabled = el('partial-mode').checked;
+    el('partial-labels').hidden = !enabled;
+    el('labels').hidden = enabled;
+    el('assessment').hidden = enabled || !assessmentProfile;
+    el('attest').closest('label').hidden = enabled;
+    el('skip').hidden = enabled;
+    el('reject').hidden = enabled;
+    el('approve').hidden = enabled;
+  });
+  el('save-partial').addEventListener('click', () => handle(savePartial()));
   if (!token) el('notice').textContent = 'Open the complete local URL printed by the review server.';
   else {
     if (initialRecord) el('find-id').value = initialRecord;

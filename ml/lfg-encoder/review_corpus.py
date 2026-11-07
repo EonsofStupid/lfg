@@ -9,9 +9,12 @@ import hashlib
 import json
 import os
 import re
+import stat
+import subprocess
 import sys
 import tempfile
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,12 @@ import corpus_audit as audit
 import assessment_targets
 import evaluate
 import train
+
+PARTIAL_REVIEW_SCHEMA = 'lfg.partial-label-review.v1'
+PARTIAL_REVIEW_FILE = 'partial-reviews.v1.jsonl'
+PARTIAL_JUDGMENTS = {'positive', 'negative', 'unknown'}
+PARTIAL_PROPOSAL_ACTIONS = {'accepted', 'rejected'}
+SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 
 
 def encoded_rows(rows: list[dict[str, Any]]) -> bytes:
@@ -123,6 +132,273 @@ def status(workspace: Path) -> dict[str, Any]:
     return {'counts': report['counts'], 'decisions': {key: sum(item['decision'] == key for item in ledger.values())
                                                        for key in ('pending', 'approved', 'rejected')},
             'promotion_eligible': False}
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _ensure_private_sidecar_location(workspace: Path, sidecar: Path) -> None:
+    try:
+        root_result = subprocess.run(['git', '-C', str(workspace), 'rev-parse', '--show-toplevel'],
+                                     capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError('cannot verify private partial review storage location') from error
+    if root_result.returncode != 0:
+        if 'not a git repository' in root_result.stderr.casefold():
+            return
+        raise ValueError('cannot verify private partial review storage location')
+    repo_root = Path(root_result.stdout.strip()).resolve()
+    relative = sidecar.resolve().relative_to(repo_root).as_posix()
+    ignored = subprocess.run(['git', '-C', str(repo_root), 'check-ignore', '--quiet', '--no-index', '--', relative],
+                             capture_output=True, timeout=5)
+    tracked = subprocess.run(['git', '-C', str(repo_root), 'ls-files', '--error-unmatch', '--', relative],
+                             capture_output=True, timeout=5)
+    if ignored.returncode != 0 or tracked.returncode == 0:
+        raise ValueError('partial review sidecar must be ignored by Git and untracked')
+
+
+def _partial_binding(workspace: Path, identifier: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan, report, ledger = load_workspace(workspace)
+    item = ledger.get(identifier)
+    if item is None or item['decision'] != 'pending':
+        raise ValueError('partial review is limited to pending records')
+    _, rows, index, source = find_row(workspace, plan, identifier)
+    row = rows[index]
+    if row.get('verified') is True:
+        raise ValueError('partial review cannot alter a verified record')
+    taxonomy, taxonomy_sha = evaluate.load_taxonomy(private_path(workspace, plan['taxonomy']))
+    annotation_sha = audit.annotation_digest(row, source['project'], source['split'], taxonomy_sha)
+    if item['annotation_sha256'] != annotation_sha:
+        raise ValueError('pending record changed; reinitialize review')
+    source_path = private_path(workspace, source['path'])
+    source_bytes = source_path.read_bytes()
+    if _sha256(source_bytes) != report['sources'][plan['sources'].index(source)]['sha256']:
+        raise ValueError('source changed during partial review')
+    proposal = {field: row.get(field, []) for field in evaluate.FIELDS}
+    binding = {
+        'source_sha256': _sha256(source_bytes),
+        'annotation_sha256': annotation_sha,
+        'taxonomy_sha256': taxonomy_sha,
+        'text_sha256': _sha256(row['text'].encode('utf-8')),
+        'proposal_sha256': _sha256(json.dumps(proposal, ensure_ascii=False, sort_keys=True,
+                                              separators=(',', ':')).encode('utf-8')),
+    }
+    return {'plan': plan, 'report': report, 'ledger': ledger, 'row': row, 'source': source,
+            'taxonomy': taxonomy, 'binding': binding}, binding
+
+
+def _read_partial_events(path: Path, max_bytes: int) -> list[dict[str, Any]]:
+    if path.is_symlink():
+        raise ValueError('partial review sidecar cannot be a symlink')
+    if not path.exists():
+        return []
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_size > max_bytes:
+        raise ValueError('partial review sidecar is unsafe or exceeds its configured limit')
+    raw = path.read_bytes()
+    if len(raw) != info.st_size or len(raw) > max_bytes or (raw and not raw.endswith(b'\n')):
+        raise ValueError('partial review sidecar is truncated or changed')
+    events = []
+    seen_ids = set()
+    seen_event_ids = set()
+    for line in raw.splitlines():
+        value = json.loads(line)
+        fields = {'schema_version', 'event_id', 'id', 'reviewer_claim', 'reviewed_at', 'binding',
+                  'judgments', 'proposal_actions', 'context_checks', 'attestation'}
+        if not isinstance(value, dict) or set(value) != fields or value.get('schema_version') != PARTIAL_REVIEW_SCHEMA:
+            raise ValueError('unsupported partial review event')
+        identifier = value.get('id')
+        event_id = value.get('event_id')
+        if not isinstance(identifier, str) or not identifier or identifier in seen_ids or \
+                not isinstance(event_id, str) or not re.fullmatch(r'[0-9a-f]{32}', event_id) or event_id in seen_event_ids:
+            raise ValueError('duplicate or malformed partial review event')
+        reviewer = value.get('reviewer_claim')
+        timestamp = value.get('reviewed_at')
+        binding = value.get('binding')
+        expected_binding = {'source_sha256', 'annotation_sha256', 'taxonomy_sha256', 'text_sha256',
+                            'proposal_sha256', 'guide_sha256'}
+        if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer or \
+                not isinstance(timestamp, str) or not isinstance(binding, dict) or set(binding) != expected_binding or \
+                any(not isinstance(binding[key], str) or not SHA256_RE.fullmatch(binding[key]) for key in expected_binding - {'guide_sha256'}) or \
+                (binding['guide_sha256'] is not None and (not isinstance(binding['guide_sha256'], str) or
+                                                          not SHA256_RE.fullmatch(binding['guide_sha256']))) or \
+                value.get('attestation') != 'Reviewer explicitly recorded partial label judgments; unknown cells remain unknown.':
+            raise ValueError('malformed partial review provenance')
+        try:
+            parsed = dt.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError('malformed partial review timestamp') from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError('partial review timestamp requires a timezone')
+        for key, allowed in (('judgments', PARTIAL_JUDGMENTS), ('proposal_actions', PARTIAL_PROPOSAL_ACTIONS)):
+            values = value.get(key)
+            if not isinstance(values, dict) or set(values) - set(evaluate.FIELDS) or any(
+                    not isinstance(labels, dict) or any(not isinstance(label, str) or not isinstance(state, str) or state not in allowed
+                                                        for label, state in labels.items())
+                    for labels in values.values()):
+                raise ValueError('malformed partial review label data')
+        if not any(value.get('judgments', {}).values()) and not any(value.get('proposal_actions', {}).values()):
+            raise ValueError('empty partial review event')
+        contexts = value.get('context_checks')
+        if not isinstance(contexts, list) or any(not isinstance(entry, dict) or
+                set(entry) != {'kind', 'status', 'count', 'digest'} or
+                not isinstance(entry['kind'], str) or not isinstance(entry['status'], str) or
+                type(entry['count']) is not int or entry['count'] < 0 or
+                not isinstance(entry['digest'], str) or not SHA256_RE.fullmatch(entry['digest'])
+                for entry in contexts):
+            raise ValueError('malformed partial review context provenance')
+        seen_ids.add(identifier)
+        seen_event_ids.add(event_id)
+        events.append(value)
+    return events
+
+
+def _secure_existing_partial_file(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError('partial review sidecar cannot be a symlink')
+    if path.exists():
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError('partial review sidecar is not a regular file')
+        _secure_partial_file(path)
+
+
+def partial_review_state(workspace: Path, identifier: str, max_bytes: int,
+                         guide_sha256: str | None = None) -> dict[str, Any]:
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError('partial review requires a positive configured byte limit')
+    current, binding = _partial_binding(workspace, identifier)
+    sidecar = workspace.resolve(strict=True) / PARTIAL_REVIEW_FILE
+    _ensure_private_sidecar_location(workspace.resolve(strict=True), sidecar)
+    _secure_existing_partial_file(sidecar)
+    events = _read_partial_events(sidecar, max_bytes)
+    event = next((item for item in events if item['id'] == identifier), None)
+    if event is not None:
+        for field, labels in event['judgments'].items():
+            if set(labels) - current['taxonomy'][field]:
+                raise ValueError('partial review contains a label outside the current taxonomy')
+        for field, labels in event['proposal_actions'].items():
+            if set(labels) - set(current['row'].get(field, [])):
+                raise ValueError('partial review proposal no longer matches the source record')
+    expected = {**binding, 'guide_sha256': guide_sha256}
+    if event is None:
+        return {'enabled': True, 'state': 'not_reviewed', 'binding': expected}
+    return {'enabled': True, 'state': 'current' if event.get('binding') == expected else 'stale',
+            'binding': expected, 'event': event if event.get('binding') == expected else None}
+
+
+def _secure_partial_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+        if os.name == 'nt':
+            # Replace inherited ACLs with an explicit current-user-only ACL.
+            identity = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True,
+                                      text=True, check=True, timeout=5).stdout.strip().split(',')[-1].strip('"')
+            principal = subprocess.run(['whoami'], capture_output=True, text=True,
+                                       check=True, timeout=5).stdout.strip()
+            if not re.fullmatch(r'S-1-[0-9-]+', identity) or not principal:
+                raise ValueError('cannot establish owner-only partial review permissions')
+            subprocess.run(['icacls', str(path), '/inheritance:r', '/grant:r', f'*{identity}:(F)'], capture_output=True,
+                           text=True, check=True, timeout=5)
+            acl = subprocess.run(['icacls', str(path)], capture_output=True, text=True,
+                                 check=True, timeout=5).stdout
+            principals = set()
+            for line in acl.splitlines():
+                line = line.strip()
+                if line.startswith(str(path)):
+                    line = line[len(str(path)):].strip()
+                if '(' not in line:
+                    continue
+                ace_principal = line.split('(', 1)[0].strip().removesuffix(':')
+                principals.add(ace_principal)
+                if '(I)' in line or ace_principal.casefold() != principal.casefold():
+                    raise ValueError('partial review sidecar ACL is not owner-private')
+            if {value.casefold() for value in principals} != {principal.casefold()}:
+                raise ValueError('partial review sidecar ACL is not owner-private')
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError('cannot establish owner-only partial review permissions') from error
+
+
+def record_partial_decision(workspace: Path, identifier: str, reviewer: str, expected_binding: dict[str, Any],
+                             judgments: dict[str, dict[str, str]], proposal_actions: dict[str, dict[str, str]],
+                             guide_sha256: str | None, context_checks: list[dict[str, Any]],
+                             max_bytes: int, attestation: str) -> None:
+    if not isinstance(reviewer, str) or not reviewer.strip() or '\n' in reviewer or '\r' in reviewer:
+        raise ValueError('reviewer must be a nonempty single-line identifier')
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError('partial review requires a positive configured byte limit')
+    if not isinstance(attestation, str) or attestation != 'REVIEW PARTIAL LABELS':
+        raise ValueError('explicit partial review attestation required')
+    lock = workspace.resolve(strict=True) / 'review.lock'
+    if lock.is_symlink() or not lock.is_file() or lock.read_text(encoding='utf-8') != f'pid={os.getpid()}\n':
+        raise ValueError('partial review requires the active workspace review lock')
+    current, binding = _partial_binding(workspace, identifier)
+    if not isinstance(expected_binding, dict) or set(expected_binding) != set(binding) | {'guide_sha256'} or \
+            {key: expected_binding[key] for key in binding} != binding or \
+            expected_binding.get('guide_sha256') != guide_sha256:
+        raise ValueError('record, source, taxonomy, guide or proposal changed; review again')
+    if guide_sha256 is not None and not (isinstance(guide_sha256, str) and SHA256_RE.fullmatch(guide_sha256)):
+        raise ValueError('invalid label guide digest')
+    taxonomy = current['taxonomy']
+    if not isinstance(judgments, dict) or set(judgments) - set(evaluate.FIELDS):
+        raise ValueError('invalid partial label judgments')
+    for field, values in judgments.items():
+        if not isinstance(values, dict) or set(values) - taxonomy[field] or any(state not in PARTIAL_JUDGMENTS for state in values.values()):
+            raise ValueError(f'invalid {field} judgment')
+    if not isinstance(proposal_actions, dict) or set(proposal_actions) - set(evaluate.FIELDS):
+        raise ValueError('invalid proposal actions')
+    row = current['row']
+    for field, values in proposal_actions.items():
+        if not isinstance(values, dict) or set(values) - set(row.get(field, [])) or \
+                any(action not in PARTIAL_PROPOSAL_ACTIONS for action in values.values()):
+            raise ValueError(f'invalid {field} proposal action')
+    if not any(judgments.values()) and not any(proposal_actions.values()):
+        raise ValueError('partial review must contain an explicit judgment or proposal action')
+    safe_context = []
+    if not isinstance(context_checks, list):
+        raise ValueError('invalid context provenance')
+    for entry in context_checks:
+        if not isinstance(entry, dict) or set(entry) != {'kind', 'status', 'count', 'digest'} or \
+                not isinstance(entry['kind'], str) or not isinstance(entry['status'], str) or \
+                type(entry['count']) is not int or entry['count'] < 0 or \
+                not isinstance(entry['digest'], str) or not SHA256_RE.fullmatch(entry['digest']):
+            raise ValueError('invalid context provenance')
+        safe_context.append(entry)
+    sidecar = workspace.resolve(strict=True) / PARTIAL_REVIEW_FILE
+    _ensure_private_sidecar_location(workspace.resolve(strict=True), sidecar)
+    _secure_existing_partial_file(sidecar)
+    existing = _read_partial_events(sidecar, max_bytes)
+    if any(event['id'] == identifier for event in existing):
+        raise ValueError('a partial review already exists for this record')
+    event = {'schema_version': PARTIAL_REVIEW_SCHEMA, 'event_id': uuid.uuid4().hex, 'id': identifier,
+             'reviewer_claim': reviewer.strip(), 'reviewed_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+             'binding': {**binding, 'guide_sha256': guide_sha256}, 'judgments': judgments,
+             'proposal_actions': proposal_actions, 'context_checks': safe_context,
+             'attestation': 'Reviewer explicitly recorded partial label judgments; unknown cells remain unknown.'}
+    line = encoded_rows([event])
+    old = sidecar.read_bytes() if sidecar.exists() else b''
+    if len(old) + len(line) > max_bytes:
+        raise ValueError('partial review sidecar exceeds its configured byte limit')
+    fd, name = tempfile.mkstemp(prefix='.partial-review-', dir=sidecar.parent)
+    try:
+        os.close(fd)
+        temp_path = Path(name)
+        _secure_partial_file(temp_path)
+        flags = os.O_WRONLY | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+        with os.fdopen(os.open(temp_path, flags), 'wb') as stream:
+            stream.write(old + line)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if sidecar.exists() and (sidecar.is_symlink() or not sidecar.is_file()):
+            raise ValueError('partial review sidecar path is unsafe')
+        latest, _ = _partial_binding(workspace, identifier)
+        if latest['binding'] != binding or audit.audit(workspace.resolve(strict=True) / 'plan.json')[0] != current['report']:
+            raise ValueError('workspace changed during partial review; review again')
+        os.replace(temp_path, sidecar)
+        _secure_partial_file(sidecar)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def find_row(workspace: Path, plan: dict[str, Any], identifier: str) -> tuple[Path, list[dict[str, Any]], int, dict[str, Any]]:

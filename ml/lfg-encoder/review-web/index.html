@@ -42,9 +42,16 @@
           <h3>Review note</h3><p id="review-note"></p>
         </article>
         <article class="panel">
-          <h2>Labels</h2><p class="hint">Unchecked labels count as negative. If anything is uncertain, skip or reject the record.</p>
+          <h2>Labels</h2><p class="hint">Full review: unchecked labels count as negative. Partial review uses separate explicit positive, negative, or unknown judgments.</p>
           <p id="guide-notice" class="hint"></p>
+          <label id="partial-mode-label" class="attest" hidden><input type="checkbox" id="partial-mode"> Record a partial label review</label>
           <div id="labels"></div>
+          <section id="partial-labels" hidden>
+            <p class="hint">Draft suggestions are unverified. Accepting or rejecting a suggestion does not set a label judgment. Unset cells remain unknown.</p>
+            <div id="partial-label-controls"></div>
+            <label class="attest"><input type="checkbox" id="partial-attest"> I reviewed the source and explicitly selected only judgments I can support.</label>
+            <button id="save-partial" type="button" class="primary">Save partial review</button>
+          </section>
           <section id="assessment" hidden>
             <h3>Assessment targets</h3>
             <p class="hint">These are reviewer judgments for this project, not measured model performance. Leave a field unknown when the evidence is missing. Declared availability does not verify a subscription.</p>

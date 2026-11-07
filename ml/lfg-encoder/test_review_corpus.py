@@ -2,6 +2,8 @@ import json
 import contextlib
 import io
 import hashlib
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 import corpus_audit
 import review_corpus as review
+import train
 
 
 class ReviewWorkspaceTests(unittest.TestCase):
@@ -43,6 +46,111 @@ class ReviewWorkspaceTests(unittest.TestCase):
         del row_path
         return corpus_audit.annotation_digest(rows[index], source['project'], source['split'],
                                               review.evaluate.load_taxonomy(self.workspace / 'taxonomy.json')[1])
+
+    def partial_binding(self, identifier='id-0', guide=None):
+        state = review.partial_review_state(self.workspace, identifier, 65536, guide)
+        return state['binding']
+
+    def test_partial_review_keeps_unknown_and_proposal_rejection_out_of_legacy_labels(self):
+        plan, _, _ = review.load_workspace(self.workspace)
+        source_path, _, _, _ = review.find_row(self.workspace, plan, 'id-0')
+        source_before = source_path.read_bytes()
+        ledger_before = (self.workspace / 'reviews.jsonl').read_bytes()
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'fixture reviewer', binding,
+                {'intents': {'build': 'positive'}}, {'intents': {'build': 'rejected'}}, None, [], 65536,
+                'REVIEW PARTIAL LABELS')
+        state = review.partial_review_state(self.workspace, 'id-0', 65536)
+        self.assertEqual(state['state'], 'current')
+        self.assertEqual(state['event']['judgments'], {'intents': {'build': 'positive'}})
+        self.assertEqual(state['event']['proposal_actions'], {'intents': {'build': 'rejected'}})
+        self.assertEqual(source_path.read_bytes(), source_before)
+        self.assertEqual((self.workspace / 'reviews.jsonl').read_bytes(), ledger_before)
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+        self.assertEqual(review.status(self.workspace)['counts']['train']['ready_for_reviewed_subset'], 0)
+        self.assertFalse(state['event']['judgments'].get('capabilities'))
+        stale = review.partial_review_state(self.workspace, 'id-0', 65536, 'f' * 64)
+        self.assertEqual(stale['state'], 'stale')
+        self.assertIsNone(stale['event'])
+        if os.name != 'nt':
+            self.assertEqual((self.workspace / review.PARTIAL_REVIEW_FILE).stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            with train.run_lock(self.workspace / 'review'):
+                review.record_partial_decision(self.workspace, 'id-0', 'fixture reviewer', binding,
+                    {'intents': {'explain': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+
+    def test_rejecting_proposal_without_judgment_remains_unknown(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'fixture reviewer', binding,
+                {}, {'intents': {'build': 'rejected'}}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        event = review.partial_review_state(self.workspace, 'id-0', 65536)['event']
+        self.assertEqual(event['judgments'], {})
+        self.assertEqual(event['proposal_actions']['intents']['build'], 'rejected')
+        binding = self.partial_binding('id-1')
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-1', 'fixture reviewer', binding,
+                {'intents': {'explain': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        self.assertEqual(review.partial_review_state(self.workspace, 'id-1', 65536)['event']['judgments'],
+                         {'intents': {'explain': 'negative'}})
+
+    def test_partial_review_requires_lock_and_rejects_stale_or_unsupported_data(self):
+        binding = self.partial_binding()
+        with self.assertRaisesRegex(ValueError, 'active workspace review lock'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        with train.run_lock(self.workspace / 'review'):
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', {**binding, 'guide_sha256': 'f' * 64},
+                    {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+            with self.assertRaisesRegex(ValueError, 'invalid intents judgment'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', {**binding, 'guide_sha256': None},
+                    {'intents': {'not-in-taxonomy': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        changed = self.workspace / 'source-0000.jsonl'
+        rows = [json.loads(line) for line in changed.read_text(encoding='utf-8').splitlines()]
+        rows[0]['review_note'] = 'changed after display'
+        changed.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'changed|reinitialize'):
+            review.partial_review_state(self.workspace, 'id-0', 65536)
+
+    def test_partial_review_rejects_competing_lock_and_interrupted_atomic_write(self):
+        binding = self.partial_binding()
+        sidecar = self.workspace / review.PARTIAL_REVIEW_FILE
+        with train.run_lock(self.workspace / 'review'):
+            lock = self.workspace / 'review.lock'
+            original = lock.read_text(encoding='utf-8')
+            lock.write_text('pid=99999999\n', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'active workspace review lock'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                    {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+            lock.write_text(original, encoding='utf-8')
+            with patch('review_corpus.os.replace', side_effect=OSError('simulated interruption')):
+                with self.assertRaisesRegex(OSError, 'simulated interruption'):
+                    review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                        {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        self.assertFalse(sidecar.exists())
+
+    def test_partial_review_is_separate_from_approved_export(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        with self.assertRaisesRegex(ValueError, 'no current approvals'):
+            review.export_approved(self.workspace, self.root / 'partial-export')
+
+    def test_truncated_partial_sidecar_fails_closed(self):
+        sidecar = self.workspace / review.PARTIAL_REVIEW_FILE
+        sidecar.write_bytes(b'{"schema_version":"lfg.partial-label-review.v1"}')
+        with self.assertRaisesRegex(ValueError, 'truncated'):
+            review.partial_review_state(self.workspace, 'id-0', 65536)
+
+    def test_partial_sidecar_must_be_ignored_when_workspace_is_inside_git(self):
+        subprocess.run(['git', 'init', str(self.root)], capture_output=True, check=True)
+        with self.assertRaisesRegex(ValueError, 'ignored by Git'):
+            review.partial_review_state(self.workspace, 'id-0', 65536)
+        (self.root / '.gitignore').write_text('workspace/partial-reviews.v1.jsonl\n', encoding='utf-8')
+        self.assertEqual(review.partial_review_state(self.workspace, 'id-0', 65536)['state'], 'not_reviewed')
 
     def test_initialization_is_pending_private_and_does_not_overwrite(self):
         result = review.status(self.workspace)
