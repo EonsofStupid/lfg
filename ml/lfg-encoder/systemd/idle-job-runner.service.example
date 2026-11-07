@@ -1,0 +1,19 @@
+[Unit]
+Description=LFG idle job runner
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+# Set these paths for this host. The job unit itself must not be enabled or
+# restart on its own: this runner alone decides when it runs. Exit status 3
+# means the job failed and needs a person to look at it.
+ExecStart=/PATH/TO/PYTHON /PATH/TO/idle_job_runner.py --config /PATH/TO/PRIVATE_IDLE_JOB_CONFIG.json
+Restart=on-failure
+RestartPreventExitStatus=3
+RestartSec=15
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
