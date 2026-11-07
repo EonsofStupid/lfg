@@ -123,10 +123,11 @@ class ResponseContractTests(unittest.TestCase):
                 contract.validate_response(value, self.columns)
 
     def test_config_accepts_inert_extensions_but_rejects_duplicate_or_bad_weight(self):
-        cfg = {'schema_version': contract.CONFIG_SCHEMA, 'export_dir': 'C:/e',
-            'export_manifest_sha256': 'a' * 64, 'taxonomy_file': 'C:/t', 'taxonomy_sha256': 'b' * 64,
+        temp_root = Path(tempfile.gettempdir())
+        cfg = {'schema_version': contract.CONFIG_SCHEMA, 'export_dir': str(temp_root / 'e'),
+            'export_manifest_sha256': 'a' * 64, 'taxonomy_file': str(temp_root / 't'), 'taxonomy_sha256': 'b' * 64,
             'selected_columns': [{'field': 'intents', 'label': 'build.software'}],
-            'instruction_template': '{field} {label}', 'output': 'C:/o', 'max_rows': 10,
+            'instruction_template': '{field} {label}', 'output': str(temp_root / 'o'), 'max_rows': 10,
             'max_output_bytes': 10000, 'default_weight': 1.0, 'per_label_weights': {}, 'extension': {'x': 1}}
         self.assertIs(contract.validate_config(cfg), cfg)
         dup = copy.deepcopy(cfg); dup['selected_columns'].append(dup['selected_columns'][0])
