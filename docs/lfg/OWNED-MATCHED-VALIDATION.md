@@ -98,3 +98,40 @@ Local regression tests cover mapping, baseline binding, file gates and bounded
 process behavior. Some historical tests cover the rejected generated code.
 Passing them does not verify the target host, the model, or the eleven-row
 evaluation.
+
+## Prospective response diagnostics
+
+Future matched runs add aggregate-only diagnostics for owned responses that
+passed the response envelope, engine identity and status allowlist checks. The
+denominator is accepted owned responses, including responses whose lifecycle
+measurement later proves incomplete. A transport failure or response rejected
+before acceptance adds no diagnostic count. Each category group accounts for
+the same accepted-response count; existing row, status, lifecycle, mapping and
+metric accounting is unchanged.
+
+The report groups top-level `stopReason` into `stop_sequence`, `byte_limit`,
+`context_limit`, `other` and `unavailable`. Unknown strings map to `other`;
+missing, null and non-string values map to `unavailable`. `outputText` is parsed
+transiently into `valid_json_object`, `valid_json_non_object`, `invalid_json`
+or `unavailable_or_invalid_type`. This shape check does not inspect or report
+field names or values, and it does not assert a distinction between a wrong
+required field and another malformed object. The existing service status and
+unscorable prediction behavior remain authoritative.
+
+The `measurement.outputTextUtf8Bytes` value is aggregated into public buckets.
+The optional config field `output_text_utf8_byte_bucket_boundaries` accepts 1 to
+16 positive, strictly increasing integers up to 2^63-1. A missing field uses
+`[256, 1024, 4096, 16384]`. Buckets are `[0, first)`, `[first, second)`, and so
+on, with a final overflow bucket beginning at the last boundary. Missing,
+negative, boolean, or noninteger measurements are counted separately as
+unavailable or invalid. Reports contain the configured boundaries and bucket
+counts, never per-response byte lengths. Config extensions remain accepted;
+only this recognized field changes behavior.
+
+If the supervisor or transport result is unavailable or untrusted, the report
+uses `null` diagnostics rather than zero counts. The response body, generated
+text, parser errors, per-row lengths, and field names or values are not retained
+in the aggregate. These diagnostics describe future runs only and say nothing
+about the previously reported eleven-row run. Local tests do not validate host
+isolation or the model. An adapter, worker, or config change requires independent
+review and a fresh zero-row probe on the target host before private inference.
