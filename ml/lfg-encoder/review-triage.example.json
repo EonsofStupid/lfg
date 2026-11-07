@@ -1,0 +1,13 @@
+{
+  "schema_version": "lfg.review-triage-config.v1",
+  "revision": "conversation-wrapper-draft-1",
+  "max_text_bytes": 262144,
+  "patterns": [
+    {"id": "async-reply-wrapper", "expression": "<send_user_message_question_reply>", "ignore_case": false},
+    {"id": "ambient-browser-context", "expression": "<in-app-browser-context", "ignore_case": false},
+    {"id": "environment-context", "expression": "<environment_context[\\s>]", "ignore_case": false},
+    {"id": "tool-output-wrapper", "expression": "<(?:tool_call|tool_result|function_result)[\\s>]", "ignore_case": false},
+    {"id": "work-duration-marker", "expression": "\\bworked for \\d+\\s*[mhds]\\b", "ignore_case": true},
+    {"id": "short-acknowledgement", "expression": "^\\s*(?:go|yes|no|ok|okay|done|continue|pause|lfg|yep|nope)[.!\\s]*$", "ignore_case": true}
+  ]
+}

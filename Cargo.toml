@@ -11,7 +11,7 @@ default-members = ["crates/lfg-server"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "BUSL-1.1"
 rust-version = "1.95"
 
 [workspace.dependencies]

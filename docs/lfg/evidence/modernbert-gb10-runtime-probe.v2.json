@@ -1,0 +1,26 @@
+{
+  "schema_version": "lfg.model-runtime-probe.v1",
+  "model": {
+    "model_id": "answerdotai/ModernBERT-base",
+    "revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
+    "manifest_sha256": "4a126906b3785c898995a2a78b0748ee84c14b3aeca157c9e943332cd61e22a6",
+    "files": 6
+  },
+  "taxonomy_sha256": "7e935b156e9eb56c5f00b7e68cbb2d0d77234f73cc8ac844abb460f19a2a9e9f",
+  "device": "cuda",
+  "torch": "2.11.0+cu130",
+  "cuda_runtime": "13.0",
+  "threads": 2,
+  "tokens": 1,
+  "seed": 731,
+  "output_shape": [
+    1,
+    13
+  ],
+  "finite": true,
+  "parameters": 149614861,
+  "peak_cuda_allocated_bytes": 1525710336,
+  "probe_sha256": "9b5be994d4843d7fb0be242c56bec684e7026100c96c898c2459b5fe35b0a0fb",
+  "quality_evidence": false,
+  "promotion_eligible": false
+}

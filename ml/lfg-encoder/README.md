@@ -1,25 +1,54 @@
-# LFG encoder experiment
+# LFG prompt-recipe encoder
 
-This is the offline, non-authoritative training lane for the Rust
-MasterClyffy CPU encoder. Runtime prompts are not collected here. The checked-in
-corpus is intentionally authored synthetic data.
+This is where LFG's own model is distilled from the owner's projects and chats
+and exported for the Rust MasterClyffy CPU runtime; see
+[model and distillation](../../docs/lfg/MODEL-AND-DISTILLATION.md). Its target is the four results LFG reports: intent, complexity,
+suggested models and total agents. The original label set covers intent,
+capability and risk. A separate project-profile assessment schema defines
+complexity, model, effort and agent-count judgments, but the local workspace
+does not yet contain reviewed assessment targets. It is not the
+Jina/GTE retrieval lesson and it does not write the final CoSTAR packet.
+Runtime prompts are not collected here. The checked-in corpus is intentionally
+authored synthetic data.
 
-These experiments support the assessment and routing objective in the root
-[README](../../README.md). The classifier is exploratory and is not the authoritative runtime encoder.
-Any learned candidate needs task-specific evaluation before integration or
-promotion.
+The intent/capability/risk fine-tuner requires a GPU and refuses to fall back to
+CPU. That reviewed training path uses the
+Transformers `Trainer`. A separately authored GPU prototype remains in the
+source but is not integrated with this path; Unsloth is not currently the
+active training engine. The experimental [assessment-head trainer](../../docs/lfg/ASSESSMENT-TRAINING.md)
+separately supports CPU or CUDA with a frozen encoder. It produces an
+unqualified offline weight pack and does not yet run inside the binary.
+
+This lane tunes the model behind the objective in the root
+[README](../../README.md). A trained artifact becomes the runtime encoder only
+after task-specific evaluation and the promotion policy pass; until then the
+rule-based encoder answers, and neither the classifier nor the CPU LLM path has
+been promoted. The coding-oriented teacher and student work below also
+explores general model capabilities, and its contribution to LFG's assessment
+role needs to be demonstrated through task-specific evaluation before
+integration or promotion.
 
 The [draft labeling guide](LABELING.md) and
 [RRFlow review batch](dataset/rrflow-review.v1.jsonl) are a starting point for
 human review; their constructed examples are not a training-ready corpus.
+The [corpus review guide](../../docs/lfg/CORPUS-REVIEW.md#local-codex-project-session-messages)
+also documents an inventory of real project-session messages awaiting review.
 The separate [PR review batch](dataset/rrflow-pr-review.v1.jsonl) contains
 actual PR titles and excerpts linked to outcome journals, not original prompts.
 For a bounded real-corpus measurement of the baseline process, including
 Windows CPU-time and cycle counters, see the [process benchmark](../../docs/lfg/CPU-PROCESS-BENCHMARK.md).
+The [persistent comparison](../../docs/lfg/PERSISTENT-CPU-BENCHMARK.md) measures
+repeated local requests after process warmup.
+The [CPU training repeatability experiment](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md)
+records two clean environments, a hash-locked wheelhouse and the real-request runs.
+The [GB10 environment record](../../docs/lfg/SPARK-LOCKED-ENVIRONMENT.md)
+documents a separate ARM64 wheel lock, pinned model snapshot and runtime probe.
+For the first below-gate run using real conversation requests and its negative
+diagnostic result, see the [development experiment](../../docs/lfg/REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
 
 ## Current lane (classifier)
 
-The promotion order is fixed:
+The reviewed classifier lane currently follows this order:
 
 1. Audit a reviewed, project-separated corpus plan and validate the assembled
    training snapshot with `python3 train.py validate --dataset DATASET`.
@@ -28,22 +57,42 @@ The promotion order is fixed:
 4. Benchmark through the Rust runtime.
 5. Promote only when `promotion-policy.json` passes.
 
+Authorized classifier training does not wait for review or promotion evidence.
+It is the CLI default and includes unverified records; the output is not
+promotion eligible. Use `--require-reviewed` to select the separate audited
+classifier workflow. The systemd supervisor supports configurable `authorized`
+and `reviewed` modes, but does not supervise the separate assessment-head trainer.
+
 Training requires `requirements.txt`. Validation uses only the Python standard
 library and does not download a model.
+Reviewed training also requires an operator-selected wheel lock, matching
+wheelhouse and local model snapshot manifest. See the [bound training inputs](../../docs/lfg/REPRODUCIBLE-CPU-TRAINING.md#bound-training-inputs).
 
 ## Starting a reproducible classifier experiment
 
 Start with this classifier, which predicts the existing intent, capability, and
 risk labels. The current six synthetic examples are a plumbing check, not a
-representative evaluation set. The `verified` field is an attestation that a
+representative evaluation set; all are marked unverified because no human
+review evidence is recorded for them. The `verified` field is an attestation that a
 human checked the text and all labels; the script counts it but cannot verify
 the review happened. The sample gate alone does not make a model promotion-ready.
+
+The separate `distill.py` utility can validate trace syntax and create a clearly
+marked placeholder template. A `checksPassed` value is a supplied claim, not an
+executed or verified check; the v2 validation report calls it
+`declaredChecksPassed`. The separate plan-driven `build-sft` path can now prepare
+explicitly selected owner-project or chat teacher traces without requiring a
+reviewed validation set. See [assessment distillation preparation](../../docs/lfg/ASSESSMENT-DISTILLATION.md).
+It records provenance and review as supplied claims; it does not collect teacher
+answers, prove redaction, train a model, or qualify a dataset. Neither the
+placeholder nor the classifier fixture is an approved training set.
 
 1. Agree on a versioned label guide: define each label, positive and negative
    examples, and how to handle multiple intents and uncertain cases. Record who
    reviewed each example outside this minimal schema. Only mark `verified` true
-   after human review. Use synthetic or explicitly authorized, sanitized prompts;
-   do not commit private prompts or secrets.
+   after human review. The owner's own projects and chats are explicitly
+   authorized; keep them local and redact secrets. Do not commit private
+   prompts or secrets.
 2. Assemble a representative corpus with hard negatives, paraphrases, multi-step
    requests, and security cases. Keep related examples together when splitting
    data to reduce leakage. Reserve an independently reviewed test set before
@@ -59,9 +108,11 @@ the review happened. The sample gate alone does not make a model promotion-ready
    currently learn them.
 4. Train a candidate, export and benchmark it, then evaluate it independently
    against the baseline and the policy. The experimental evaluator below can
-   report classification errors. ONNX export is experimental; CPU runtime
-   integration, calibration, independent-test qualification and promotion checks
-   are still missing. Keep the rule encoder in charge until those checks pass.
+   report classification errors. ONNX export and the optional
+   [native CPU shadow command](../../docs/lfg/ONNX-CPU-SHADOW.md) are experimental;
+   live routing integration, calibration, independent-test qualification and
+   promotion checks are still missing. Keep the rule encoder in charge until
+   those checks pass.
 
 For a local development smoke test on Windows, install Python 3.10 or newer,
 then from the repository root. Supply the full immutable commit for a test model
@@ -71,29 +122,48 @@ as `MODEL_COMMIT` (the example model and override are for plumbing only):
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r ml/lfg-encoder/requirements.txt
 .\.venv\Scripts\python.exe ml/lfg-encoder/train.py validate
-.\.venv\Scripts\python.exe ml/lfg-encoder/train.py train --model-revision MODEL_COMMIT --output ml/lfg-encoder/artifacts/smoke --allow-below-gate --checkpoint-steps 1
+.\.venv\Scripts\python.exe ml/lfg-encoder/train.py train --dataset ml/lfg-encoder/dataset/synthetic.v1.jsonl --model-revision MODEL_COMMIT --output ml/lfg-encoder/artifacts/smoke --allow-below-gate --checkpoint-steps 1
 ```
 
-Training downloads the selected pinned model and can be slow on CPU. The
+Training requires an available CUDA GPU and may download the selected pinned model. The
 six-example run tests plumbing only; its output is ineligible for promotion and
 is ignored by Git. `requirements.txt` specifies dependency ranges, not a lock;
 capture and reuse an exact environment for a serious experiment.
-The `--allow-below-gate` flag is for development only and allows unverified rows
-into the experiment. Without it, training requires the policy's minimum number
-of verified records and an audited project-separated plan with current review
-attestations for every train, validation, and test example. The input must
-exactly match its reviewed train partition and contain no unverified rows. See
-[corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md). A run writes
-the seed, dataset hash, row IDs and family assignments to `split-manifest.json`
-in the ignored output directory. Development override requires at least two
-families.
-With `--allow-below-gate`, the family split is for development only and is not
-stratified. Without that override, the complete audited train partition trains
-the model and the separate audited validation partition selects checkpoints. The
-trainer rejects validation labels absent from the training partition instead of
-silently discarding them. A separate reviewed test project remains reserved for
-final evaluation and is not fed to the trainer. The audit still reads the test
-file; genuinely blinded evaluation needs independent access controls.
+Training requires an explicitly selected `--dataset`; it never silently selects
+the bundled synthetic fixture. By default, selected authorized records,
+including unverified rows, can train without loading the promotion policy.
+`--allow-below-gate` remains an explicit alias for this mode. A grouped
+development split is used when the available families and labels support it;
+otherwise all selected rows train and validation is recorded as not performed.
+The final checkpoint is saved in either case. This fallback does not evaluate
+quality or establish independence. A run writes the seed, dataset hash, row IDs
+and family assignments to `split-manifest.json` in the ignored output directory.
+
+With `--require-reviewed`, training instead requires the policy's minimum
+verified count, an audited project-separated plan and current review
+attestations. A development-only plan includes train and validation; the legacy
+complete plan also includes test. The reviewed input must exactly match its
+reviewed train partition. See [corpus review and separation](../../docs/lfg/CORPUS-REVIEW.md).
+In reviewed mode, the separate audited validation partition selects checkpoints.
+The trainer rejects validation labels absent from the training partition. For
+every configured taxonomy label, reviewed mode also requires
+positive and negative examples in both partitions, using configurable minimums
+from `training-support-policy.v1.json` or `--support-policy`. A threshold of
+one only establishes basic coverage; it does not qualify model quality. The
+policy digest and counts are included in the run manifest. A separate reviewed
+test project remains reserved for
+final evaluation and is not fed to the trainer. A legacy complete-plan audit
+reads the test file; a development-only audit excludes it. Genuinely blinded
+evaluation needs independent access controls.
+
+The active trainer dynamically pads each training and validation batch to its
+longest tokenized request. The selected tokenizer must support padding. Batch
+size and maximum sequence length remain configurable; padding does not ensure
+that a batch fits GPU memory. To exercise the data loaders using an existing
+local tokenizer and the installed training dependencies, set
+`LFG_TEST_LOCAL_TOKENIZER` to its directory and run
+`python -m unittest discover -s ml/lfg-encoder -p test_training_collation_runtime.py`.
+That test uses fixture labels and does not train a model.
 
 ## Checkpointing and restart
 
@@ -105,7 +175,27 @@ evidence for reproducing an experiment, not a guarantee of bitwise-identical
 GPU results. The manifest and split contain IDs and family names: protect them
 as project data and do not put sensitive information in those fields.
 
-Checkpoints are written every configured number of optimizer steps. To resume,
+The `device` setting accepts `auto` or `cuda`; `--device` overrides it. Both
+require an available CUDA GPU and reject a CPU selection, including when a GPU
+is visible. The trainer checks the selected device and the model's device, and
+records the requested device, selected device and CUDA availability in the run
+manifest. Older configurations selecting `cpu` are rejected. Device
+selection does not prove the selected batch size fits memory or that training
+will succeed. Existing runs whose trainer code or manifest differs remain
+subject to the existing resume check; do not bypass it to resume across changes.
+
+Checkpoints are evaluated and written every configured number of optimizer
+steps and also at the final step, even when it falls between intervals. The
+active trainer selects among these checkpoints using validation loss; loss is
+not a quality or promotion result. It refuses to export the final model if no
+checkpoint was selected with a finite validation loss. The root
+`trainer_state.json` records the selected checkpoint and evaluation history;
+protect it as experiment metadata. An optional locked-runtime test can be run
+with `LFG_TEST_TRANSFORMERS_RUNTIME=1` and
+`python -m unittest discover -s ml/lfg-encoder -p test_training_schedule_runtime.py`.
+That test uses a fixture model and labels, not project training data.
+
+To resume,
 use the exact same command and add `--resume`; it verifies the existing manifest
 and requires the latest checkpoint's trainer, optimizer, scheduler and RNG
 state. The dataset, code, policy, configuration and recorded environment must be
@@ -117,16 +207,24 @@ classification head must be initialized for a test, explicitly enable
 `--allow-mismatched-sizes` and inspect every model-loading warning; the option
 can also allow other mismatched weights, so it is not a promotion guarantee.
 
-An exclusive lock rejects concurrent trainers for one output. An unclean kill
-can leave `<output>.lock`. Verify the process is no longer running before
-manually removing that lock; never remove it while a trainer is active. Saving
-can be interrupted, so the latest checkpoint may be incomplete and is rejected.
+An operating-system lock rejects concurrent trainers for one output. The
+`<output>.lock` marker remains after a run; a process crash releases the OS
+lock so a later trainer can acquire an initialized marker. A crash during
+marker creation can leave an empty or incomplete marker that fails closed.
+Do not remove or replace the marker while any trainer might be active. Old,
+empty or unrecognized lock files fail closed: verify no earlier trainer is
+active before removing one. Earlier trainer versions also treat the new marker
+as a held lock even after the OS lock is released; do not remove it for those
+versions until all current trainers have stopped. These locks
+coordinate cooperating processes on a trusted local filesystem; shared or
+network filesystem semantics have not been qualified. Saving can be interrupted,
+so the latest checkpoint may be incomplete and is rejected.
 Do not assume a failed checkpoint or a loss value qualifies a model.
 
-For a Spark, run this in a persistent `tmux` session or an operator-managed job
-service with checkpoint storage on a durable filesystem. This repository does
-not install or supervise a service, and the workflow is not yet qualified for
-production on a Spark. Checkpointing does not guarantee a save at the instant of a crash;
+For a Spark, the opt-in [reviewed training service](../../docs/lfg/SUPERVISED-TRAINING.md)
+provides a systemd user-service template and a guarded launcher. An operator must
+configure limits, pinned inputs and a reviewed corpus before enabling an instance;
+the workflow is not yet qualified for production. Checkpointing does not guarantee a save at the instant of a crash;
 work since the last completed save is lost. Configure the interval for the
 machine's storage cost and acceptable loss, and test interruption/restart on
 the actual host before relying on it. Use one trainer per output directory.
@@ -168,13 +266,19 @@ only checks declared IDs and family names; it cannot establish independent
 projects, provenance, human review, unseen paraphrases, or absence of other
 leakage. Without a split, separation is `not_checked`. Every report is marked
 ineligible for promotion until those requirements and promotion gates exist.
+The separate [reviewed native comparison](../../docs/lfg/REVIEWED-NATIVE-EVALUATION.md)
+binds an audited test partition to its training run, ONNX artifact and binary;
+it likewise cannot qualify a model without the remaining evidence.
 
 The configurable taxonomy defines the label universe. Per-label counts include
 false positives for labels with no positive examples; macro F1 averages only
 labels with positive reference support, while micro F1 includes all declared
 labels. Empty denominators are `null`. Compare models using the same dataset
-and taxonomy hashes and inspect the support for each label. Predictions are
-binary: this workflow does not measure calibration, runtime CPU cycles, memory,
-quantization loss, or model quality on an independently reviewed final test.
+and taxonomy hashes and inspect the support for each label. The default
+predictions are binary; the reviewed native comparison can optionally measure
+empirical ECE and Brier score from uncalibrated native scores using explicitly
+configured bins. This does not fit a calibrator or establish quality. Runtime
+CPU cycles, memory, quantization loss, and independently reviewed final-test
+quality require separate evidence.
 See the [exploratory comparison](../../docs/lfg/EVALUATION-SMOKE.md) for a
 recorded same-data smoke test and its limits.

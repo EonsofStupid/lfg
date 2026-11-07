@@ -1,5 +1,8 @@
 # GB10 training smoke evidence, 2026-10-30
 
+For the later hash-locked ARM64 environment and pinned real-model execution
+check, see [GB10 locked environment](SPARK-LOCKED-ENVIRONMENT.md).
+
 This is infrastructure evidence, not a quality, performance, security or
 promotion qualification. The checked-in six-example synthetic dataset and
 `--allow-below-gate` were used intentionally. The randomly initialized tiny

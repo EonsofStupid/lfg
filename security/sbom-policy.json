@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "lfg.sbom-policy.v1",
+  "baselinePackageCount": 268,
+  "maxPackageGrowthPercent": 20,
+  "maxPackageGrowthAbsolute": 60,
+  "allowedPackageTypes": [
+    "deb",
+    "generic",
+    "pypi",
+    "rpm"
+  ],
+  "allowedNamespacesByType": {
+    "deb": ["debian"],
+    "generic": ["<none>"],
+    "pypi": ["<none>"],
+    "rpm": ["almalinux"]
+  },
+  "allowedDocumentRootNamespacesByType": {
+    "oci": ["<none>"]
+  },
+  "ignoredLocationPatterns": [
+    ".dist-info/sboms/",
+    "auditwheel.cdx.json"
+  ]
+}

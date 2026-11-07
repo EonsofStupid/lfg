@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import evaluate
+import assessment_targets
 import train
 
 PLAN_SCHEMA = "lfg.encoder-corpus-plan.v1"
+DEVELOPMENT_PLAN_SCHEMA = "lfg.encoder-development-corpus-plan.v2"
 REVIEW_SCHEMA = "lfg.encoder-review.v1"
 SPLITS = ("train", "validation", "test")
 
@@ -76,14 +78,20 @@ def approved(item: dict[str, Any] | None, digest: str) -> bool:
         return False
 
 
-def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def audit(plan_path: Path, development_only: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     raw_plan = plan_path.read_bytes()
     plan = json.loads(raw_plan)
-    if not isinstance(plan, dict) or plan.get("schema_version") != PLAN_SCHEMA:
+    if not isinstance(plan, dict) or plan.get("schema_version") not in (PLAN_SCHEMA, DEVELOPMENT_PLAN_SCHEMA):
         raise ValueError("unsupported corpus plan")
+    if development_only and plan["schema_version"] != DEVELOPMENT_PLAN_SCHEMA:
+        raise ValueError("development-only training requires a development corpus plan")
     sources = plan.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("corpus plan requires sources")
+    development = plan["schema_version"] == DEVELOPMENT_PLAN_SCHEMA
+    if development and any(not isinstance(source, dict) or source.get("split") not in ("train", "validation")
+                           for source in sources):
+        raise ValueError("development plans permit only train and validation sources")
     taxonomy, taxonomy_hash = evaluate.load_taxonomy(resolve(plan_path.parent, plan.get("taxonomy")))
     ledger_path = None if plan.get("review_ledger") is None else resolve(plan_path.parent, plan["review_ledger"])
     ledger, ledger_hash = read_ledger(ledger_path)
@@ -97,6 +105,9 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     queue: list[dict[str, Any]] = []
     counts = {split: Counter() for split in SPLITS}
     coverage = {split: {field: Counter() for field in evaluate.FIELDS} for split in SPLITS}
+    target_coverage = {split: {field: {'known': 0, 'unknown': 0, **({'partial': 0} if field == 'effort' else {})}
+                               for field in assessment_targets.COVERAGE_FIELDS}
+                       for split in SPLITS}
     source_digests = []
     for source in sources:
         if not isinstance(source, dict):
@@ -116,7 +127,7 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         groups[project] = group
         group_partitions[group] = split
         partitions[project] = split
-        rows, digest = train.load_dataset(resolve(plan_path.parent, source.get("path")))
+        rows, digest = train.load_dataset(resolve(plan_path.parent, source.get("path")), allow_unlabeled_review=True)
         if not rows:
             raise ValueError("source dataset is empty")
         source_digests.append({"project": project, "project_group": group, "split": split, "sha256": digest, "records": len(rows)})
@@ -128,6 +139,9 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             provenance = row.get("source")
             if not isinstance(provenance, dict) or provenance.get("project") != project:
                 raise ValueError("example source project does not match the plan")
+            targets = row.get('assessment_targets')
+            if targets is not None:
+                assessment_targets.validate_stored(targets, project)
             family = row["family"]
             if family in families and families[family] != split:
                 raise ValueError("a family appears in more than one split")
@@ -147,9 +161,14 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             item = ledger.get(identifier)
             is_approved = approved(item, digest)
             counts[split]["examples"] += 1
+            counts[split]["labels_pending"] += int(row.get("labels_pending", False))
             counts[split]["verified_flag"] += int(row["verified"])
             counts[split]["approved_attestation"] += int(is_approved)
             counts[split]["ready_for_reviewed_subset"] += int(is_approved and row["verified"])
+            if is_approved and row['verified']:
+                values = None if targets is None else targets['values']
+                for field, status in assessment_targets.coverage(values).items():
+                    target_coverage[split][field][status] += 1
             queue.append({"schema_version": REVIEW_SCHEMA, "id": identifier, "project": project, "split": split,
                           "annotation_sha256": digest, "decision": "pending", "reviewer": None, "reviewed_at": None})
     if set(ledger) - ids:
@@ -158,23 +177,31 @@ def audit(plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
               "taxonomy_sha256": taxonomy_hash, "review_ledger_sha256": ledger_hash,
               "auditor_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "taxonomy_loader_sha256": hashlib.sha256(Path(evaluate.__file__).read_bytes()).hexdigest(),
+              "assessment_targets_validator_sha256": hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest(),
               "sources": source_digests, "counts": {name: dict(value) for name, value in counts.items()},
               "label_support": {split: {field: dict(sorted(values.items())) for field, values in fields.items()}
                                 for split, fields in coverage.items()},
+              "reviewed_assessment_targets": {split: {field: dict(values) for field, values in fields.items()}
+                                               for split, fields in target_coverage.items()},
               "duplicate_within_split": duplicate_within_split,
               "project_separation": "declared_projects_and_groups_disjoint", "approval_is_attestation": True,
               "promotion_eligible": False}
+    if development:
+        report.update(schema_version="lfg.encoder-development-corpus-audit.v2",
+                      scope="development", holdout_assessment="not_performed")
     return report, queue
 
 
-def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> dict[str, Any]:
+def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path,
+                             development_only: bool = False) -> dict[str, Any]:
     """Require the input to be exactly the reviewed train partition of this plan."""
-    report, queue = audit(plan_path)
+    report, queue = audit(plan_path, development_only=development_only)
     if not report["review_ledger_sha256"]:
         raise ValueError("audited training requires a review ledger")
     if report["duplicate_within_split"]:
         raise ValueError("audited training rejects duplicate normalized text within a split")
-    for split in SPLITS:
+    required_splits = ("train", "validation") if report.get("scope") == "development" else SPLITS
+    for split in required_splits:
         counts = report["counts"][split]
         if counts.get("examples", 0) == 0:
             raise ValueError(f"audited training requires a nonempty {split} partition")
@@ -194,9 +221,10 @@ def validate_training_corpus(records: list[dict[str, Any]], plan_path: Path) -> 
     return report
 
 
-def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path,
+                             development_only: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Load only the audited validation partition and bind it to the same audit."""
-    report = validate_training_corpus(records, plan_path)
+    report = validate_training_corpus(records, plan_path, development_only=development_only)
     raw_plan = plan_path.read_bytes()
     if hashlib.sha256(raw_plan).hexdigest() != report["plan_sha256"]:
         raise ValueError("plan changed during validation loading")
@@ -211,7 +239,7 @@ def load_reviewed_validation(records: list[dict[str, Any]], plan_path: Path) -> 
         validation.extend(rows)
     if not validation:
         raise ValueError("audited validation partition is empty")
-    if validate_training_corpus(records, plan_path) != report:
+    if validate_training_corpus(records, plan_path, development_only=development_only) != report:
         raise ValueError("audit inputs changed during validation loading")
     return report, validation
 

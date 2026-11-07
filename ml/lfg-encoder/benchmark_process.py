@@ -79,9 +79,9 @@ def windows_counters(process: subprocess.Popen) -> dict[str, int | None]:
             "process_cycles": cycles.value if ok_cycles else None}
 
 
-def run_process(binary: Path, payload: bytes, timeout: int, capture: bool = False) -> tuple[bytes, dict[str, Any]]:
+def run_process(binary: Path, command_args: list[str], payload: bytes, timeout: int, capture: bool = False) -> tuple[bytes, dict[str, Any]]:
     started = time.perf_counter_ns()
-    process = subprocess.Popen([str(binary), "baseline-predict"], stdin=subprocess.PIPE,
+    process = subprocess.Popen([str(binary), *command_args], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         stdout, _ = process.communicate(payload, timeout=timeout)
@@ -96,8 +96,11 @@ def run_process(binary: Path, payload: bytes, timeout: int, capture: bool = Fals
     return stdout or b"", {"elapsed_ns": elapsed, **counters}
 
 
-def run(binary: Path, dataset: Path, config_path: Path) -> dict[str, Any]:
+def run(binary: Path, dataset: Path, config_path: Path, command_args: list[str] | None = None) -> dict[str, Any]:
     config, config_hash = read_config(config_path)
+    command_args = command_args if command_args is not None else ["baseline-predict"]
+    if not command_args or any(not isinstance(arg, str) or not arg for arg in command_args):
+        raise ValueError("benchmark command arguments must be nonempty strings")
     binary = binary.resolve(strict=True)
     binary_hash = sha(binary.read_bytes())
     override_paths = {key: Path(os.environ[key]) for key in ("LFG_PREFLIGHT_CONFIG", "LFG_OPERATIONS_CONFIG") if key in os.environ}
@@ -107,12 +110,12 @@ def run(binary: Path, dataset: Path, config_path: Path) -> dict[str, Any]:
     raw = dataset.read_bytes()
     payload, rows, requests = prepare_batch(raw, config)
     first = payload.splitlines()[0] + b"\n"
-    probe, _ = run_process(binary, first, config["timeout_seconds"], capture=True)
+    probe, _ = run_process(binary, command_args, first, config["timeout_seconds"], capture=True)
     model = json.loads(probe)["model"]
     for _ in range(config["warmup_runs"]):
-        run_process(binary, payload, config["timeout_seconds"])
-    samples = [run_process(binary, payload, config["timeout_seconds"])[1] for _ in range(config["measured_runs"])]
-    after, _ = run_process(binary, first, config["timeout_seconds"], capture=True)
+        run_process(binary, command_args, payload, config["timeout_seconds"])
+    samples = [run_process(binary, command_args, payload, config["timeout_seconds"])[1] for _ in range(config["measured_runs"])]
+    after, _ = run_process(binary, command_args, first, config["timeout_seconds"], capture=True)
     if (json.loads(after)["model"] != model or sha(binary.read_bytes()) != binary_hash or
             sha(dataset.read_bytes()) != sha(raw) or
             sha(config_path.read_bytes()) != config_hash or
@@ -123,6 +126,7 @@ def run(binary: Path, dataset: Path, config_path: Path) -> dict[str, Any]:
         return None if any(value is None for value in values) else statistics.median(values)
     return {"schema_version": "lfg.process-benchmark.v1", "promotion_eligible": False,
             "binary_sha256": binary_hash, "dataset_sha256": sha(raw), "config_sha256": config_hash,
+            "command_args_sha256": sha(json.dumps(command_args, ensure_ascii=True, separators=(",", ":")).encode()),
             "benchmark_sha256": sha(Path(__file__).read_bytes()),
             "encoder": model, "override_sha256": override_hashes, "platform": platform.platform(), "machine": platform.machine(),
             "python_version": platform.python_version(),
@@ -141,9 +145,10 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path, help="new private report path")
+    parser.add_argument("--binary-arg", action="append", help="repeat for each binary argument; default is baseline-predict")
     args = parser.parse_args()
     try:
-        result = run(args.binary, args.dataset, args.config)
+        result = run(args.binary, args.dataset, args.config, args.binary_arg)
         with args.output.open("x", encoding="utf-8") as output:
             json.dump(result, output, indent=2, allow_nan=False)
             output.write("\n")

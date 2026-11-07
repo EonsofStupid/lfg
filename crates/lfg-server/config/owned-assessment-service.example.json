@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "lfg.owned-assessment-service.v1",
+  "enabled": false,
+  "artifactDirectory": "C:/path/to/private/onnx",
+  "framingFile": "C:/path/to/private/assessment-framing.json",
+  "trainingManifestFile": "C:/path/to/private/training-manifest.json",
+  "runtimeConfigFile": "C:/path/to/private/native-runtime.json",
+  "maxRuntimeConfigBytes": 131072,
+  "expectedModelSha256": "set-from-verified-private-manifest",
+  "expectedFramingSha256": "set-from-verified-private-framing-file",
+  "maxMetadataBytes": 1048576,
+  "requiredOutputFields": [
+    { "name": "intent", "valueType": "string", "nonEmpty": true },
+    { "name": "complexity", "valueType": "string", "nonEmpty": true },
+    { "name": "suggested_models", "valueType": "array" },
+    { "name": "agent_count", "valueType": "integer", "minInteger": 0 },
+    { "name": "reasons", "valueType": "array", "nonEmpty": true }
+  ],
+  "maxHttpBodyBytes": 65536,
+  "maxRequestBytes": 8192,
+  "maxContextBytes": 4352,
+  "maxGeneratedBytes": 64,
+  "maxWorkerOutputBytes": 4096,
+  "timeoutMs": 60000,
+  "maxConcurrent": 1,
+  "workerThreads": 1
+}

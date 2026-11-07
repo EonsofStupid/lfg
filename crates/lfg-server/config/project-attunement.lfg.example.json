@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "lfg.project-attunement.v1",
+  "revision": "lfg-local-example-v1",
+  "sourceApp": "lfg-local-project",
+  "selections": [
+    {"bankId": "core"},
+    {"bankId": "rust"}
+  ],
+  "limits": {"maxEntries": 5000, "maxDepth": 12, "maxFileBytes": 1048576},
+  "sources": [
+    {"kind": "inventory", "binding": "module inventory", "path": "crates/lfg-server/src", "recursive": true, "extensions": ["rs"]},
+    {"kind": "inventory", "binding": "file tree", "path": "crates", "recursive": true, "extensions": []},
+    {"kind": "text", "binding": "workspace layout", "path": "Cargo.toml"}
+  ]
+}

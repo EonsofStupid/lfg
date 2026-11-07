@@ -1,0 +1,119 @@
+- iframe [active] [ref=e2]:
+  - generic [ref=f1e2]:
+    - region [ref=f1e3]:
+      - generic: TYPE HERE
+      - generic [ref=f1e4]:
+        - generic [ref=f1e5]: Live prompt intake
+        - generic [ref=f1e6]: COMMITTED DEMO · REPLAY READY
+      - textbox "Live prompt intake" [ref=f1e7]: test testt
+      - generic [ref=f1e8]:
+        - button "Commit demo route" [active] [ref=f1e9] [cursor=pointer]
+        - button "Replay session" [ref=f1e10] [cursor=pointer]
+        - generic [ref=f1e11]:
+          - text: Audience
+          - combobox "Audience" [ref=f1e12]:
+            - option "Public story"
+            - option "Member diagnostics" [selected]
+    - region "SIMULATED CAPABILITY CONTROL" [ref=f1e13]:
+      - generic [ref=f1e14]:
+        - generic [ref=f1e15]: ENABLE ROUTES
+        - generic [ref=f1e16]: ↘
+      - generic [ref=f1e18]:
+        - generic [ref=f1e19]:
+          - checkbox "Subscription seats" [checked] [ref=f1e20]
+          - generic [ref=f1e21]: Subscription seats
+        - generic [ref=f1e22]:
+          - checkbox "Provider API mesh" [ref=f1e23]
+          - generic [ref=f1e24]: Provider API mesh
+        - generic [ref=f1e25]:
+          - checkbox "Local GPU" [ref=f1e26]
+          - generic [ref=f1e27]: Local GPU
+        - generic [ref=f1e28]:
+          - text: Subagents
+          - status [ref=f1e29]: "2"
+          - slider "Subagents" [ref=f1e30]: "2"
+      - generic [ref=f1e31]: Controls change this demonstration only; they do not activate accounts, billing, or credentials.
+    - generic [ref=f1e32]:
+      - generic [ref=f1e33]:
+        - generic [ref=f1e34]: Browser CPU preflight
+        - generic [ref=f1e35]: 0.00 ms
+        - generic [ref=f1e36]: code.execute
+      - generic [ref=f1e37]:
+        - generic [ref=f1e38]: Reason Ready Objects
+        - generic [ref=f1e39]: 5 committed shapes
+        - generic [ref=f1e40]: versioned · scoped · replayable
+      - generic [ref=f1e41]:
+        - generic [ref=f1e42]: Route posture
+        - generic [ref=f1e43]: 1 eligible · 1 disabled
+        - generic [ref=f1e44]: simulated task bindings committed
+    - generic [ref=f1e45]:
+      - code [ref=f1e46]: route(t) = argmax capability × policy × budget
+      - generic [ref=f1e47]: committed demo signal
+    - region [ref=f1e48]:
+      - heading "Reason Ready Object and LFG routing pipeline" [level=2] [ref=f1e49]
+      - generic [ref=f1e50]:
+        - generic [ref=f1e51]:
+          - generic [ref=f1e52]: 01 · RRO FOUNDRY
+          - generic "Reason Ready Objects" [ref=f1e53]:
+            - button "GOAL" [pressed] [ref=f1e54] [cursor=pointer]
+            - button "POLICY" [ref=f1e55] [cursor=pointer]
+            - button "EVIDENCE" [ref=f1e56] [cursor=pointer]
+            - button "TASKS" [ref=f1e57] [cursor=pointer]
+            - button "OUTPUT" [ref=f1e58] [cursor=pointer]
+          - generic [ref=f1e59]:
+            - generic [ref=f1e60]: rro.goal.v1
+            - strong [ref=f1e61]: Objective and success boundary
+            - code [ref=f1e62]: internal · hash:9c21… · lineage:prompt/1
+        - generic [ref=f1e63]:
+          - generic [ref=f1e64]: 02 · LFG ENCODER
+          - generic [ref=f1e65]:
+            - generic [ref=f1e66]: CPU
+            - strong [ref=f1e67]: Semantic encoder
+            - generic [ref=f1e68]: code.execute
+          - generic [ref=f1e69]:
+            - generic [ref=f1e70]: GATE
+            - strong [ref=f1e71]: Policy matrix
+            - generic [ref=f1e72]: privacy × tools × tenant × side effects
+          - generic [ref=f1e73]:
+            - generic [ref=f1e74]: ROUTER
+            - strong [ref=f1e75]: TeamPlan compiler
+            - generic [ref=f1e76]: 2 tasks · 2 parallel branches
+        - generic [ref=f1e77]:
+          - generic [ref=f1e78]: 03 · SUBAGENT FAN-OUT
+          - generic "Compiled subagents" [ref=f1e79]:
+            - generic "Research scout, Current market + cited evidence, not enabled" [ref=f1e133] [cursor=pointer]:
+              - generic [ref=f1e134]:
+                - generic [ref=f1e135]: xAI
+                - generic [ref=f1e136]: Grok
+              - strong [ref=f1e137]: Research scout
+              - generic [ref=f1e138]: Current market + cited evidence
+            - generic "Context architect, Long-context system design, eligible in simulation" [ref=f1e139] [cursor=pointer]:
+              - generic [ref=f1e140]:
+                - generic [ref=f1e141]: Anthropic
+                - generic [ref=f1e142]: Sonnet
+              - strong [ref=f1e143]: Context architect
+              - generic [ref=f1e144]: Long-context system design
+        - generic [ref=f1e110]:
+          - generic [ref=f1e111]: 04 · EVIDENCE LOOP
+          - generic [ref=f1e112]:
+            - generic [ref=f1e113]: JOIN
+            - strong [ref=f1e114]: Structured synthesis
+            - generic [ref=f1e115]: results + citations + artifact refs
+          - generic [ref=f1e116]:
+            - generic [ref=f1e117]: EVAL
+            - strong [ref=f1e118]: Independent graders
+            - generic [ref=f1e119]: rubric@1.0 · minimum n enforced
+          - generic [ref=f1e120]:
+            - generic [ref=f1e121]: REPLAY
+            - strong [ref=f1e122]: Control ledger
+            - generic [ref=f1e123]: signals · lineage · promotion
+    - region [ref=f1e124]:
+      - generic [ref=f1e125]:
+        - generic [ref=f1e126]:
+          - text: Signal replay
+          - status [ref=f1e127]: 5 / 8
+        - generic [ref=f1e128]: CANONICAL DEMO EVENT
+      - slider "Signal replay" [ref=f1e129]: "4"
+      - generic [ref=f1e130]:
+        - code [ref=f1e131]: route.binding_committed
+        - generic [ref=f1e132]: one provider/model bound per task attempt

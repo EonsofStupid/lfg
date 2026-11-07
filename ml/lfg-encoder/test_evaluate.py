@@ -91,6 +91,14 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "input text does not match"):
             evaluate.evaluate(self.dataset, self.predictions, self.taxonomy, None, False)
 
+    def test_abstentions_cannot_be_scored(self):
+        self.preds[0]["schema_version"] = "lfg.evaluation-abstention.v1"
+        with self.assertRaisesRegex(ValueError, "abstentions"):
+            evaluate.score(self.rows, {row["id"]: row for row in self.preds}, {})
+        self.write()
+        with self.assertRaises(ValueError):
+            evaluate.evaluate(self.dataset, self.predictions, self.taxonomy, None, False)
+
     def test_rejects_wrong_taxonomy_and_unknown_labels(self):
         for prediction in self.preds:
             prediction["model"] = {**self.model, "taxonomy": "b" * 64}

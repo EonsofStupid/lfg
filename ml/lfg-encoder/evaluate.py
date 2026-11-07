@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import assessment_targets
 import hashlib
 import json
 import re
@@ -103,6 +104,8 @@ def load_taxonomy(path: Path) -> tuple[dict[str, set[str]], str]:
 
 
 def score(records: list[dict[str, Any]], predictions: dict[str, dict[str, Any]], taxonomy: dict[str, set[str]]) -> dict[str, Any]:
+    if any(row.get("schema_version") == "lfg.evaluation-abstention.v1" for row in predictions.values()):
+        raise ValueError("abstentions cannot be scored as predictions")
     ids = {row["id"] for row in records}
     if len(ids) != len(records) or ids != predictions.keys():
         raise ValueError("prediction IDs must exactly match the dataset")
@@ -144,6 +147,7 @@ def score(records: list[dict[str, Any]], predictions: dict[str, dict[str, Any]],
 
 
 def evaluate(dataset: Path, prediction_file: Path, taxonomy_file: Path, split_file: Path | None, allow_unverified: bool) -> dict[str, Any]:
+    validator_hash = hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest()
     records, dataset_hash = train.load_dataset(dataset)
     if not records:
         raise ValueError("no evaluation examples supplied")
@@ -160,10 +164,13 @@ def evaluate(dataset: Path, prediction_file: Path, taxonomy_file: Path, split_fi
     taxonomy, taxonomy_hash = load_taxonomy(taxonomy_file)
     if "taxonomy" in model and model["taxonomy"] != taxonomy_hash:
         raise ValueError("prediction taxonomy differs from evaluation taxonomy")
+    if hashlib.sha256(Path(assessment_targets.__file__).read_bytes()).hexdigest() != validator_hash:
+        raise ValueError("assessment target validator changed during evaluation")
     return {"schema_version": "lfg.encoder-evaluation.v1", "dataset_sha256": dataset_hash,
             "predictions_sha256": prediction_hash, "taxonomy_sha256": taxonomy_hash, "model": model,
             "producer_sha256": producer, "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "dataset_loader_sha256": hashlib.sha256(Path(train.__file__).read_bytes()).hexdigest(), "examples": len(records),
+            "assessment_targets_validator_sha256": validator_hash,
             "unverified_examples": unverified, "separation": separation,
             "promotion_eligible": False, "groups": score(records, predictions, taxonomy)}
 

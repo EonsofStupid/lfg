@@ -1,0 +1,12 @@
+# Copy to routing.toml in the installed skill and adjust to available models.
+[planner]
+model = "gpt-6.1-terra"
+effort = "xhigh"
+
+[executor]
+model = "gpt-6-luna"
+effort = "high"
+
+[escalation]
+model = "gpt-6.1-terra"
+effort = "xhigh"

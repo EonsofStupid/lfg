@@ -5,10 +5,10 @@ profile discovery, remote updates, or RRFlow integration is implemented.
 
 ## Assessment chain
 
-An authorized project request enters one bounded CPU analysis. LFG reports
-versioned observations (task category, capabilities, risk signals, and, when
-supported and evaluated, complexity) with the configuration and model identity
-that produced them. The result includes unknown and inconclusive states. An MCP
+An authorized project request enters one bounded CPU analysis. LFG reports a
+versioned assessment: intent, complexity, suggested models and total agents,
+together with capability and risk signals, the evidence for each, and the
+configuration and model identity that produced them. The result includes unknown and inconclusive states. An MCP
 adapter should expose the same typed result through a tool with an explicit
 input/output schema; it must not create a second classifier or convert an
 observation into permission. The local stdio transport is the first candidate;
@@ -16,9 +16,11 @@ network transport is a separate configurable integration. The [MCP tools](https:
 and [transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 specifications define those protocol boundaries.
 
-When integrated with RRFlow, LFG supplies observations. SWAG proposes a model,
-effort, or context plan, and `RrdEngine` retains authorization, admission,
-budgets, and durable state. The project configuration identifies the provider
+When integrated with RRFlow, LFG supplies its assessment as a suggestion. SWAG
+accepts it as a data point and weights it more heavily after a confirmation
+whose sources and weight are configurable, once LFG's suggestions are proven
+reliable. `RrdEngine` retains
+authorization, admission, budgets, and durable state. The project configuration identifies the provider
 bindings and subscriptions the operator has made available; a claim that a
 subscription exists is distinct from a verified usable binding. Unknown or
 stale capabilities cannot meet a hard requirement.
@@ -61,6 +63,72 @@ A candidate formula for an evaluated selection policy is:
 The present classifier's `rawCapability` and `toolLoopEfficiency` are only
 user-supplied relative scores. They do not implement this evidence model and
 must not be presented as calibrated success probabilities.
+
+## Development validation of reviewed assessment targets
+
+`ml/lfg-encoder/assessment_evaluate.py` compares **supplied** baseline and
+candidate prediction files against reviewed complexity, model, effort and agent
+count judgments. It accepts only a development plan containing separate train
+and validation sources, and checks that every record in both splits has a
+current review attestation and that the audit finds no within-split normalized
+duplicates. It rejects a plan declaring a test source before opening its data.
+Project and family separation are still declarations, not proof of independence.
+
+Each newline-terminated prediction file must contain exactly one record per
+validation example. Every record identifies the input text digest, current
+review annotation digest, and the exact reviewed project-profile digest. It
+also carries a consistent claimed producer and artifact SHA-256 across the
+file. A record uses this shape, with values drawn from **that record's**
+reviewed profile rather than a built-in provider catalog:
+
+```json
+{"schema_version":"lfg.assessment-prediction.v1","id":"RECORD_ID",
+ "input_sha256":"INPUT_SHA256","annotation_sha256":"ANNOTATION_SHA256",
+ "profile_sha256":"PROFILE_SHA256","producer_sha256":"PRODUCER_SHA256",
+ "artifact_sha256":"ARTIFACT_SHA256",
+ "values":{"complexity":null,"models":null,"agent_count":null}}
+```
+
+The SHA placeholders above stand for lowercase 64-character digests. A missing
+reviewed profile requires `profile_sha256: null` and all three values null.
+Null predictions mean abstention. A non-null model list must be nonempty and
+contains `{ "id": "PROFILE_MODEL_ID", "effort": null }` objects; selected
+models must have been declared available in that profile, and any effort must
+be one of that model's configured values. A non-null list is compared as the
+complete recommended set; the current schema does not express a known empty
+recommendation. The profile is the one recorded during review, not proof of
+current subscription access.
+
+```powershell
+python ml/lfg-encoder/assessment_evaluate.py --plan PRIVATE_DEVELOPMENT_PLAN.json `
+  --baseline PRIVATE_BASELINE_PREDICTIONS.jsonl --candidate PRIVATE_CANDIDATE_PREDICTIONS.jsonl `
+  --max-prediction-bytes OPERATOR_SELECTED_LIMIT --output NEW_PRIVATE_REPORT.json
+```
+
+The report counts known and unknown judgments separately. Complexity reports
+coverage and accuracy among predictions; agent count reports coverage, exact
+matches and mean absolute error; model sets report exact matches and micro
+precision/recall, including a recall denominator that counts abstentions.
+Effort is scored only for expected models with a known reviewed effort. These
+are aggregate, per-record comparisons against each recorded project profile;
+they do not prove that different projects' complexity definitions are
+equivalent. Unknown targets are excluded, not converted to negative labels or
+zero. Small samples and missing classes remain visible in the support counts.
+
+The tool does **not** generate predictions, run a model, prove that prediction
+inputs were blinded, authenticate reviewers, or qualify an artifact. Producer
+and artifact hashes in the prediction file are claims; the report binds the
+file bytes but cannot establish how they were produced. It does not assess the
+held-out test split, set promotion thresholds, train these targets or provide
+their native runtime inference. An experimental offline trainer now exists;
+see [assessment training](ASSESSMENT-TRAINING.md). It produces a private
+weight pack, but does not yet generate predictions or provide native inference.
+
+On 2026-11-01 UTC, an optimistic read-only audit of the local training review
+workspace found 598 candidates, 569 without even draft labels, and zero current
+approvals or known reviewed assessment targets. The workspace is training-only
+and was rejected by this validation tool's plan-scope gate. No assessment
+metric or training result was generated from it.
 
 ## CPU burst efficiency
 

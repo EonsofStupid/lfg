@@ -1,0 +1,29 @@
+{
+  "schema_version": "lfg.teacher-dataset-publisher.v1",
+  "collection_root": "/PATH/TO/PRIVATE_COLLECTIONS",
+  "staging_root": "/PATH/TO/PRIVATE_PUBLISHER_STATE",
+  "collector_configs": ["/PATH/TO/APPROVED_PRIVATE_COLLECTOR_CONFIG.json"],
+  "max_manifest_bytes": 2097152,
+  "max_dataset_bytes": 16777216,
+  "max_transfer_bytes": 33554432,
+  "resend_interval_seconds": 3600,
+  "plan": {
+    "schema_version": "lfg.assessment-distillation-plan.v1",
+    "revision": "OPERATOR_SELECTED_REVISION",
+    "task": "assessment",
+    "system_prompt": "REPLACE_WITH_COLLECTOR_SYSTEM_PROMPT",
+    "authorization_attestation": "REPLACE_WITH_SOURCE_AUTHORIZATION",
+    "redaction_attestation": "REPLACE_WITH_SCREENING_DESCRIPTION",
+    "forbidden_literals": [],
+    "include_outcomes": ["unknown"],
+    "max_source_bytes": 1048576,
+    "max_total_bytes": 16777216,
+    "max_examples": 10000
+  },
+  "delivery": {
+    "endpoint": "https://PRIVATE_HOST:PORT/api/datasets",
+    "allowed_hosts": ["PRIVATE_HOST"],
+    "token_file": "/PATH/TO/PRIVATE_DELIVERY_TOKEN",
+    "timeout_seconds": 60
+  }
+}

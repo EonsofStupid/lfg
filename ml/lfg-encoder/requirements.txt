@@ -1,8 +1,9 @@
-datasets>=4.0,<5
+datasets>=5.1,<6
 accelerate>=1.1,<2
 numpy>=2.0,<3
 onnx>=1.18,<2
 onnxruntime>=1.22,<2
 scikit-learn>=1.7,<2
 torch>=2.8,<3
-transformers>=4.55,<5
+transformers>=5.22.1,<6
+fsspec>=2026.6

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LFG · Corpus review</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">LFG / LOCAL TRAINING DATA</p><h1>Review the source</h1>
+        <p>Check the original request, provenance, and every proposed label before approving.</p></div>
+      <div class="status" id="summary" aria-live="polite">Connecting…</div>
+    </header>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <div class="lookup"><label for="find-id">Pending record ID</label>
+      <input id="find-id" type="text" autocomplete="off"><button id="find" type="button" class="secondary">Find</button></div>
+    <section id="review" hidden>
+      <div class="meta"><span id="position"></span><span id="project"></span><span id="split"></span><span id="record-id"></span></div>
+      <div class="grid">
+        <article class="panel">
+          <h2>Request to review</h2>
+          <p class="hint">Select sensitive text below and replace it before approval. Check that the remaining request still has its original meaning.</p>
+          <textarea id="request" aria-label="Request to review" readonly spellcheck="false"></textarea>
+          <div id="suggestions" class="actions suggestion-actions"></div>
+          <label class="redaction-label" for="redaction-replacement">Replacement text</label>
+          <input id="redaction-replacement" class="redaction-replacement" type="text" value="[REDACTED]">
+          <div class="actions redaction-actions"><button id="redact" type="button" class="secondary">Replace selection</button>
+            <button id="reset-redactions" type="button" class="secondary">Reset request</button></div>
+          <p class="hint">Changes are saved only if you approve. The original source remains in the private source files.</p>
+          <h3>Source</h3><pre id="source" class="source"></pre>
+          <button id="verify-source" type="button" class="secondary">Check original source</button>
+          <p id="source-check" class="hint" role="status"></p>
+          <button id="show-context" type="button" class="secondary">Show prior user messages</button>
+          <p class="hint">Prior messages may contain private data. This view omits assistant replies and is not included in the training record.</p>
+          <pre id="source-context" class="source" aria-live="polite"></pre>
+          <button id="show-following" type="button" class="secondary">Show later user messages</button>
+          <p class="hint">Later messages can contain corrections and private data. They are from the current session file, omit assistant replies, and are not training labels.</p>
+          <pre id="following-context" class="source" aria-live="polite"></pre>
+          <h3>Review note</h3><p id="review-note"></p>
+        </article>
+        <article class="panel">
+          <h2>Labels</h2><p class="hint">Full review: unchecked labels count as negative. Partial review uses separate explicit positive, negative, or unknown judgments.</p>
+          <p id="guide-notice" class="hint"></p>
+          <section id="partial-history" hidden>
+            <h3>Partial review history</h3>
+            <p id="partial-history-status" class="hint"></p>
+            <pre id="partial-history-content" class="source"></pre>
+          </section>
+          <label id="partial-reconcile-label" class="attest" hidden><input type="checkbox" id="partial-reconcile"> I reviewed the saved partial history and reconciled it with this full decision.</label>
+          <label id="partial-mode-label" class="attest" hidden><input type="checkbox" id="partial-mode"> Record or revise a partial label review</label>
+          <div id="labels"></div>
+          <section id="partial-labels" hidden>
+            <p class="hint">Draft suggestions are unverified. Accepting or rejecting a suggestion does not set a label judgment. Unset cells remain unknown.</p>
+            <div id="partial-label-controls"></div>
+            <label class="attest"><input type="checkbox" id="partial-attest"> I reviewed the source and explicitly selected only judgments I can support.</label>
+            <button id="save-partial" type="button" class="primary">Save partial review</button>
+            <button id="retract-partial" type="button" class="danger" hidden>Retract saved partial review</button>
+          </section>
+          <section id="assessment" hidden>
+            <h3>Assessment targets</h3>
+            <p class="hint">These are reviewer judgments for this project, not measured model performance. Leave a field unknown when the evidence is missing. Declared availability does not verify a subscription.</p>
+            <label for="assessment-complexity">Complexity</label>
+            <select id="assessment-complexity"></select>
+            <div id="assessment-models"></div>
+            <label for="assessment-agents">Total agents (blank means unknown)</label>
+            <input id="assessment-agents" type="number" step="1">
+          </section>
+          <label class="attest"><input type="checkbox" id="attest"> I checked the source, context, privacy, labels, and any assessment targets.</label>
+          <div class="actions"><button id="skip" type="button" class="secondary">Skip</button>
+            <button id="reject" type="button" class="danger">Reject</button>
+            <button id="approve" type="button" class="primary">Approve</button></div>
+        </article>
+      </div>
+    </section>
+    <section id="empty" class="panel" hidden><h2 id="empty-title">No more items at this position</h2>
+      <p>You can return to the beginning to revisit skipped items.</p>
+      <button type="button" id="restart" class="secondary">Start again</button>
+      <button type="button" id="skip-blocked" class="secondary" hidden>Skip this item</button></section>
+    <footer>Local review only · Approvals are attestations · This tool does not qualify a model</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,46 @@
+{
+  "schema_version": "lfg.private-corpus-screen.v1",
+  "revision": "example-review-before-use",
+  "limits": {
+    "max_policy_bytes": 65536,
+    "max_plan_bytes": 1048576,
+    "max_source_bytes": 16777216,
+    "max_total_source_bytes": 134217728,
+    "max_total_output_bytes": 134217728,
+    "max_records": 10000,
+    "max_text_bytes": 262144,
+    "max_matches_per_record": 1000
+  },
+  "rules": [
+    {
+      "id": "private-key-block",
+      "pattern": "(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\\Z)",
+      "replacement": "[REDACTED PRIVATE KEY]"
+    },
+    {
+      "id": "bearer-credential",
+      "pattern": "(?i)\\bBearer[ \\t]+[A-Za-z0-9._~+/=-]{8,}",
+      "replacement": "Bearer [REDACTED]"
+    },
+    {
+      "id": "basic-credential",
+      "pattern": "(?i)\\bBasic[ \\t]+[A-Za-z0-9+/]{8,}={0,2}",
+      "replacement": "Basic [REDACTED]"
+    },
+    {
+      "id": "cookie-header",
+      "pattern": "(?i)\\b(?:set-)?cookie[ \\t]*:[ \\t]*[^\\r\\n]+",
+      "replacement": "[REDACTED COOKIE HEADER]"
+    },
+    {
+      "id": "named-credential",
+      "pattern": "(?i)\\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\\b[ \\t]*[=:][ \\t]*[\\\"']?[^\\s\\\"',;]{8,}",
+      "replacement": "[REDACTED CREDENTIAL ASSIGNMENT]"
+    },
+    {
+      "id": "common-token-prefix",
+      "pattern": "\\b(?:ghp_|gho_|github_pat_|sk-)[A-Za-z0-9_-]{20,}",
+      "replacement": "[REDACTED TOKEN]"
+    }
+  ]
+}

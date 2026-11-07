@@ -1,0 +1,21 @@
+[Unit]
+Description=LFG owned-model training supervisor
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+# Set these paths and limits for this host. Preserve CUDA determinism settings
+# when resuming a job; its checkpoint records the execution environment.
+Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false CUBLAS_WORKSPACE_CONFIG=:4096:8
+ExecStart=/PATH/TO/PYTHON /PATH/TO/owned_training_service.py --config /PATH/TO/PRIVATE_SERVICE_CONFIG.json
+Restart=on-failure
+RestartSec=15
+CPUQuota=600%
+MemoryMax=32G
+TasksMax=256
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,55 @@
+{
+  "schema_version": "lfg.encoder-onnx-artifact.v2",
+  "promotion_eligible": false,
+  "probe_only": true,
+  "reason": "untrained classification head; compatibility check only",
+  "source_model_manifest_sha256": "4a126906b3785c898995a2a78b0748ee84c14b3aeca157c9e943332cd61e22a6",
+  "export_config_sha256": "7f699322faa13ac06e0e5a5da205448186e4aa0e820c995ea449fbb6287d19d0",
+  "prediction_config_sha256": "696d2d5654b0da4e635ed7ab6b28fe8f6faf1824c6327686ee5898dd74c0e601",
+  "taxonomy_sha256": "70bbe488a104bfb9e47e75cea2df9d8d7cd2777fb0788481fbfa3117c936f8af",
+  "max_length": 512,
+  "padding_side": "right",
+  "truncation_side": "right",
+  "inputs": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "outputs": [
+    "logits"
+  ],
+  "seed": 731,
+  "observed_shapes": [
+    {
+      "batch": 1,
+      "tokens": 1,
+      "padded": false,
+      "max_absolute_logit_error": 9.179115295410156e-06
+    },
+    {
+      "batch": 1,
+      "tokens": 8,
+      "padded": false,
+      "max_absolute_logit_error": 7.927417755126953e-06
+    },
+    {
+      "batch": 2,
+      "tokens": 32,
+      "padded": true,
+      "max_absolute_logit_error": 8.64267349243164e-06
+    },
+    {
+      "batch": 1,
+      "tokens": 512,
+      "padded": false,
+      "max_absolute_logit_error": 2.2292137145996094e-05
+    }
+  ],
+  "probe_sha256": "21dc8dc5a8812b2048cfccd219ce648d53646da85eeb95656b5b976d54f475fe",
+  "files_sha256": {
+    "model.onnx": "2003dea59bc3ed416ef493d2161727280bdd0aee7a5ff7bbbacfb83a13d28bb8",
+    "tokenizer.json": "3703d011b3ee259e00b59b60772f8fd54998d79e8fa5a1388d507eff28f8f09e",
+    "labels.json": "8cc8875137ffa30044c2fd3e3c30616f3c23ada63860abc09ac2f3718cc19cb5",
+    "taxonomy.json": "70bbe488a104bfb9e47e75cea2df9d8d7cd2777fb0788481fbfa3117c936f8af",
+    "prediction-config.json": "696d2d5654b0da4e635ed7ab6b28fe8f6faf1824c6327686ee5898dd74c0e601"
+  }
+}

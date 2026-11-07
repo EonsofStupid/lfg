@@ -55,8 +55,16 @@ For a review workflow:
    `--audited-plan PLAN`; the input must exactly match the audited train rows.
    Audited training loads the separate validation partition and verifies its
    source hashes and audit again. It rejects validation labels missing from the
-   training partition; test rows are not supplied to the trainer. This does not
-   establish adequate positive or negative support for every label.
+   training partition; test rows are not supplied to the trainer. Before loading
+   a model, it also checks positive and negative counts for every taxonomy label
+   in both training and validation. The default requirements are in
+   `ml/lfg-encoder/training-support-policy.v1.json`; select a different file
+   with `--support-policy` to raise defaults or set per-label thresholds. Every
+   threshold must be a positive integer. A minimum of one is a basic coverage
+   check, not adequate statistical support or evidence of quality.
+   The full taxonomy is included in the trained model, and the policy digest
+   and support counts are bound to the run manifest. The test partition is not
+   consulted for these support checks.
    Its run manifest records audit, plan, taxonomy, ledger, source and code
    digests. Changing them prevents an ordinary resume.
 
@@ -69,16 +77,577 @@ development, and its artifacts remain experimental. A different versioned
 promotion-policy file can be selected with `--promotion-policy`; changing its
 sample threshold does not establish adequate data or quality.
 
-`smoke_reviewed_gate.py` tests the gate through an actual short model-training
-call using invented fixture records and simulated approvals. It creates a new
-output directory, requires an explicitly chosen cached model and immutable
-revision, and disables Hugging Face network access. It deliberately lowers a
-copy of the policy's sample threshold for its two training fixtures; its
-output must never be used as a release candidate or as evidence of human
-review. For example, with a compatible test model already cached:
+## Local review workspace
+
+`review_corpus.py` provides a terminal-based review workflow for an existing
+unreviewed plan. It copies the plan, taxonomy and sources into a new local
+workspace and starts every decision as pending. It refuses to initialize from
+an existing ledger or records already marked verified. It never contacts a
+network service. The workspace contains the original private text: choose an
+access-controlled directory and do not commit it. Git ignore is not encryption;
+on Windows, access depends on the directory's inherited ACL.
 
 ```powershell
-.\.venv\Scripts\python.exe ml/lfg-encoder/smoke_reviewed_gate.py --base-model MODEL --model-revision COMMIT --output target/review-gate-smoke --epochs 1 --max-length 32 --batch-size 1 --checkpoint-steps 1
+python ml/lfg-encoder/review_corpus.py init --plan PRIVATE_PLAN.json --workspace NEW_PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_corpus.py review --workspace PRIVATE_DIRECTORY --reviewer REVIEWER_ID
+python ml/lfg-encoder/review_corpus.py status --workspace PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_corpus.py export --workspace PRIVATE_DIRECTORY --output NEW_PRIVATE_EXPORT_DIRECTORY
+```
+
+Review displays the request, source, review note and proposed labels. The
+reviewer can edit all label groups, skip, or explicitly approve or reject an
+item. Approving requires typing `APPROVE`; rejecting requires `REJECT` and is
+not reversible within that workspace. Blank label groups mean negatives, not
+unknowns. If a request, attribution, label, source permission or potential
+secret is uncertain, skip or reject it rather than approving it. Review the
+actual source and context separately; the tool displays provenance but does
+not establish authorship, licensing or secret removal. The reviewer identifier
+and time are recorded attestations, not identity verification.
+
+Decisions are bound to the displayed record, taxonomy, project and split. An
+approval made stale by an edit is not exported. If a process stops between
+writing a source and its ledger, the item stays pending and must be explicitly
+reviewed again. The workspace lock coordinates this tool's processes only;
+avoid editing workspace files concurrently. If a crash leaves `review.lock`,
+first verify no reviewer is running before removing it. Export creates a new
+plan containing only current approvals and excludes pending, rejected and stale
+items. It does not assert that there are enough examples or suitable project
+splits for training: the existing corpus audit, label support and sample gates
+still apply.
+
+### Combining reviewed workspaces
+
+`combine_reviewed_workspaces.py` joins current approvals from separately reviewed
+workspaces into a new private plan, ledger, taxonomy and train-only JSONL. It
+locks each workspace while reading, checks matching taxonomies, exports only
+current approvals, and applies the existing audit to the combined result. It
+rejects duplicate IDs, cross-split project/group/family or normalized-text
+overlap, within-split normalized duplicates and missing partitions; stale
+approvals are excluded. Every supplied workspace must contribute at least one current
+approval. It creates the output directory exclusively after staging and auditing;
+if an error occurs during the final copy, inspect the incomplete output and use
+a new path. Its manifest binds input audit, code, policy and output digests.
+
+Check the actual private workspaces without creating an output:
+
+```powershell
+python ml/lfg-encoder/combine_reviewed_workspaces.py `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/makers-heldout-review-draft.v4/workspace `
+  --status
+```
+
+After genuine reviews, replace `--status` with `--output NEW_PRIVATE_DIRECTORY`.
+The output's `plan.json` and `training.jsonl` can then be supplied to the audited
+training command. The sample status uses `promotion-policy.json` by default;
+select the same policy intended for training with `--promotion-policy`. The
+candidate shortfall is optimistic: it counts every record in the training
+workspaces, including pending, rejected and stale records, so it is a lower
+bound on how much additional data may be needed. The count alone does not check
+label support, independence or model quality. Assembly can produce a reviewed
+snapshot before it meets the training sample and label-support gates; it does
+not bypass those gates or mark the snapshot promotable. Audit currently reads the
+test records and therefore does not enforce a blinded holdout.
+
+On 2026-10-31 a status check before the additional training inventory found 226
+train, 35 validation and 785 test records, all pending. The default policy
+required 500 reviewed training records. Assembly correctly rejected those
+workspaces without creating an output. A test-only fixture exercised approved
+records through the combined plan and the existing training/validation audit;
+that fixture is not human-reviewed data or quality evidence.
+
+The current real-request review workspace is
+`dataset/private/real-request-review-workspace.v1`. It was initialized with
+38 pending items and no approvals. Its LFG validation group was used for an
+earlier experiment and it has no test source; review alone cannot turn this
+plan into an independent final evaluation.
+
+### Development-only assembly
+
+To avoid supplying the test workspace to development assembly, explicitly select
+`--scope development` and pass only separate train and validation workspaces:
+
+```powershell
+python ml/lfg-encoder/combine_reviewed_workspaces.py --scope development `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-ai-draft.v2/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-ai-draft.v1/workspace `
+  --workspace ml/lfg-encoder/dataset/private/onemanwho-validation-review-draft.v1/workspace `
+  --status
+```
+
+For an assembly, replace `--status` with `--output NEW_PRIVATE_DIRECTORY` after
+genuine review. The tool checks every selected workspace plan before opening
+source records or ledgers, and rejects any declared test source. Mixed-split
+workspaces must be separated before use. It writes a v2 development plan and
+marks its report and assembly manifest `holdout_assessment: not_performed`.
+Both train and validation still require current approvals; the ordinary sample,
+label-support, model and environment checks still apply at training. Reviewers
+and project/split assignments are assertions; this does not establish source
+rights or independence, or detect a mislabeled test source. Files and plans
+must be trusted against concurrent modification. Keep holdout files physically
+separate and access-controlled.
+The audit and training scripts are identity-bound inputs to these runs; changing
+their bytes changes the recorded code identities and can prevent resuming or
+evaluating an earlier run. Preserve the exact scripts for existing experiments.
+When copying the current scripts to a training host, include
+`assessment_targets.py` alongside the audit, evaluation and trainer modules;
+the validator's digest is recorded with the audited run.
+
+The reviewed trainer accepts the v2 development plan and records its scope.
+Use `--development-plan-only` to reject a legacy complete plan before the audit
+opens its sources. The supervised training launcher always supplies this flag.
+The existing complete-plan evaluator rejects it; the separate experimental
+[controlled classifier holdout workflow](REVIEWED-NATIVE-EVALUATION.md#controlled-classifier-holdout)
+can bind it to a separately committed test set after the candidate is frozen.
+The v1 complete-plan workflow remains available and still reads
+test data in its audit, so it does not enforce a blinded holdout.
+
+A read-only status check of the three local development workspaces returned 520
+train and 35 validation candidates, all pending and zero approved. No holdout
+workspace was supplied. Those counts are candidates, not usable reviewed
+training examples; the single-session validation source remains inadequate for
+broad qualification.
+
+### Triage before review
+
+`triage_review_workspaces.py` scans pending records in explicitly selected
+**training-only** workspaces for configurable markers. It checks all workspace
+plans before opening record sources, locks the workspaces while scanning, and
+creates a new private report without changing any record or decision. The
+[example configuration](../../ml/lfg-encoder/review-triage.example.json) flags
+specific tool-reply wrappers, ambient browser context, short acknowledgements
+and a work-duration marker; copy and adjust it for the actual sources. Regular
+expressions and local inputs must be trusted. The configured text-size limit
+flags records too large to scan rather than treating them as clean.
+
+```powershell
+python ml/lfg-encoder/triage_review_workspaces.py `
+  --workspace ml/lfg-encoder/dataset/private/codex-session-ai-draft.v2/workspace `
+  --workspace ml/lfg-encoder/dataset/private/additional-training-ai-draft.v1/workspace `
+  --config ml/lfg-encoder/review-triage.example.json --output NEW_PRIVATE_REPORT.json
+```
+
+The report gives record IDs, workspace indexes, annotation digests and reason
+IDs, without request text. Project names, IDs and hashes can still be sensitive;
+keep the report private. Its pending offsets describe the state at scan time and
+can move after decisions. In the review screen, use **Find** with the record ID
+in the corresponding workspace. Markers identify material to inspect, not
+automatic exclusions or proof of contamination; their absence does not prove a
+record is complete, safe, independent or correctly labeled. Reviewers can
+reject an unsuitable item, or use the existing redaction controls when a
+transformation preserves the request and is appropriate for the data-use terms.
+
+On this machine the example configuration flagged 83 of 520 pending training
+candidates: 52 ambient browser blocks, 26 tool-reply wrappers, four short
+acknowledgements and one work-duration marker. Counts are nonexclusive in
+general. The current private report for these two draft workspaces is
+`dataset/private/training-triage.v2.json`; the earlier v1 report refers to the
+original additional-training workspace.
+These 520 records remain unapproved. If all 83 flagged records were rejected,
+at most 437 candidates would remain before reviewing the others; some flagged
+records may instead be appropriately transformed. The existing 500-record
+sample threshold, label support and independent validation requirements still
+apply. This scan does not inspect the test workspace.
+
+### AI-drafted label workspace
+
+`draft_review_workspace.py` can create a separate pending-only review workspace
+from explicitly supplied label proposals. It accepts **training-only** source
+workspaces, requires every input decision to be pending, verifies each draft
+against its original annotation digest and the selected taxonomy and guide, and
+never approves a record. It preserves the input workspace and leaves records
+without proposals unlabeled. A selected record carries its AI-draft author,
+original annotation, guide and proposal digests, and a visible review note.
+Unchecked labels are still proposed negatives, not facts. A reviewer must
+independently check every label and negative, source, context, privacy and
+rights. AI suggestions may anchor a reviewer and are not independent review.
+
+The proposal JSON has `schema_version: lfg.ai-label-drafts.v1`, the exact
+`taxonomy_sha256` and `guide_sha256`, an `author` string, and `items`. Each item
+has `id`, its current `annotation_sha256`, a `labels` object with `intents`,
+`capabilities` and `risks` arrays, and a nonempty `note`. Omit an item when its
+labels are uncertain. Create the file privately and select it explicitly:
+
+```powershell
+python ml/lfg-encoder/draft_review_workspace.py `
+  --workspace PRIVATE_TRAIN_WORKSPACE --proposals PRIVATE_PROPOSALS.json `
+  --guide ml/lfg-encoder/label-guide.v1.json --output NEW_PRIVATE_DIRECTORY
+python ml/lfg-encoder/review_web.py --workspace NEW_PRIVATE_DIRECTORY/workspace `
+  --reviewer REVIEWER_ID --label-guide ml/lfg-encoder/label-guide.v1.json
+```
+
+The tool creates both a private source copy and a separate review workspace.
+Select the new workspace **instead of** the original for subsequent assembly;
+using both duplicates the same source records. If preparation is interrupted,
+inspect any partial output and choose a new directory. Neither Git ignore nor
+the local token encrypts these private files. An explicitly below-gate development
+run can still consume unreviewed data; ordinary reviewed training cannot.
+
+On this machine, six real LFG conversation requests were given assistant-drafted
+labels and explanatory caveats in `dataset/private/lfg-ai-label-proposals.v1.json`.
+Each original message matched its recorded session prefix; that check does not
+prove authorship, context, rights, privacy or label correctness. The resulting
+`dataset/private/codex-session-ai-draft.v2/workspace` contains all 226 original
+training candidates: six AI drafts, 220 still unlabeled, 226 pending and zero
+approved. The earlier `.v1` draft did not retain previous review notes; use
+`.v2`. A local read-only API check showed one suggestion and its AI warning
+without changing the ledger. These are not reviewed training examples.
+
+A second private proposal file, `dataset/private/additional-ai-label-proposals.v1.json`,
+adds 12 assistant-drafted labels across six declared projects and six recorded
+session families. The source-prefix and original-text check matched each of the
+12 in the resulting `dataset/private/additional-training-ai-draft.v1/workspace`;
+it does not establish authorship, rights, privacy, independence or label
+correctness. That workspace retains 294 pending records: 12 drafts and 282
+unlabeled, with zero verified or approved. Each draft includes a visible warning
+and a caveat for the reviewer. Use it instead of its original
+`additional-training-review-draft.v1/workspace`, never alongside it. The two
+draft workspaces together contain 18 AI drafts, not 18 human-reviewed examples.
+
+On 2026-10-31, eleven additional assistant-drafted suggestions were made from
+actual requests in the three live training workspaces. The source verification
+endpoint matched each selected record to its recorded session prefix and
+original text, both before preparation and in the resulting workspace. The
+suggestions remain unreviewed, include reviewer caveats, and do not establish
+authorship, rights, context or correctness. Other messages were left unlabeled
+when the task or implied negatives were unclear.
+
+The original review servers retained their locks and were not stopped. Private
+point-in-time copies were made after comparing the source files before and
+after the copy; a separate pending-only union of those copies contains 598
+training candidates, including 29 draft-labeled and 569 unlabeled records, with
+zero approvals and no normalized exact duplicates. It is at
+`dataset/private/combined-source-grounded-training-review-20261031-v1/workspace`.
+The private `priority-review-list.md` in its parent identifies the eleven new
+suggestions. A separate local review server was started for this union; its URL
+is in `dataset/private/combined-review-running-20261031-v1/review.stdout`.
+That URL grants review access and should remain private.
+
+Review the union **instead of** its component or original workspaces; decisions
+do not synchronize, and later work in either copy can make the other stale.
+The copies are optimistic snapshots, not a lock on the original sessions.
+Neither the count of drafts nor a source-text match makes a reviewed corpus or
+proves representative label support. Validation and test workspaces were not
+opened for this preparation.
+
+### Local browser review
+
+#### Optional project assessment targets
+
+The review server can also collect reviewer judgments for complexity, models
+and effort, and total agents. These are separate from the existing intent,
+capability and risk labels. Each may be explicitly unknown; a blank model
+selection means unknown, and an agent count of zero is a known value when the
+project profile permits it. An empty model list is not accepted as a substitute
+for unknown. These judgments are not measured model performance or proof of an
+optimal recommendation.
+
+Supply `--assessment-profile PATH` to a new review-server process. The
+[empty configuration template](../../ml/lfg-encoder/assessment-review-config.example.json)
+does not invent options. The review web configuration must set a positive
+`max_assessment_profile_bytes`; choose it for the size of the actual project
+profiles. Each project entry must use the exact project ID in
+the review plan and supply its own choices, for example:
+
+```json
+{
+  "schema_version": "lfg.assessment-review-config.v1",
+  "revision": "project-profile-revision",
+  "projects": [{
+    "project": "project-id",
+    "complexities": [{"id": "configured-bracket-id", "label": "Configured bracket"}],
+    "models": [{"id": "configured-binding-id", "label": "Configured binding",
+      "provider": "provider-id", "model": "model-id", "subscription_id": "subscription-id",
+      "availability": "available", "effort_levels": ["configured-effort"]}],
+    "agent_range": {"min": 1, "max": 4}
+  }]
+}
+```
+
+These IDs, bracket choices and limits are examples only: replace them with the
+project's actual configuration and evidence. `subscription_id` may be null;
+`agent_range` may be null if unknown. A model must be declared `available` in
+the project profile before it can be selected; `unknown` and `unavailable`
+choices are shown but disabled. This is a declaration, not a verified
+subscription entitlement. Do not put credentials in the profile.
+
+The server reads the configured file when displaying an item and accepting an
+approval, so an updated profile can be displayed without restarting. It rejects an approval if the profile changed
+since the record was displayed or during the review. Approval stores the
+project-specific profile snapshot, its digest, the source configuration hash and
+the selected or unknown values inside the annotation bound to the existing
+review ledger. The complete configuration file is not copied, so retain it if
+its original bytes need later verification. The embedded project snapshot and
+its values can expose subscription metadata and remain private with the corpus.
+Changes to a project's later profile do not retroactively change an approved
+historical annotation. Local files must remain trusted against concurrent
+changes; the hash checks are not an adversarial locking protocol.
+The project snapshot is currently repeated in each annotated record, and the
+reviewer rewrites the affected source file on approval. Large profiles or
+corpora can therefore increase storage and review latency; deduplicated profile
+storage and higher-volume review have not been implemented or benchmarked.
+An interrupted review that already wrote assessment targets must be resumed
+through a review server with a matching project profile; the interactive CLI
+does not yet edit these targets and will not silently approve them.
+
+The corpus audit counts known and unknown targets only for currently approved,
+verified records and rejects malformed or mismatched stored profiles. Effort
+coverage is per record: it is partial when only some selected models have an
+effort value. Approved
+exports retain the targets. The current trainer still learns **only** intent,
+capability and risk; its run manifest states those trained label groups. These
+additional fields are not yet consumed by a training head, model selector or
+quality evaluator. A suitable project profile is not automatically obtained from
+DevPulse or another app today. Existing running review servers keep their old
+Python code; use a new process with an explicitly supplied profile after safely
+handling any work in the existing session.
+
+The same workspace can be reviewed in a browser using the Python training
+tools. It is a local corpus-review interface, not an LLM configuration editor:
+
+```powershell
+python ml/lfg-encoder/review_web.py --workspace ml/lfg-encoder/dataset/private/real-request-review-workspace.v1 --reviewer REVIEWER_ID
+```
+
+Open the complete URL printed in the terminal. The server chooses a loopback
+port by default; `--port` selects one explicitly. Its configurable request,
+display and timeout limits come from `review-web-config.v1.json`, or an
+operator-selected `--config` file. It runs until Ctrl+C and holds the same
+workspace lock as the terminal tool. A session token in the URL authorizes
+access to the local workspace for that server session; do not share it. The
+page removes the token from the address bar after loading and uses no external
+resources. The server rejects non-loopback host headers, requests without the
+token, and cross-origin decisions. Responses are marked `no-store`.
+To open a particular pending record, append `&record=URL_ENCODED_RECORD_ID` to
+the printed URL's fragment. The page removes both the token and record ID from
+the address bar after reading them. This is a local bearer link: anyone who
+obtains it while the server is running can access the review workspace. The
+reviewer name is a local assertion, not authenticated identity.
+
+### Connect review progress to Inspector
+
+For a local developer UI, copy `review-web-config.v1.json` to a private
+configuration file and add `"developer_ui_origins": ["http://127.0.0.1:5174"]`,
+replacing the example with the **exact** loopback HTTP origin displayed in
+Inspector. Use that file with `--config`. Start the review server as above with
+the appropriate `--assessment-profile` when assessment targets are configured.
+Only one server can hold a workspace lock; stop an existing review session
+before starting another. In Inspector, paste the complete URL printed by the
+review server. The panel displays real pending, approved, and rejected counts
+and opens the full review interface for source verification, redaction, target
+selection and explicit human decisions. Refresh counts after reviewing.
+
+This opt-in permits that exact local UI origin to read only authenticated
+`/api/status`; review items and decisions remain restricted to the review
+server's own origin. The bearer URL is held in browser memory until disconnect
+or page close. Only allow an origin whose application and users you trust: the
+token grants access to the full private workspace. Hosted/non-loopback UIs are
+not supported by this connection. Approval counts are not model training,
+quality metrics, or a guarantee that assessment targets are present. A separate
+training run and held-out evaluation remain necessary.
+
+The review workflow records provenance and leaves unknown targets unknown.
+Select varied real projects and difficult cases for review rather than treating
+volume or repeated near-duplicates as proof of coverage. Research on
+[diversity-aware data selection](https://proceedings.iclr.cc/paper_files/paper/2025/file/faa6144674bce872365874c576b4f56f-Paper-Conference.pdf)
+motivates examining selection diversity; it does not establish that this UI or
+any particular selection method improves LFG. Keep independent project or
+conversation groups for evaluation and measure the trained model separately.
+
+The browser displays one pending request, source and proposed labels at a time.
+It displays the application rule and boundary for each label from the
+configurable `ml/lfg-encoder/label-guide.v1.json`, a structured rendering of
+the current draft [labeling guide](../../ml/lfg-encoder/LABELING.md). Use
+`--label-guide OTHER_GUIDE.json` for a different taxonomy or reviewed guide.
+The guide must define every workspace taxonomy label and no others; an invalid
+or mismatched guide prevents the browser server from starting. A browser
+approval records the guide's SHA-256 in the reviewed record, which is included
+in its existing approval digest. If the configured guide or taxonomy changes
+after display, the server rejects the approval and review must be restarted.
+Keep the exact guide file alongside the review evidence: exports retain its hash,
+not the file itself. The terminal reviewer and programmatic servers started
+without a guide can still produce legacy approvals without a guide hash; the
+corpus audit does not currently require one. A digest identifies the supplied
+guide, not proof that a person understood or applied it. The guide is draft and
+the taxonomy still lacks complexity, language, model class and agent count.
+For a `codex-session-user-text` record, **Check original source** rereads the
+bounded original session prefix, verifies its recorded hash and selected line,
+and compares the original message with the review copy. The source check is
+on demand; it does not save an approval or establish authorship, context,
+permission, privacy or label correctness. Later content appended to the session
+does not invalidate the checked prefix. A changed or unavailable prefix, a
+different review copy, unsupported source type, or an interrupted review write
+produces an error. For these Codex sources, **Show prior user messages** can
+also display a bounded suffix of earlier single-text messages explicitly marked
+`user.text` after the same source-prefix verification. This is opt-in and local;
+the context can contain private information. It excludes assistant replies,
+tool output, later messages and other message types, so it is not a complete
+conversation. The response reports when the configured message or byte limit
+omitted earlier user text. Context is displayed only and is not added to the
+record, persisted by the review tool or treated as a label. Review the request
+as presented: if an isolated follow-up cannot be labeled without missing context,
+skip or reject it rather than silently treating the surrounding text as input.
+The optional `source_context` configuration controls maximum messages and UTF-8
+text bytes; omitting it disables the context endpoint. The tool uses the same
+loopback authentication and `no-store` response policy as the review API.
+For Codex session records, **Show later user messages** separately checks the
+same original prefix and displays a bounded sequence of subsequent `user.text`
+messages from the current session file. This can surface a later correction or
+withdrawal. The observed prefix digest and last scanned source line identify
+the bytes inspected during that request; only the original record's prefix is
+bound to the inventory. Later messages may have been appended or changed since
+inventory creation, omit assistant replies, and do not establish intent,
+authorship or complete context. The optional `source_following` configuration
+sets message, UTF-8 text-byte and scanned-line limits; omitting it disables this
+endpoint. The existing session and line byte limits also apply. The view is
+on-demand, may reveal private data, and does not change or label any record.
+Following context is not implemented for Claude or Git checkpoint sources.
+Existing review-server processes must be restarted to use it; do not interrupt
+an active reviewer.
+
+An isolated read-only check against the live training review workspace found a
+real LFG candidate whose first subsequent user message says it was the wrong
+chat. The original prefix matched and the ledger remained byte-identical. This
+identifies a review issue, not an automatic rejection, and demonstrates why a
+prefix match alone is insufficient to establish that a request remains valid.
+The pending record ID, annotation digest and inspected-prefix digest are in the
+private advisory `dataset/private/combined-source-grounded-training-review-20261031-v1/following-correction-triage-20261101-v1.json`;
+the advisory must be revalidated against the current workspace and source.
+
+For a training-only workspace, `following_review_triage.py` can scan a
+configurable set of literal markers in bounded later user messages. It
+groups candidates by session, verifies each selected original prefix and text
+while streaming, and writes only IDs, digests, marker IDs and source line
+metadata to a new private report. For example:
+
+```powershell
+python ml/lfg-encoder/following_review_triage.py `
+  --workspace PRIVATE_TRAIN_WORKSPACE `
+  --config ml/lfg-encoder/following-review-triage.example.json `
+  --output NEW_PRIVATE_REPORT.json
+```
+
+The example contains the literal `wrong chat`; copy and edit the configuration
+for other review markers and limits. A marker is not a decision: a later message
+may refer to a different request, and a missing marker does not establish clean
+or complete data. The scanner limits messages, bytes and lines. It follows
+Claude descendants only when `max_ancestry_records` is configured: it requires
+same-session parent links and stops at a branch or conflicting identity instead
+of selecting a path. It uses only human-marked, single-text messages in the
+selected project root. Parent links are source metadata claims, not proof of
+identity or complete context. Other source types remain unsupported; source
+failures are counted separately from checked items. It checks the workspace before and after without acquiring its review
+lock, so the result is an optimistic snapshot and each finding must be
+revalidated before review. If a session changes while scanning, it rechecks the
+bytes already read and treats any observed end of file as incomplete; this is
+not a defense against an adversarial local filesystem. The current source and
+report may contain sensitive metadata. No validation or test source is opened,
+and the command makes no labels or decisions.
+
+On 2026-11-01, two consecutive scans of the local 598-pending training workspace
+with the example marker produced identical private report hashes
+`a63a4232c759c7e7c069f82e03e580f550a2a5b4588db9c272ae12ab5f3758c6`.
+All 520 Codex candidates were checked within the configured windows; 78 Claude
+candidates were unsupported. The message limit ended 461 windows, the line
+limit ended 31, and 28 reached the observed end of file. Three candidates were
+flagged by the same later correction: the immediately preceding wrong-chat
+request and two earlier requests. The latter two show why markers must not
+automatically reject records. The retained private reports are
+`following-correction-scan-20261101-v7.json` and `-v8.json` in the workspace's
+parent directory. These scans do not establish clean data or independent labels.
+
+A later scan added the bounded Claude lineage check and used a private copy of
+the configuration with a 768 MiB session limit, since one actual source file
+exceeded the example's limit. Two consecutive training-only runs produced the
+same report digest
+`877b01f82dfd7dda4d9abe7d2e2329a26c05ccc99a9966c9a9d58fe7ae4d72bd`.
+All 520 Codex and 78 Claude original prefixes were checked. Among Claude
+candidates, 64 stopped at an ambiguous branch, one at an ambiguous identity,
+eight had no observed child and five reached the message limit. No additional
+Claude marker hits were found on the paths examined. These are incomplete paths,
+not clean-data verdicts. The private configuration and reports are in the same
+parent directory under `following-triage-claude-768m-20261101-v1.json` and
+`following-triage-claude-scan-20261101-v1.json` / `-v2.json`. Reviewers still
+need to inspect original sources and resolve the branches.
+The `source_verification` object in the web configuration sets the maximum
+session-prefix and line sizes. Configurations without that optional object
+disable this check; it is independent of whether a reviewer can decide a
+record. Local source paths and hashes remain private metadata.
+
+For Git checkpoint records, source verification is separately opt-in. Copy
+`review-web-config.v1.json` to a private configuration file and add a
+`checkpoint_verification` object, using the absolute path of the local checkout
+and an operator-selected history size limit, for example:
+
+```json
+"checkpoint_verification": {
+  "repo": "D:/path/to/authorized/checkout",
+  "max_history_bytes": 104857600
+}
+```
+
+Pass that complete configuration with `--config PRIVATE_CONFIG.json` when
+starting the review server. **Check original source** re-reads the pinned Git
+history from the configured checkout, checks its recorded stream digest, and
+re-extracts the selected commit's prompt, source fields, session family and
+text. It checks the record again after reading. No source repository is chosen
+from the review record, and the returned result does not contain the prompt.
+This uses the current extractor to recheck the original history; the source's
+stored extractor hash identifies the earlier preparation, not the running code.
+The check does not establish authorship, rights, privacy, context, or label
+correctness and does not approve a record. Git must be installed, the checkout
+must contain the pinned history, and the configured byte limit must be large
+enough. Prior-message context is not provided for Git checkpoint records.
+Approving requires the attestation checkbox and typing `APPROVE`; rejection
+requires typing `REJECT`. The underlying workspace checks the displayed digest,
+taxonomy, project and split before saving. Skipped items remain pending.
+To remove sensitive text, select it in the request, enter a replacement and
+choose **Replace selection**. Repeat as needed and review the resulting request
+and its labels before approving. Replacements stay in browser memory until
+approval. The saved record binds sequential character ranges and replacement
+text to hashes of the request before and after the changes; its original
+source provenance stays attached. A redacted request that duplicates another
+workspace record is rejected. The tool does not decide whether redactions are
+complete or preserve meaning. Source files and draft copies still contain the
+original text, so approving a redaction does not erase private data. The
+terminal review path does not offer redaction.
+
+The optional `redaction_suggestions` rules in the selected web configuration
+offer **preview** buttons for exact, unique prefix envelopes. The supplied rule
+matches the observed browser-context envelope followed by its request heading;
+it will not propose a change when non-whitespace precedes the envelope, markers
+are repeated, the configured trailing text differs, or the remaining request is
+empty. Copy the configuration to adjust literal markers or line endings for
+other sources. A preview changes only browser memory and can be reset. If a
+reviewer later approves, the existing transformation record stores the exact
+character range and replacement; it does not record which suggestion rule was
+used. Inspect the original, remaining text, surrounding context and every label:
+a matched wrapper does not establish that the remaining request is complete or
+safe to train on.
+
+On this machine, the example rule offered a preview for 51 of the 52 pending
+training records with browser-context markers; one had non-whitespace text
+before the envelope. Eight previews left at most 20 non-whitespace-trimmed
+characters. A read-only local API check displayed one preview and left its
+ledger unchanged. No real record was transformed, approved or counted as clean.
+Decisions, export and subsequent training use the same rules as the terminal
+workflow above. The interface does not verify source authorship, user identity,
+data rights or secrets, and it does not create approvals on its own. Local
+processes or browser extensions with access to the session URL or workspace
+may access private data; this is not a hosted authentication boundary.
+
+`smoke_reviewed_gate.py` tests the gate through an actual short model-training
+call using invented fixture records and simulated approvals. It creates a new
+output directory, requires an explicitly chosen local model snapshot, immutable
+revision and bound environment inputs, and disables Hugging Face network access. It deliberately lowers a
+copy of the policy's sample threshold for its two training fixtures; its
+output must never be used as a release candidate or as evidence of human
+review. For example, with a compatible local model snapshot and environment:
+
+```powershell
+.\.venv\Scripts\python.exe ml/lfg-encoder/smoke_reviewed_gate.py --base-model LOCAL_MODEL_DIR --model-revision COMMIT --model-manifest MODEL_MANIFEST --environment-lock LOCK_FILE --wheelhouse WHEELHOUSE --environment-allowed-extra pip --output target/review-gate-smoke --epochs 1 --max-length 32 --batch-size 1 --checkpoint-steps 1
 ```
 
 The requested output directory must not exist. A model that already has a
@@ -86,6 +655,12 @@ different-sized classification head may require the explicit
 `--allow-mismatched-sizes` option; inspect all model-loading warnings. The
 simulated approvals and fixture policy are stored with the test artifact so
 they cannot be confused with the actual project review ledger.
+The current fixture deliberately assigns artificial labels to exercise both
+positive and negative support for all taxonomy labels in its two training and
+two validation records; those labels make no semantic claims.
+On 2026-10-31, the fixture-only audited path also completed with the new
+wheelhouse and local-model input checks. Its simulated approvals and output
+remain test fixtures, not evidence of a reviewed corpus.
 
 On 2026-10-30, this smoke command completed offline on the Windows development
 machine using the cached tiny random BERT revision recorded in the
@@ -100,6 +675,248 @@ training or validation. It explicitly replaced the tiny test model's mismatched
 classification head. This proves the split wiring, not model quality.
 
 ## Current local inventory
+
+### Local Codex project-session messages
+
+The local session history is another possible source of original requests. The
+`inventory_codex_sessions.py` tool selects session files only when their
+`session_meta` working directory falls within an explicitly supplied project
+root. Within those files it inventories only single-text user messages whose
+record metadata explicitly identifies the content kind as `user.text`. It
+does not copy message text, assign labels, approve records, or choose splits. It
+skips an entire selected file if its JSON is malformed, the configured byte
+limits are exceeded, or the file changes while being scanned. The file is read
+in bounded lines, including for large sessions. A working directory and the
+`user.text` marker are source claims, not independent proof of authorship,
+project ownership, data rights, safety, or representativeness. Messages may be
+follow-ups, duplicates, or include private data and secrets.
+
+The inventory records the original session file's full SHA-256 at scan time,
+plus the SHA-256 and byte length of the source prefix through each selected
+message and the individual line and text hashes. The prefix lets an inspector
+verify an earlier message after an ordinary append; it does not assert that the
+file's later content is unchanged. A rewritten prefix or changed line fails
+inspection. The inspector checks the marker and hashes before displaying the
+text, but does not verify labels, attribution, context, or data rights.
+
+For example, from the repository root, choose the session directory, explicit
+project roots, and a new private output file (the CLI accepts multiple
+`--project-root` arguments):
+
+```powershell
+python ml/lfg-encoder/inventory_codex_sessions.py --sessions-root SESSION_DIR --project-root project=PROJECT_DIR --output PRIVATE_NEW_INVENTORY.jsonl
+python ml/lfg-encoder/inspect_codex_inventory.py --inventory PRIVATE_NEW_INVENTORY.jsonl --record 1
+python ml/lfg-encoder/inspect_codex_inventory.py --inventory PRIVATE_NEW_INVENTORY.jsonl --record 1 --show-text
+```
+
+Paths must be absolute for project roots; project roots cannot overlap. Limits
+are configurable with `--max-session-bytes` and `--max-line-bytes`. Output is
+created exclusively. The last command intentionally prints private text: use it
+only in a private terminal. Paths, line numbers and hashes in the inventory are
+also sensitive. Git ignore is not encryption or access control.
+Add `--exact-cwd` to select only sessions whose recorded working directory is
+exactly one of the supplied roots; without it, descendant directories match too.
+The recorded directory and message marker are source metadata, not proof of
+authorship or authorization.
+
+To prepare a separate review workspace, provide an assignments JSON file that
+explicitly chooses a group and provisional split for every included project:
+
+```json
+{
+  "schema_version": "lfg.codex-review-assignments.v1",
+  "projects": {
+    "project-name": {"project_group": "related-projects", "split": "train"}
+  }
+}
+```
+
+Then select a new private output directory:
+
+```powershell
+python ml/lfg-encoder/prepare_codex_review.py --inventory PRIVATE_NEW_INVENTORY.jsonl --assignments ASSIGNMENTS.json --taxonomy ml/lfg-encoder/evaluation-taxonomy.v1.json --output PRIVATE_NEW_DIRECTORY
+python ml/lfg-encoder/review_web.py --workspace PRIVATE_NEW_DIRECTORY/workspace --reviewer REVIEWER_ID
+```
+
+Preparation verifies the selected source prefixes in batches, excludes
+normalized exact-text duplicates within a split, and refuses duplicate text or
+a declared project group across splits. It conservatively groups messages from
+the same session into a family; relationships across sessions still require
+human investigation. Supply `--reference-plan PLAN` once per existing plan to
+exclude normalized text already present there and reject project, group or
+session assignments that cross a reference split. The reference plans and the
+new workspace must use the same taxonomy. Only supplied reference material is
+checked; this cannot detect paraphrases, related sessions, undisclosed prior
+exposure or an incorrectly declared group. A private preparation manifest binds
+the inventory, assignments, reference audits, source verifier, preparation code,
+limits and generated workspace file digests. The output includes raw, potentially sensitive text and
+source paths in both the draft files and the review workspace; keep the whole
+directory private. If output creation is interrupted, inspect the partial
+directory and choose a new path. Missing labels are represented as
+`labels_pending`, not negative examples. The normal dataset loader rejects
+these records even in development mode. Approval requires a reviewer to select
+at least one intent and attest to all labels, source context and privacy. An
+unresolved message should be skipped or rejected. The browser review tool can
+replace selected sensitive spans before approval; the reviewer must verify the
+result, its labels, and whether the redaction is sufficient. Nothing is approved
+by the preparation command.
+
+On 2026-10-31 a scan scoped to the local LFG, RRFlow and DevPulse directories
+created `dataset/private/codex-project-session-inventory.v4.jsonl`. It scanned
+26 selected session files and excluded 46 outside the configured roots. It
+identified 271 candidate messages: 198 RRFlow, 43 DevPulse and 30 LFG, with 44
+exact text repetitions across the total. Per project, the corresponding unique
+exact-text counts are 192, 10 and 28; the RRFlow candidates came from two
+sessions, DevPulse from fourteen and LFG from one. These counts do not establish
+independence: some messages are short follow-ups, conversations can overlap, and
+LFG and RRFlow work may be related. None of these inventory entries has been
+approved, labeled, sanitized or assigned a split. One entry from each project
+passed prefix verification locally. Some messages may overlap the 38 pending
+records or earlier experiments; reconcile them before any training or holdout
+assignment. Makers Impulse remains a candidate external-project holdout and
+was not included in this scan.
+
+The private `dataset/private/codex-session-review-draft.v1/workspace` was then
+created from that inventory using one provisional training group for all three
+related projects. It contains 226 pending unlabeled records: 190 RRFlow, 27
+LFG and 9 DevPulse; 45 normalized duplicates were excluded. The audit reports
+zero approvals and verified records, zero validation or test examples, and no
+promotion eligibility. Source prefix verification proves the copied text came
+from the inventoried records at preparation time; it does not prove the text is
+complete, safe, independent, or attributable to the project owner. Some of this
+material overlaps earlier exploratory use. It is review material, not evidence
+of a trained or qualified model. A loopback server smoke check displayed the
+unlabeled state for one record from each project without recording a decision;
+the training loader rejected the pending-label file.
+
+An additional metadata-only session inventory across selected local projects
+found 170 candidate messages in 11 sessions. OneManWho had 36 messages from
+one session; Shippin/Vaultix directories contain related product histories and
+must not be assumed independent merely because their paths differ. Using the
+current Codex training draft, Makers test draft and earlier LFG/DevPulse
+development plan as references, one normalized duplicate was excluded and a
+private OneManWho validation candidate workspace was created at
+`dataset/private/onemanwho-validation-review-draft.v1/workspace`. Its 35
+records have no labels or approvals. Two preparations with the same inputs on
+this machine yielded identical manifests and workspace files.
+
+A temporary combined audit of the three separate workspaces found 226 train,
+35 validation and 785 test records, no normalized exact-text overlap or
+within-split duplicates, and zero approvals. These assignments remain
+provisional. In particular, the entire validation candidate comes from one
+session and cannot demonstrate broad or statistically reliable validation;
+shared context, source rights, sensitive information, label support and true
+project independence still need review. The combined audit does not create a
+training plan or qualify a model. The metadata-only inventory is stored at
+`dataset/private/additional-project-session-inventory.v1.jsonl` and its explicit
+candidate assignment at `dataset/private/onemanwho-validation-assignments.v1.json`.
+
+Another exact-directory inventory across selected authorized local project
+roots found 371 candidate messages in 29 sessions. The preparation step checked
+them against the initial training draft, OneManWho validation candidate, Makers
+test candidate and earlier development plan: 34 records matched reference text
+and 43 further normalized duplicates were excluded. The private workspace
+`dataset/private/additional-training-review-draft.v1/workspace` contains 294
+pending unlabeled messages. All selected projects were conservatively placed in
+the same `related-local-projects` training group as the initial draft. A second
+preparation with the same inputs produced byte-identical files on this machine.
+The corresponding private inventory and assignments are
+`dataset/private/additional-exact-training-inventory.v1.jsonl` and
+`dataset/private/additional-exact-training-assignments.v1.json`.
+
+Including this workspace, a temporary combined audit found 520 provisional
+train, 35 validation and 785 test records, no normalized exact-text duplicates
+within or across splits, and zero approvals. The default 500-example threshold
+is a minimum for reviewed training records, not a target quality guarantee: 520
+is only a candidate ceiling, and rejection, incomplete requests, related
+follow-ups, privacy redaction, source permission or label coverage can reduce
+the usable set. The OneManWho validation set still comes from one session. A
+separate diverse, reviewed validation set and genuine review remain necessary.
+
+### Claude session candidates
+
+`inventory_claude_sessions.py` accepts explicitly selected session directories
+and their exact project roots. It inventories only single-text, main-session
+records marked `turnOrigin: human`, excluding tool-result and meta records.
+This metadata is an assertion, not proof of authorship or permission. The
+inventory contains paths, hashes and line numbers but no prompt text; treat it
+as private. Configure both byte limits for the actual session sizes:
+
+```powershell
+python ml/lfg-encoder/inventory_claude_sessions.py `
+  --source PROJECT=ABSOLUTE_SESSION_DIRECTORY --project-root PROJECT=ABSOLUTE_PROJECT_ROOT `
+  --max-session-bytes MAX_BYTES --max-line-bytes MAX_LINE_BYTES --output NEW_PRIVATE_INVENTORY.jsonl
+```
+
+Use an assignment file with schema `lfg.claude-review-assignments.v1` and the
+same project/group/split structure as the Codex assignment file. The existing
+`prepare_codex_review.py` accepts that schema, verifies the source prefixes,
+deduplicates against explicitly supplied development reference plans, and
+creates an unlabeled pending-only workspace. Its source verification is also
+available in the browser review screen when the configured session and line
+limits cover the selected sources. On request, the screen can display a bounded
+suffix of prior human-marked, single-text messages reached through same-session
+parent links in that file and exact project root. It verifies the selected
+prefix first and fails if a required link is missing, ambiguous, cyclic or
+crosses sessions. The `max_ancestry_records` context setting bounds the number
+of source record identities retained; add it to older custom review configs.
+Source links are metadata assertions and can omit context. Tool results,
+assistant output and later messages are excluded. A prefix match does not establish full conversational
+context, privacy, rights, label correctness or project independence. A source
+may be appended after inventory; the selected prefix must remain unchanged.
+
+If a review server is already running older code, the read-only context command
+can inspect a pending record without stopping that server. Copy its record ID
+from the screen and use a private config with source-verification and context
+limits (including `max_ancestry_records` for Claude):
+
+```powershell
+python ml/lfg-encoder/inspect_review_context.py --workspace PRIVATE_WORKSPACE `
+  --record-id PENDING_RECORD_ID --config PRIVATE_REVIEW_CONFIG.json --show-context
+```
+
+`--show-context` prints private prior messages to the terminal; omit it for
+counts only. The command makes no decisions or writes, and rechecks the pending
+record after reading the source. It does not take over the running server's
+workspace lock: concurrent review may cause inspection to fail, in which case
+retry against the current record. Terminal output may be retained by the shell
+or other local tooling.
+
+On 2026-10-31, an explicitly scoped scan of the owner's LFG, RRFlow and
+DevPulse Claude session directories found 112 human-marked text records across
+three session files. All 112 selected prefixes verified. The 86 distinct exact
+texts included 80 absent by exact hash from three prior Codex inventories. A
+private training review draft at
+`dataset/private/claude-authorized-training-draft-20261031-v1/workspace`
+contains 78 pending, unlabeled candidates after excluding 24 overlaps with
+the supplied train/validation reference plans and 10 further normalized
+duplicates. None is approved or verified. The reserved test workspace was not
+opened or compared during preparation; final holdout separation remains a
+separate requirement. The candidates come from only three session files and do
+not establish independent validation coverage.
+
+A separate Claude session for the provisionally assigned OneManWho validation
+project yielded 12 pending, unlabeled candidates. Source prefixes verified, and
+the preparation found no normalized overlap with the four selected development
+reference plans. Its private workspace is
+`dataset/private/claude-onemanwho-validation-draft-20261031-v1/workspace`.
+Together with the earlier 35 candidates, this adds a second session within the
+same related-project group; it does not establish independent project diversity.
+No candidate was approved, and the reserved test workspace was not opened or
+compared during this preparation. A local review-server check verified one
+original source and its context endpoint without recording a decision.
+
+A later read-only check of the three live training review servers found 598
+pending candidates and zero approvals. Of the 598, 580 had no draft labels;
+18 had draft labels, all still pending review. The configured triage patterns
+flagged none of the 78 newer Claude candidates; this does not establish that
+they are clean, complete, independent or correctly labeled. The local private
+report is `dataset/private/claude-live-training-triage-20261031-v1.json` and
+contains IDs and annotation digests, not request text. The scan compared file
+hashes before and after but did not lock the active reviewer, so it is an
+optimistic snapshot; recheck each item before a decision. The existing 83
+marker hits among the earlier 520 candidates and the human-review, label
+support and independent-validation requirements remain relevant.
 
 An exploratory plan on this machine audited 25 constructed RRFlow examples,
 four DevPulse excerpts attributed to an operator, and five Makers Impulse
@@ -132,6 +949,60 @@ validation rows have the same provisional intent and capability labels, and
 none of the three splits has a positive `sensitive-data` label. These counts
 are not evidence of adequate variety, independence, or a blinded test.
 
+The later 11-message LFG / 12-excerpt DevPulse development run also fails the
+default label-support requirements: its training group has no positive
+`sensitive-data` examples, and its validation group contains only positive
+`build.software` and `filesystem.write` proposals. The labels are unverified,
+so running this count on them is a diagnostic, not reviewed support. See the
+[experiment](REAL-REQUEST-DEVELOPMENT-EXPERIMENT.md).
+
+### Additional attributed DevPulse excerpts
+
+On 2026-10-30, 16 quotations attributed to the operator were selected from
+11 DevPulse plan documents at commit `cb7baf0756cbff1ca7a4c18bef81ebdae1e0ee57`.
+One was wholly contained in an earlier draft excerpt and was excluded from the
+candidate review set. The 15 remaining private records preserve document paths,
+line spans, blob hashes, normalized quote text and text hashes. Their spans and
+hashes were checked against the pinned Git blobs. The project documents call
+the passages verbatim, but the original complete requests and authorship were
+not independently recovered. These may be fragments, follow-ups or overlapping
+ideas, not 15 independent examples. Exact-text checks do not detect all such
+relationships. None has been approved, independently sanitized or verified.
+
+The Git-ignored file is
+`dataset/private/devpulse-quoted-deduplicated.cb7baf07.v3.jsonl`, SHA-256
+`75b706fc397145691593b7eeb5e9faa6794b7151490eaaca6ea7f604c2e7510d`.
+The discarded-overlap source file and the local curation and verification
+scripts are also retained in the private directory for traceability. Draft
+labels and negatives are AI proposals: 14 are marked as software building and
+one as web research. That research excerpt does not establish that external
+web access is required; the proposed labels need human review. No record has
+a positive `sensitive-data` proposal.
+
+A separate local plan, `dataset/private/real-requests-review.plan.v1.json`,
+places these 15 and the 12 earlier DevPulse excerpts in a provisional training
+group and the 11 LFG conversation messages in a provisional validation group.
+It has no test source. Its pending queue contains 38 records and zero approvals;
+the audit found no normalized exact duplicates within the declared splits.
+These project assignments are a review aid, not proof of source independence.
+The LFG messages trained the earlier experimental model, so this validation
+group is not an untouched holdout for that model or a final evaluation set.
+The draft DevPulse training group has no `respond.general`, `verify.outcome`,
+`text.generate`, or `sensitive-data` positives, while the LFG validation group
+proposes the first three. Even after review, this plan cannot pass the training
+and coverage gates without more suitable data and an independent test source.
+
+For triage only, the existing rule baseline produced `build.software` on two of
+the 14 new excerpts with that proposed label, and `research.web` on the one
+with that proposed label. This is comparison with unreviewed guesses, not a
+verified accuracy measure. The earlier experimental LFG-trained model also
+emitted `build.software` on two of the 14, and did not emit `research.web` on
+the one research proposal; its output head does not include that label at all.
+This is not an independent test: the model's checkpoint was selected on other
+DevPulse excerpts, and the quoted requests may be related. Predictions and
+reports remain private.
+The candidate Makers Impulse holdout was not read for this new plan.
+
 ### Makers checkpoint inventory
 
 `inventory_checkpoint_prompts.py` scans a pinned local Git commit for Replit
@@ -163,6 +1034,61 @@ records, then have a human review authorized examples under the labeling guide.
 The four skipped messages need separate format inspection. A separate diverse,
 reviewed training corpus is still required.
 
+On 2026-10-31 `prepare_checkpoint_review.py` re-extracted the pinned primary
+Makers history and compared it with the saved inventory. It excluded the session
+containing the five previously inspected prompts (126 records), then excluded
+seven records matching the normalized text of either the current Codex review
+draft or the earlier LFG/DevPulse development plan and 23 further normalized
+duplicates. The resulting private review workspace is
+`dataset/private/makers-heldout-review-draft.v4/workspace`: 785 pending unlabeled
+records, zero approvals, provisionally assigned to test. The earlier `.v1`
+workspace was checked only against the Codex draft; `.v2` and `.v3` predate the
+preparation manifest. Use `.v4`. The counts are
+records, not independent tasks. A temporary combined audit with the 226-record
+Codex draft found no normalized exact overlap and no within-split duplicates;
+it contained no validation partition and did not qualify either set.
+Repeating the preparation with the same inputs in `.v5` produced a byte-identical
+manifest, plan, taxonomy, candidate records and pending ledger on this machine.
+This checks repeatability, not labeling or independence.
+
+The preparation tool takes one or more explicit reference plans. It excludes
+entire recorded sessions associated with an operator-provided list of previously
+inspected commits, their normalized text wherever repeated, normalized matches
+to all reference-plan records, and remaining normalized duplicates. It requires
+the candidate project and group to be absent from those plans and the taxonomy
+to match. The output is a new private, pending-only review workspace; it does
+not add the test data to the training plan, approve records, or assign labels.
+Its preparation manifest binds the source and review inputs, audit and code
+digests, workspace files, size limit, and aggregate exclusion counts; retain the
+original private inputs to reproduce or investigate it.
+The exclusions are only as complete as the supplied inspection list and reference
+plans. Shared context, paraphrases, related conversations, previous unseen
+exposure, source authorship and rights are not proven by these checks. This
+workspace is a candidate for a future holdout, not evidence of a blinded or
+independent test. Keep it out of model development and tuning; a separate
+validation group and actual human review are still required.
+
+For example, the local candidate was prepared with:
+
+```powershell
+python ml/lfg-encoder/prepare_checkpoint_review.py `
+  --repo 'D:\dev\dev-and-sort\Makers-Impulse\Makers-Impulse' `
+  --revision f92162507e421c2c9a4cb971329a35c0e095b5c0 `
+  --project Makers-Impulse --project-group makers-impulse `
+  --source-inventory ml/lfg-encoder/dataset/private/makers-checkpoint-inventory.f9216250.jsonl `
+  --exclusions ml/lfg-encoder/dataset/private/makers-impulse-review.v1.jsonl `
+  --reference-plan ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace/plan.json `
+  --reference-plan ml/lfg-encoder/dataset/private/real-requests-review.plan.v1.json `
+  --taxonomy ml/lfg-encoder/dataset/private/codex-session-review-draft.v1/workspace/taxonomy.json `
+  --output NEW_PRIVATE_DIRECTORY --max-history-bytes 104857600
+```
+
+The new directory must not exist. It and its workspace contain private original
+prompts; Git ignore is not encryption. The browser review command above accepts
+the workspace path. Configure checkpoint verification as described above to
+check these records against the pinned local Git history. Review their source
+commits and surrounding context separately before making any decision.
+
 A second local checkout, `D:/dev/dev-and-sort/makers (2)/makers`, at commit
 `ee9831d27407258865ff3676ed8f702e2770e6ff`, contains 19 strictly extracted
 checkpoint prompts in one recorded session, with one exact repetition. Its
@@ -182,3 +1108,54 @@ python ml/lfg-encoder/inventory_checkpoint_prompts.py --repo REPO_PATH --revisio
 Add `--output PRIVATE_NEW_FILE.jsonl` only when a private review copy is needed.
 The destination must not already exist. The scanner reports source and code
 hashes, but those hashes and session identifiers are also sensitive metadata.
+
+### Partial per-label review
+
+The local review server can opt into partial decisions by setting the configured
+`max_partial_review_bytes` limit in `review-web-config.v1.json`. When enabled,
+the reviewer can record a positive, negative, or unknown judgment for selected
+taxonomy labels and can separately accept or reject a draft proposal. A rejected
+proposal does not imply a negative label. Unset cells are not judgments.
+
+Partial decisions are stored in the workspace's private
+`partial-reviews.v1.jsonl` sidecar under the active review lock. Each event binds
+the source artifact, current annotation, text, taxonomy, guide, and proposal
+digests; it contains only digest/status/count context provenance, not source
+context text. The sidecar write is atomic and Windows ACLs are restricted to
+the current user (POSIX permissions are owner-only). Revision and retraction
+are new append-only events that bind the prior event ID and digest. A changed
+source or guide makes the prior decision stale and inactive; after reviewing
+the current source and guide, a reviewer can record a new revision or retract
+the prior decision. Concurrent or stale revision attempts are rejected. The UI
+shows saved judgments and requires explicit reconciliation of the recorded
+history before full approval; the full-review ledger records the exact partial
+event ID and digest plus the typed acknowledgment. The shared approval operation
+enforces this for browser and command-line/library callers, so an ordinary full
+approval cannot silently overwrite partial judgments. Context provenance is
+marked `response_prepared`: producing an HTTP response does not prove that a
+client received or displayed it. For the terminal reviewer, pass
+`review --max-partial-review-bytes LIMIT`; it prints the saved history and asks
+for the same exact reconciliation phrase before approving. An approval write
+stores a digest-only recovery marker in the source before updating the ledger;
+retry accepts it only when the pending ledger digest, prior reconciliation
+attestation and current source content match that marker. A changed interrupted
+source remains visible as stale history but cannot be silently approved. Older
+interrupted rows without this marker can be recovered only after reviewing the
+current contents and typing `REVIEW CURRENT INTERRUPTED RECORD`; the new marker
+records that explicit fresh review, while the exact contents of the older
+interrupted action remain unknown.
+
+Partial decisions do not alter source rows, `verified`, or the full-review
+ledger. They are not approved records and are not exported by the existing
+approved-record export. The legacy `train.py` complete-record loader remains
+unchanged and does not consume partial masks. The separate opt-in
+`masked_supervision.py` path can export current per-label judgments and
+owner-authorized draft positives, preserving unknown cells as null with zero
+loss weight; omitted draft labels remain unknown unless completeness is
+explicitly declared in its private configuration. See
+[`MASKED-SUPERVISION.md`](MASKED-SUPERVISION.md) for the export and future
+training contract. Reviewer identity, source rights, screening, and label
+accuracy remain claims; this workflow does not independently verify them. A
+redacted preview changes the text binding, so partial review is blocked until
+the original request is restored. Legacy full approval/rejection remains a
+separate workflow with its existing checkbox semantics.

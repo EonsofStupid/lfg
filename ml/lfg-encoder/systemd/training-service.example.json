@@ -1,0 +1,23 @@
+{
+  "schema_version": "lfg.reviewed-training-service.v1",
+  "python": "/ABSOLUTE/PATH/TO/VENV/bin/python",
+  "training_mode": "authorized",
+  "trainer_sha256": "REPLACE_WITH_TRAIN_PY_SHA256",
+  "recovery": "resume",
+  "resource_limits": {
+    "cpu_quota_percent": 0,
+    "memory_max_bytes": 0,
+    "tasks_max": 0
+  },
+  "trainer_arguments": [
+    "--dataset", "/ABSOLUTE/PATH/TO/REVIEWED_TRAIN.jsonl",
+    "--output", "/ABSOLUTE/PATH/TO/NEW_RUN_DIRECTORY",
+    "--base-model", "/ABSOLUTE/PATH/TO/MODEL_SNAPSHOT",
+    "--model-revision", "REPLACE_WITH_FULL_MODEL_COMMIT",
+    "--model-manifest", "/ABSOLUTE/PATH/TO/MODEL_MANIFEST.json",
+    "--environment-lock", "/ABSOLUTE/PATH/TO/WHEEL_LOCK.txt",
+    "--wheelhouse", "/ABSOLUTE/PATH/TO/WHEELHOUSE",
+    "--environment-allowed-extra", "pip",
+    "--device", "cuda"
+  ]
+}

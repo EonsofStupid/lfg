@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.owned-distillation-runtime.v1",
+  "device": "cpu",
+  "cuda_device_index": 0,
+  "cuda_memory_fraction": 0.01,
+  "deterministic_algorithms": true,
+  "allow_tf32": false,
+  "checkpoint_every": 100,
+  "max_checkpoint_bytes": 104857600,
+  "max_optimizer_bytes": 268435456,
+  "max_manifest_bytes": 1048576
+}

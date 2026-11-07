@@ -1,11 +1,21 @@
-use std::{env, io::Read, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeMap, env, io::Read, net::SocketAddr, path::PathBuf};
 
 use axum::Router;
 use clap::{Parser, Subcommand};
-use lfg_server::{AppState, router_with_ui};
+use lfg_server::AppState;
 use tokio::net::TcpListener;
 
 mod baseline_predict;
+mod dev_log;
+mod kernel_journal;
+mod kernel_predict;
+#[cfg(feature = "owned-byte-onnx")]
+mod owned_byte;
+use kernel_journal::Journal;
+#[cfg(feature = "onnx-shadow")]
+use lfg_server::{exemplar_suggest, onnx_embedding};
+#[cfg(feature = "onnx-shadow")]
+mod onnx_predict;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,8 +29,308 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Collect configured local project evidence and prepare authored boundary questions.
+    BoundaryProject {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Classify with the experimental deterministic LFG kernel.
+    Classify {
+        prompt: String,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Additional named input fields as NAME=VALUE.
+        #[arg(long = "field")]
+        fields: Vec<String>,
+    },
+    /// Stream real examples through one compiled kernel for offline analysis.
+    KernelPredict {
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        #[arg(long)]
+        max_examples: usize,
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        #[arg(long)]
+        journal_max_bytes: Option<u64>,
+        /// Explicitly retain input text in the local journal for later review.
+        #[arg(long)]
+        capture_text: bool,
+    },
+    /// Verify a local kernel journal and show aggregate counts.
+    KernelJournalStatus {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+    },
+    /// Display one observation and valid snapshot choices for review.
+    KernelJournalShow {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        observation: u64,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Display text from the journal or an explicitly selected, verified source.
+        #[arg(long)]
+        include_text: bool,
+        #[arg(long)]
+        source_jsonl: Option<PathBuf>,
+        #[arg(long)]
+        source_max_bytes: Option<u64>,
+    },
+    /// Match journal observation IDs and digests to an explicitly selected source file.
+    KernelJournalReconcile {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        source_jsonl: PathBuf,
+        #[arg(long)]
+        source_max_bytes: u64,
+    },
+    /// Create a private pending-only review queue for uncorrected choice nodes.
+    KernelJournalReviewQueue {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        source_jsonl: PathBuf,
+        #[arg(long)]
+        source_max_bytes: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        output_max_bytes: u64,
+        /// Explicitly acknowledge that the new queue contains plaintext requests.
+        #[arg(long)]
+        include_text: bool,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
+    /// Export corrected observations with available text as pending per-node review candidates.
+    KernelJournalExport {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        output_max_bytes: u64,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        #[arg(long)]
+        source_jsonl: Option<PathBuf>,
+        #[arg(long)]
+        source_max_bytes: Option<u64>,
+    },
+    /// Append an explicitly attested correction to a prior kernel observation.
+    KernelCorrect {
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        journal_max_bytes: u64,
+        #[arg(long)]
+        observation: u64,
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        choice: String,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long)]
+        attest: bool,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
     /// Read JSONL examples from stdin and emit metadata-only baseline predictions.
     BaselinePredict,
+    /// Run an unqualified owned next-byte model on local JSONL input.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteProbe {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        include_logits: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Run the embedded unqualified owned next-byte model on local JSONL input.
+    #[cfg(feature = "embedded-owned-byte")]
+    EmbeddedOwnedByteProbe {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        include_logits: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with an unqualified owned model from local JSONL input.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteGenerate {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        /// Pin the exact runtime config bytes for service-spawned workers.
+        #[arg(long)]
+        runtime_config_sha256: Option<String>,
+        /// Bound runtime config bytes when a digest pin is supplied.
+        #[arg(long)]
+        runtime_config_max_bytes: Option<u64>,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with verified cached prefill/decode ONNX graphs.
+    #[cfg(feature = "owned-byte-onnx")]
+    OwnedByteCachedGenerate {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        model_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        runtime_config_sha256: String,
+        #[arg(long)]
+        runtime_config_max_bytes: u64,
+        #[arg(long)]
+        max_total_graph_bytes: u64,
+        #[arg(long)]
+        max_cache_state_bytes_per_request: u64,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with embedded cached prefill/decode graphs.
+    #[cfg(feature = "embedded-owned-cached-byte")]
+    EmbeddedOwnedByteCachedGenerate {
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        model_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        runtime_config_sha256: String,
+        #[arg(long)]
+        runtime_config_max_bytes: u64,
+        #[arg(long)]
+        max_cache_state_bytes_per_request: u64,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Generate bounded bytes with the embedded unqualified owned model.
+    #[cfg(feature = "embedded-owned-byte")]
+    EmbeddedOwnedByteGenerate {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        max_new_bytes: usize,
+        #[arg(long)]
+        stop: Option<String>,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Probe an unpromoted frozen node encoder offline.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxNodeEmbedding {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        /// Return sensitive derived vectors for a local parity check.
+        #[arg(long)]
+        include_embedding: bool,
+    },
+    /// Produce unpromoted exemplar suggestions only for LFG kernel escalations.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxNodeSuggest {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        #[arg(long)]
+        exemplar_pack: PathBuf,
+        #[arg(long)]
+        pack_sha256: String,
+        #[arg(long)]
+        exemplar_config: PathBuf,
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        /// Emit node-validation prediction records instead of detailed results.
+        #[arg(long)]
+        prediction_only: bool,
+        /// Explicitly enable the unqualified experimental path.
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Run the explicitly embedded, unpromoted node suggestion artifact.
+    #[cfg(feature = "embedded-node")]
+    EmbeddedNodeSuggest {
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        #[arg(long)]
+        exemplar_config: Option<PathBuf>,
+        #[arg(long)]
+        prediction_only: bool,
+        #[arg(long)]
+        experimental: bool,
+    },
+    /// Run an unpromoted ONNX artifact for offline comparison only.
+    #[cfg(feature = "onnx-shadow")]
+    OnnxPredict {
+        #[arg(long)]
+        artifact: PathBuf,
+        #[arg(long)]
+        manifest_sha256: String,
+        #[arg(long)]
+        runtime_config: PathBuf,
+        /// Include uncalibrated per-label sigmoid scores for offline evaluation.
+        #[arg(long)]
+        include_scores: bool,
+    },
+    /// Run the binary's pinned, unpromoted embedded ONNX artifact for offline comparison.
+    #[cfg(feature = "embedded-onnx")]
+    EmbeddedOnnxPredict {
+        /// Override the bundled runtime limits with a local configuration file.
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        /// Include uncalibrated per-label sigmoid scores for offline evaluation.
+        #[arg(long)]
+        include_scores: bool,
+    },
     LfgBench {
         #[arg(long)]
         iterations: Option<usize>,
@@ -31,19 +341,408 @@ enum Command {
         #[arg(long)]
         bind: Option<SocketAddr>,
     },
+    /// Record bounded, prompt-free developer statistics from a local server.
+    DevLog {
+        /// Loopback address of the LFG server, for example 127.0.0.1:4317.
+        #[arg(long)]
+        server: SocketAddr,
+        /// New file to create; existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        interval_ms: u64,
+        #[arg(long)]
+        timeout_ms: u64,
+        #[arg(long)]
+        max_response_bytes: usize,
+        #[arg(long)]
+        max_bytes: u64,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::BoundaryProject { root, config } => {
+            let text = std::fs::read_to_string(config)?;
+            println!("{}", lfg_server::attune_local_project(&root, &text)?);
+        }
+        Command::Classify {
+            prompt,
+            snapshot,
+            fields,
+        } => classify(prompt, snapshot, fields)?,
+        Command::KernelPredict {
+            snapshot,
+            max_examples,
+            journal,
+            journal_max_bytes,
+            capture_text,
+        } => kernel_predict::run(
+            snapshot,
+            max_examples,
+            journal,
+            journal_max_bytes,
+            capture_text,
+        )?,
+        Command::KernelJournalStatus {
+            journal,
+            journal_max_bytes,
+        } => {
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            println!("{}", store.status());
+        }
+        Command::KernelJournalShow {
+            journal,
+            journal_max_bytes,
+            observation,
+            snapshot,
+            include_text,
+            source_jsonl,
+            source_max_bytes,
+        } => {
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = load_source(source_jsonl, source_max_bytes)?;
+            println!(
+                "{}",
+                store.show(&engine, observation, include_text, source.as_ref())?
+            );
+        }
+        Command::KernelJournalReconcile {
+            journal,
+            journal_max_bytes,
+            source_jsonl,
+            source_max_bytes,
+        } => {
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = kernel_journal::SourceIndex::read(&source_jsonl, source_max_bytes)?;
+            println!("{}", store.reconcile(&source)?);
+        }
+        Command::KernelJournalReviewQueue {
+            journal,
+            journal_max_bytes,
+            source_jsonl,
+            source_max_bytes,
+            output,
+            output_max_bytes,
+            include_text,
+            snapshot,
+        } => {
+            if !include_text {
+                return Err(
+                    "review queue contains plaintext; explicit --include-text is required".into(),
+                );
+            }
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = kernel_journal::SourceIndex::read(&source_jsonl, source_max_bytes)?;
+            println!(
+                "{}",
+                store.review_queue(&engine, &source, &output, output_max_bytes)?
+            );
+        }
+        Command::KernelJournalExport {
+            journal,
+            journal_max_bytes,
+            output,
+            output_max_bytes,
+            snapshot,
+            source_jsonl,
+            source_max_bytes,
+        } => {
+            let engine = load_kernel(snapshot)?;
+            let store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let source = load_source(source_jsonl, source_max_bytes)?;
+            println!(
+                "{}",
+                store.export_candidates(&engine, &output, output_max_bytes, source.as_ref())?
+            );
+        }
+        Command::KernelCorrect {
+            journal,
+            journal_max_bytes,
+            observation,
+            node,
+            choice,
+            reviewer,
+            attest,
+            snapshot,
+        } => {
+            if !attest {
+                return Err("correction requires explicit --attest".into());
+            }
+            let engine = load_kernel(snapshot)?;
+            let mut store = kernel_journal::JsonlJournal::open(&journal, journal_max_bytes, false)?;
+            let sequence = store.correct(&engine, observation, &node, &choice, &reviewer)?;
+            println!(
+                "{}",
+                serde_json::json!({"correctionSequence":sequence,"observationSequence":observation})
+            );
+        }
         Command::BaselinePredict => baseline_predict::run()?,
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteProbe {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            include_logits,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte probe requires --experimental".into());
+            }
+            owned_byte::directory(&artifact, &manifest_sha256, &runtime_config, include_logits)?;
+        }
+        #[cfg(feature = "embedded-owned-byte")]
+        Command::EmbeddedOwnedByteProbe {
+            runtime_config,
+            include_logits,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte probe requires --experimental".into());
+            }
+            owned_byte::embedded(runtime_config.as_deref(), include_logits)?;
+        }
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteGenerate {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_directory(
+                &artifact,
+                &manifest_sha256,
+                &runtime_config,
+                max_new_bytes,
+                stop.as_deref(),
+                runtime_config_sha256.as_deref(),
+                runtime_config_max_bytes,
+            )?;
+        }
+        #[cfg(feature = "owned-byte-onnx")]
+        Command::OwnedByteCachedGenerate {
+            artifact,
+            manifest_sha256,
+            model_sha256,
+            runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
+            max_total_graph_bytes,
+            max_cache_state_bytes_per_request,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("cached owned byte generation requires --experimental".into());
+            }
+            lfg_server::owned_cached::generate_directory(
+                &artifact,
+                &manifest_sha256,
+                &model_sha256,
+                &runtime_config,
+                &runtime_config_sha256,
+                runtime_config_max_bytes,
+                max_total_graph_bytes,
+                max_cache_state_bytes_per_request,
+                max_new_bytes,
+                stop.as_deref(),
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(feature = "embedded-owned-cached-byte")]
+        Command::EmbeddedOwnedByteCachedGenerate {
+            manifest_sha256,
+            model_sha256,
+            runtime_config,
+            runtime_config_sha256,
+            runtime_config_max_bytes,
+            max_cache_state_bytes_per_request,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("embedded cached generation requires --experimental".into());
+            }
+            lfg_server::owned_cached::generate_embedded(
+                &manifest_sha256,
+                &model_sha256,
+                &runtime_config,
+                &runtime_config_sha256,
+                runtime_config_max_bytes,
+                max_cache_state_bytes_per_request,
+                max_new_bytes,
+                stop.as_deref(),
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(feature = "embedded-owned-byte")]
+        Command::EmbeddedOwnedByteGenerate {
+            runtime_config,
+            max_new_bytes,
+            stop,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("owned byte generation requires --experimental".into());
+            }
+            owned_byte::generate_embedded(
+                runtime_config.as_deref(),
+                max_new_bytes,
+                stop.as_deref(),
+            )?;
+        }
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxNodeEmbedding {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            include_embedding,
+        } => onnx_embedding::run(
+            &artifact,
+            &manifest_sha256,
+            &runtime_config,
+            include_embedding,
+        )?,
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxNodeSuggest {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            exemplar_pack,
+            pack_sha256,
+            exemplar_config,
+            snapshot,
+            prediction_only,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("node suggestions require explicit --experimental".into());
+            }
+            let engine = load_kernel(snapshot)?;
+            exemplar_suggest::run(
+                exemplar_suggest::Options {
+                    artifact: &artifact,
+                    manifest_sha256: &manifest_sha256,
+                    runtime_config: &runtime_config,
+                    exemplar_pack: &exemplar_pack,
+                    pack_sha256: &pack_sha256,
+                    exemplar_config: &exemplar_config,
+                },
+                &engine,
+                prediction_only,
+            )?;
+        }
+        #[cfg(feature = "embedded-node")]
+        Command::EmbeddedNodeSuggest {
+            runtime_config,
+            exemplar_config,
+            prediction_only,
+            experimental,
+        } => {
+            if !experimental {
+                return Err("node suggestions require explicit --experimental".into());
+            }
+            exemplar_suggest::run_embedded(
+                runtime_config.as_deref(),
+                exemplar_config.as_deref(),
+                prediction_only,
+            )?;
+        }
+        #[cfg(feature = "onnx-shadow")]
+        Command::OnnxPredict {
+            artifact,
+            manifest_sha256,
+            runtime_config,
+            include_scores,
+        } => onnx_predict::run(&artifact, &manifest_sha256, &runtime_config, include_scores)?,
+        #[cfg(feature = "embedded-onnx")]
+        Command::EmbeddedOnnxPredict {
+            runtime_config,
+            include_scores,
+        } => onnx_predict::run_embedded(runtime_config.as_deref(), include_scores)?,
         Command::LfgBench {
             iterations,
             prompt_file,
         } => lfg_bench(iterations, prompt_file)?,
         Command::Serve { bind } => serve(bind).await?,
+        Command::DevLog {
+            server,
+            output,
+            interval_ms,
+            timeout_ms,
+            max_response_bytes,
+            max_bytes,
+        } => {
+            dev_log::run(
+                server,
+                output,
+                interval_ms,
+                timeout_ms,
+                max_response_bytes,
+                max_bytes,
+            )
+            .await?
+        }
     }
     Ok(())
+}
+
+fn load_source(
+    path: Option<PathBuf>,
+    limit: Option<u64>,
+) -> Result<Option<kernel_journal::SourceIndex>, Box<dyn std::error::Error>> {
+    match (path, limit) {
+        (Some(path), Some(limit)) => Ok(Some(kernel_journal::SourceIndex::read(&path, limit)?)),
+        (None, None) => Ok(None),
+        _ => Err("source path and source byte limit must be supplied together".into()),
+    }
+}
+
+fn classify(
+    prompt: String,
+    snapshot: Option<PathBuf>,
+    additional: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fields = BTreeMap::from([("prompt".to_string(), prompt)]);
+    for field in additional {
+        let (name, value) = field.split_once('=').ok_or("fields must be NAME=VALUE")?;
+        if fields.insert(name.to_owned(), value.to_owned()).is_some() {
+            return Err("duplicate input field".into());
+        }
+    }
+    let engine = load_kernel(snapshot)?;
+    println!("{}", serde_json::to_string(&engine.evaluate(&fields)?)?);
+    Ok(())
+}
+
+fn load_kernel(
+    snapshot: Option<PathBuf>,
+) -> Result<lfg_core::kernel::Engine, Box<dyn std::error::Error>> {
+    if let Some(path) = snapshot {
+        let limit = lfg_server::configured_operations()?.max_http_body_bytes();
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take((limit as u64).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err("snapshot exceeds configured byte limit".into());
+        }
+        Ok(lfg_core::kernel::Engine::from_json(&bytes)?)
+    } else {
+        Ok(lfg_core::kernel::Engine::bundled()?)
+    }
 }
 
 fn lfg_bench(
@@ -124,21 +823,28 @@ async fn serve(bind: Option<SocketAddr>) -> Result<(), Box<dyn std::error::Error
         .unwrap_or_else(|| env::temp_dir().join("lfg"));
     let state = AppState::persistent(state_root.join("signals.jsonl"))?;
     let bind = bind.unwrap_or_else(|| state.operations().default_listen_address());
+    state.start_learning(bind.ip().is_loopback());
+    let listener = TcpListener::bind(bind).await?;
+    let actual_bind = listener.local_addr()?;
     let external_ui = env::var_os("MASTER_CLYFFY_UI_DIR").map(PathBuf::from);
     #[cfg(feature = "embedded-ui")]
     let app: Router = match external_ui {
-        Some(directory) => router_with_ui(state, directory),
-        None => lfg_server::router_with_embedded_ui(state),
+        Some(directory) => lfg_server::router_with_ui_and_listener(state, directory, actual_bind),
+        None => lfg_server::router_with_embedded_ui_and_listener(state, actual_bind),
     };
     #[cfg(not(feature = "embedded-ui"))]
-    let app: Router = router_with_ui(
+    let app: Router = lfg_server::router_with_ui_and_listener(
         state,
         external_ui.unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/master-clyffy-web/dist")
         }),
+        actual_bind,
     );
-    let listener = TcpListener::bind(bind).await?;
-    println!("lfg-server listening on http://{bind}");
-    axum::serve(listener, app).await?;
+    println!("lfg-server listening on http://{actual_bind}");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

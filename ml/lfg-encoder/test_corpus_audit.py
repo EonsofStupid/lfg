@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import corpus_audit
 
@@ -130,6 +131,61 @@ class CorpusAuditTests(unittest.TestCase):
         (self.root / "c.jsonl").write_text(json.dumps(extra), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "validation example requires"):
             corpus_audit.load_reviewed_validation([self.rows[0]], self.root / "plan.json")
+
+    def test_development_plan_rejects_test_before_opening_sources(self):
+        self.plan['schema_version'] = corpus_audit.DEVELOPMENT_PLAN_SCHEMA
+        self.write()
+        with patch.object(corpus_audit.train, 'load_dataset', side_effect=AssertionError('source opened')):
+            with self.assertRaisesRegex(ValueError, 'only train and validation'):
+                corpus_audit.audit(self.root / 'plan.json')
+
+    def test_development_only_training_rejects_complete_plan_before_reading_sources(self):
+        with patch.object(corpus_audit.train, 'load_dataset', side_effect=AssertionError('source opened')):
+            with patch.object(corpus_audit.evaluate, 'load_taxonomy', side_effect=AssertionError('taxonomy opened')):
+                with self.assertRaisesRegex(ValueError, 'development-only training'):
+                    corpus_audit.load_reviewed_validation([], self.root / 'plan.json', development_only=True)
+
+    def test_development_training_uses_reviewed_train_and_validation_only(self):
+        self.plan['schema_version'] = corpus_audit.DEVELOPMENT_PLAN_SCHEMA
+        self.plan['sources'][1]['split'] = 'validation'
+        self.write()
+        _, queue = corpus_audit.audit(self.root / 'plan.json')
+        approvals = [{**item, 'decision': 'approved', 'reviewer': 'test-reviewer',
+                      'reviewed_at': '2026-10-30T12:00:00Z'} for item in queue]
+        (self.root / 'reviews.jsonl').write_text('\n'.join(map(json.dumps, approvals)), encoding='utf-8')
+        self.plan['review_ledger'] = 'reviews.jsonl'
+        for row in self.rows:
+            row['verified'] = True
+        self.write()
+        payload, report = corpus_audit.assemble_training(self.root / 'plan.json')
+        self.assertEqual([json.loads(line)['id'] for line in payload.splitlines()], ['a'])
+        self.assertEqual(report['scope'], 'development')
+        self.assertEqual(report['holdout_assessment'], 'not_performed')
+        self.assertFalse(report['promotion_eligible'])
+        self.assertEqual(corpus_audit.load_reviewed_validation([self.rows[0]], self.root / 'plan.json',
+                                                              development_only=True)[1][0]['id'], 'b')
+        # A plan replaced between validation loading and the second audit must
+        # fail before the newly declared test source can be opened.
+        original_load = corpus_audit.train.load_dataset
+        calls = []
+        def replace_plan_after_validation(path, *args, **kwargs):
+            calls.append(Path(path).name)
+            result = original_load(path, *args, **kwargs)
+            if len(calls) == 3:
+                self.plan['schema_version'] = corpus_audit.PLAN_SCHEMA
+                self.plan['sources'].append({'path': 'heldout.jsonl', 'project': 'holdout', 'split': 'test'})
+                (self.root / 'plan.json').write_text(json.dumps(self.plan), encoding='utf-8')
+            return result
+        with patch.object(corpus_audit.train, 'load_dataset', side_effect=replace_plan_after_validation):
+            with self.assertRaisesRegex(ValueError, 'development-only training'):
+                corpus_audit.load_reviewed_validation([self.rows[0]], self.root / 'plan.json', development_only=True)
+        self.assertNotIn('heldout.jsonl', calls)
+        self.plan['schema_version'] = corpus_audit.DEVELOPMENT_PLAN_SCHEMA
+        self.plan['sources'].pop()
+        self.rows[1]['text'] = 'changed after review'
+        self.write()
+        with self.assertRaisesRegex(ValueError, 'validation example requires'):
+            corpus_audit.assemble_training(self.root / 'plan.json')
 
 
 if __name__ == "__main__":
