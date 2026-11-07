@@ -15,12 +15,14 @@ import evaluate
 import masked_supervision as masked
 import review_corpus
 
+PRIVATE_FIXTURE_ROOT = Path(tempfile.gettempdir()) / 'lfg-masked-private-fixture'
+
 
 def export_config() -> dict:
     return {
         'schema_version': masked.CONFIG_SCHEMA,
-        'workspace': 'C:/private/workspace', 'output': 'C:/private/export',
-        'screening_policy': 'C:/private/policy.json', 'guide': None,
+        'workspace': str(PRIVATE_FIXTURE_ROOT / 'workspace'), 'output': str(PRIVATE_FIXTURE_ROOT / 'export'),
+        'screening_policy': str(PRIVATE_FIXTURE_ROOT / 'policy.json'), 'guide': None,
         'selected_labels': {field: ['label'] for field in masked.FIELDS},
         'allow_unreviewed_proposals': True,
         'unreviewed_complete_array_fields': [],
@@ -262,9 +264,9 @@ class TargetPolicyTests(unittest.TestCase):
     def test_training_config_requires_pinned_export_digest(self):
         config = {
             'schema_version': masked.TRAINING_CONFIG_SCHEMA,
-            'export_dir': 'C:/private/export',
+            'export_dir': str(PRIVATE_FIXTURE_ROOT / 'export'),
             'export_manifest_sha256': 'a' * 64,
-            'output': 'C:/private/run', 'base_model': 'owner/model',
+            'output': str(PRIVATE_FIXTURE_ROOT / 'run'), 'base_model': 'owner/model',
             'model_revision': 'b' * 40, 'model_manifest': None,
             'seed': 1, 'epochs': 1.0, 'max_length': 32, 'batch_size': 2,
             'checkpoint_steps': 1, 'device': 'auto', 'gradient_accumulation_steps': 1,
@@ -283,7 +285,7 @@ class TargetPolicyTests(unittest.TestCase):
         with patch.object(masked, '_read_bounded', side_effect=[config_raw, before, after]), \
                 patch.object(masked, 'load_export', return_value=({}, {'train': []})):
             with self.assertRaisesRegex(ValueError, 'changed while loading'):
-                masked._verify_pinned_export(Path('C:/private/export'), masked._sha(before))
+                masked._verify_pinned_export(PRIVATE_FIXTURE_ROOT / 'export', masked._sha(before))
 
 
 class HeldoutGuardTests(unittest.TestCase):
