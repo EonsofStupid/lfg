@@ -183,6 +183,19 @@ an existing, private directory outside the repository; creation is exclusive
 and permissions are checked. Reports contain status counts and denominators,
 latency summaries, request settings, digests, and service identities, but no
 prompt text, project context, response text, tokens, or raw response bodies.
+Owned-path aggregates also include the bounded reported `outputTextUtf8Bytes`
+summary (in bytes, with unavailable values counted separately) and stop-reason
+counts. Stop reasons are reduced to `stop_sequence`, `byte_limit`,
+`context_limit`, `other`, or `unavailable`; raw values are not retained. A
+reason is reported only when the matching envelope and measurement values are
+both present; a missing optional copy leaves it unavailable. Conflicting
+present values make the response malformed. The benchmark reads only the outer JSON envelope
+and never parses `outputText`, so truncated, malformed, or incomplete proposal
+text does not erase its reported status. These are service-reported diagnostics,
+not independently verified output lengths or evidence of proposal correctness.
+Reported output-text byte counts above the configured maximum response size
+are rejected as malformed responses. Absent optional telemetry remains
+unavailable, and lifecycle ambiguity keeps the existing abort behavior.
 The configured client timeout is a monotonic wall deadline across connection,
 request send, status/header parsing and bounded body reads. Client timeout or
 ambiguous transport failure aborts further measurement and

@@ -53,6 +53,7 @@ KNOWN_OWNED_STATUSES = {
     'ok', 'truncated', 'timeout', 'busy', 'invalid_input', 'context_limit',
     'incomplete_output', 'malformed_output', 'inference_error', 'unavailable',
 }
+KNOWN_OWNED_STOP_REASONS = {'stop_sequence', 'byte_limit', 'context_limit'}
 ENGINE_ID_FIELDS = (
     'id', 'version', 'sha256', 'backend', 'modelSha256', 'modelManifestSha256',
     'trainingManifestSha256', 'framingSha256', 'runtimeConfigSha256',
@@ -519,6 +520,16 @@ def summarize(samples: list[int], denominator: int) -> dict:
     }
 
 
+def summarize_bytes(samples: list[int], denominator: int) -> dict:
+    return {
+        'count': len(samples), 'denominator': denominator,
+        'minimum_bytes': min(samples) if samples else None,
+        'median_bytes': statistics.median(samples) if samples else None,
+        'p95_bytes': percentile(samples, 95),
+        'maximum_bytes': max(samples) if samples else None,
+    }
+
+
 def model_identity(value: object, *, owned: bool = False) -> dict | None:
     if not isinstance(value, dict) or not isinstance(value.get('id'), str) or not value['id']:
         return None
@@ -599,38 +610,62 @@ def validate_assessment(payload: dict, session_id: str, revision: int, identity:
     return 'ok', next_identity, payload['durationMicros']
 
 
-def validate_owned(payload: dict, expected_engine: dict) -> tuple[str, int | None, str]:
+def validate_owned(payload: dict, expected_engine: dict, max_response_bytes: int
+                   ) -> tuple[str, int | None, str, str, int | None]:
     status = payload.get('status')
     if (payload.get('schemaVersion') != 'lfg.owned-assessment.v1'
             or not isinstance(status, str) or status not in KNOWN_OWNED_STATUSES
             or 'projectContextSha256' in payload):
-        return 'malformed_response', None, 'unknown'
+        return 'malformed_response', None, 'unknown', 'unavailable', None
     if model_identity(payload.get('engine'), owned=True) != expected_engine:
         raise BenchmarkError('owned_identity_changed')
+    top_stop_reason = payload.get('stopReason')
+    if top_stop_reason is not None and (
+            not isinstance(top_stop_reason, str) or len(top_stop_reason) > 128):
+        return 'malformed_response', None, 'unknown', 'unavailable', None
+    output_text = payload.get('outputText')
+    if output_text is not None and not isinstance(output_text, str):
+        return 'malformed_response', None, 'unknown', 'unavailable', None
     measurement = payload.get('measurement')
     handler_ms = None
     lifecycle = 'unknown'
+    stop_reason = 'unavailable'
+    output_bytes = None
     if isinstance(measurement, dict) and measurement.get('schemaVersion') == 'lfg.owned-run-measurement.v1':
         if (measurement.get('status') != status or measurement.get('engineId') != expected_engine['id']
                 or not is_int(measurement.get('handlerElapsedMs'))):
-            return 'malformed_response', None, 'unknown'
+            return 'malformed_response', None, 'unknown', 'unavailable', None
+        measurement_stop_reason = measurement.get('stopReason')
+        if measurement_stop_reason is not None and (
+                not isinstance(measurement_stop_reason, str) or len(measurement_stop_reason) > 128):
+            return 'malformed_response', None, 'unknown', 'unavailable', None
+        if (measurement_stop_reason is not None and top_stop_reason is not None
+                and measurement_stop_reason != top_stop_reason):
+            return 'malformed_response', None, 'unknown', 'unavailable', None
+        if measurement_stop_reason is not None and top_stop_reason is not None:
+            stop_reason = (measurement_stop_reason if measurement_stop_reason in KNOWN_OWNED_STOP_REASONS
+                           else 'other')
+        reported_bytes = measurement.get('outputTextUtf8Bytes')
+        if reported_bytes is not None and not is_int(reported_bytes, 0, max_response_bytes):
+            return 'malformed_response', None, 'unknown', 'unavailable', None
+        output_bytes = reported_bytes
         started = measurement.get('workerStarted')
         completed = measurement.get('workerCompletedSuccessfully')
         if ((started is not None and type(started) is not bool)
                 or (completed is not None and type(completed) is not bool)
                 or (started is False and completed is True)):
-            return 'malformed_response', None, 'unknown'
+            return 'malformed_response', None, 'unknown', 'unavailable', None
         if started is False:
             if status in ('ok', 'truncated', 'timeout', 'incomplete_output', 'malformed_output'):
-                return 'malformed_response', None, 'unknown'
+                return 'malformed_response', None, 'unknown', 'unavailable', None
             lifecycle = 'worker_not_started'
         elif started is True and completed is not None:
             if status in ('ok', 'truncated', 'incomplete_output', 'malformed_output') and completed is not True:
-                return 'malformed_response', None, 'unknown'
+                return 'malformed_response', None, 'unknown', 'unavailable', None
             lifecycle = ('worker_exit_observed_success' if completed
                          else 'worker_exit_observed_failure')
         handler_ms = measurement['handlerElapsedMs']
-    return status, handler_ms, lifecycle
+    return status, handler_ms, lifecycle, stop_reason, output_bytes
 
 
 def safe_status(result: HttpResult) -> str:
@@ -641,11 +676,15 @@ def safe_status(result: HttpResult) -> str:
     return result.response_code or 'malformed_response'
 
 
-def empty_path_stats() -> dict:
+def empty_path_stats(*, owned: bool = False) -> dict:
     def empty_phase() -> dict:
-        return {'status_counts': Counter(), 'latency_ns': [],
+        phase = {'status_counts': Counter(), 'latency_ns': [],
                 'attempts': 0, 'completed_responses': 0,
                 'worker_lifecycle_counts': Counter()}
+        if owned:
+            phase.update({'stop_reason_counts': Counter(), 'output_text_utf8_bytes': [],
+                          'output_text_utf8_bytes_missing': 0})
+        return phase
 
     return {**empty_phase(), 'handler_time_us': [], 'handler_missing': 0,
             'warmup': empty_phase()}
@@ -653,12 +692,19 @@ def empty_path_stats() -> dict:
 
 def record_response(stats: dict, phase: str, status: str, result: HttpResult,
                     handler_value: int | None, handler_scale: int,
-                    worker_lifecycle: str | None = None) -> None:
+                    worker_lifecycle: str | None = None,
+                    stop_reason: str = 'unavailable', output_text_utf8_bytes: int | None = None) -> None:
     phase_stats = stats['warmup'] if phase == 'warmup' else stats
     phase_stats['attempts'] += 1
     phase_stats['status_counts'][status] += 1
     if worker_lifecycle is not None:
         phase_stats['worker_lifecycle_counts'][worker_lifecycle] += 1
+    if 'stop_reason_counts' in phase_stats:
+        phase_stats['stop_reason_counts'][stop_reason] += 1
+        if output_text_utf8_bytes is None:
+            phase_stats['output_text_utf8_bytes_missing'] += 1
+        else:
+            phase_stats['output_text_utf8_bytes'].append(output_text_utf8_bytes)
     if result.status is not None:
         phase_stats['completed_responses'] += 1
         phase_stats['latency_ns'].append(result.elapsed_ns)
@@ -671,7 +717,7 @@ def record_response(stats: dict, phase: str, status: str, result: HttpResult,
 
 def public_stats(stats: dict) -> dict:
     warmup = stats['warmup']
-    return {
+    result = {
         'attempts': stats['attempts'],
         'completed_responses': stats['completed_responses'],
         'status_counts': dict(sorted(stats['status_counts'].items())),
@@ -687,6 +733,20 @@ def public_stats(stats: dict) -> dict:
             'end_to_end_latency': summarize(warmup['latency_ns'], warmup['completed_responses']),
         },
     }
+    if 'stop_reason_counts' in stats:
+        result.update({
+            'stop_reason_counts': dict(sorted(stats['stop_reason_counts'].items())),
+            'output_text_utf8_bytes': summarize_bytes(
+                stats['output_text_utf8_bytes'], stats['attempts']),
+            'output_text_utf8_bytes_missing': stats['output_text_utf8_bytes_missing'],
+            'warmup_owned_telemetry': {
+                'stop_reason_counts': dict(sorted(warmup['stop_reason_counts'].items())),
+                'output_text_utf8_bytes': summarize_bytes(
+                    warmup['output_text_utf8_bytes'], warmup['attempts']),
+                'output_text_utf8_bytes_missing': warmup['output_text_utf8_bytes_missing'],
+            },
+        })
+    return result
 
 
 def build_report_base(cfg: dict, config_hash: str, dataset_hash: str,
@@ -795,7 +855,7 @@ def run_benchmark(config_path: Path) -> dict:
     report = build_report_base(cfg, config_hash, dataset_hash, source_selected_hash, selected_hash,
                                screening_changes, policy_hash, manifest_hash, manifest_train_sha,
                                manifest_train_count, source_count, rows, deterministic_id, owned_id)
-    stats = {'deterministic': empty_path_stats(), 'owned': empty_path_stats()}
+    stats = {'deterministic': empty_path_stats(), 'owned': empty_path_stats(owned=True)}
     report['paths'] = stats
     session_id = 'paired-' + uuid.uuid4().hex
     assessment_identity = None
@@ -854,6 +914,8 @@ def run_benchmark(config_path: Path) -> dict:
                     result = HttpResult(None, None, 0, error.code)
                 handler_value = None
                 worker_lifecycle = None
+                owned_stop_reason = 'unavailable'
+                output_text_utf8_bytes = None
                 if result.status != 200 or result.payload is None:
                     outcome = safe_status(result)
                     if path_name == 'owned' and result.status == 200:
@@ -867,12 +929,16 @@ def run_benchmark(config_path: Path) -> dict:
                     if outcome == 'malformed_response':
                         handler_value = None
                 else:
-                    outcome, handler_value, worker_lifecycle = validate_owned(result.payload, owned_id['engine'])
+                    (outcome, handler_value, worker_lifecycle, owned_stop_reason,
+                     output_text_utf8_bytes) = validate_owned(
+                        result.payload, owned_id['engine'], cfg['max_response_bytes'])
                 if phase == 'measured':
                     record_response(stats[path_name], phase, outcome, result, handler_value,
-                                    1 if path_name == 'deterministic' else 1000, worker_lifecycle)
+                                    1 if path_name == 'deterministic' else 1000, worker_lifecycle,
+                                    owned_stop_reason, output_text_utf8_bytes)
                 else:
-                    record_response(stats[path_name], phase, outcome, result, None, 1, worker_lifecycle)
+                    record_response(stats[path_name], phase, outcome, result, None, 1, worker_lifecycle,
+                                    owned_stop_reason, output_text_utf8_bytes)
                 ambiguous_http = (result.status is not None and result.status != 200
                                   and result.status not in SAFE_REJECTION_HTTP_STATUSES)
                 owned_busy = path_name == 'owned' and result.status == 200 and outcome == 'busy'
