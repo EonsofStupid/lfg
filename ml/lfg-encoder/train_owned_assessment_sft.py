@@ -20,6 +20,7 @@ USER_REQUEST_DATASET_SCHEMA = 'lfg.user-requested-sft-dataset.v2'
 USER_REQUEST_CONFIG_SCHEMA = 'lfg.owned-user-request-sft-config.v1'
 USER_REQUEST_TASK = 'user_requested_model_effort'
 USER_REQUEST_OUTPUT_SCHEMA = 'lfg.user-requested-routing-output.v2'
+MULTILABEL_CONFIG_SCHEMA = 'lfg.owned-multilabel-sft-config.v1'
 
 # Keep the existing public helper available when training extras are installed;
 # request-dataset validation itself remains importable without those extras.
@@ -115,10 +116,16 @@ def configuration(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
                'outcome_weights': ('success', 'unknown', 'failure')}
     config_schema = config.get('schema_version') if isinstance(config, dict) else None
     user_request_mode = config_schema == USER_REQUEST_CONFIG_SCHEMA
+    multilabel_mode = config_schema == MULTILABEL_CONFIG_SCHEMA
     if (not isinstance(config, dict)
-            or config_schema not in ('lfg.owned-assessment-sft-config.v1', USER_REQUEST_CONFIG_SCHEMA)
+            or config_schema not in ('lfg.owned-assessment-sft-config.v1', USER_REQUEST_CONFIG_SCHEMA,
+                                     MULTILABEL_CONFIG_SCHEMA)
             or (user_request_mode and config.get('task') != USER_REQUEST_TASK)
             or (user_request_mode and (not isinstance(config.get('revision'), str) or not config['revision'].strip()))
+            or (multilabel_mode and (not isinstance(config.get('expected_manifest_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', config['expected_manifest_sha256'])
+                or not isinstance(config.get('multilabel_system_prompt'), str)
+                or not config['multilabel_system_prompt'].strip()))
             or any(type(config.get(k)) is not int or config[k] < (0 if k == 'seed' else 1) for k in integers)
             or config.get('device') not in ('cpu', 'cuda')
             or type(config.get('cuda_device_index')) is not int or config['cuda_device_index'] < 0
@@ -147,6 +154,8 @@ def configuration(path: Path, max_bytes: int = 65536) -> tuple[dict, bytes]:
 
 
 def read_training(dataset: Path, config: dict) -> tuple[list[dict], bytes, bytes, dict]:
+    if config.get('schema_version') == MULTILABEL_CONFIG_SCHEMA:
+        return read_multilabel_training(dataset, config)
     if dataset.is_file():
         return read_user_request_training(dataset, config)
     if config.get('schema_version') == USER_REQUEST_CONFIG_SCHEMA:
@@ -235,6 +244,102 @@ def read_training(dataset: Path, config: dict) -> tuple[list[dict], bytes, bytes
         'framing_sha256': framing_sha256(config['framing']),
         'initial_prompt_exceeds_context': sum(item['response_start'] > config['context'] for item in records),
         'complete_example_exceeds_context': sum(len(item['bytes']) > config['context'] + 1 for item in records)}
+
+
+def read_multilabel_training(dataset: Path, config: dict) -> tuple[list[dict], bytes, bytes, dict]:
+    """Read caller-pinned atomic labels without turning omitted cells into negatives."""
+    if dataset.is_file():
+        raise ValueError('multilabel SFT requires a private adapter directory')
+    import owned_multilabel_contract as multilabel
+
+    if dataset.is_symlink() or not dataset.is_dir():
+        raise ValueError('multilabel training dataset must be a private directory')
+    manifest_path, train_path = dataset / 'manifest.json', dataset / 'train.jsonl'
+    multilabel.masked._verify_owner_private_access(dataset, is_directory=True)
+    if manifest_path.is_symlink() or train_path.is_symlink():
+        raise ValueError('multilabel training files must not be symbolic links')
+    multilabel.masked._verify_owner_private_access(manifest_path, is_directory=False)
+    manifest_raw = read_bounded(manifest_path, config['max_manifest_bytes'])
+    if sha(manifest_raw) != config['expected_manifest_sha256']:
+        raise ValueError('private training manifest differs from caller-pinned digest')
+    bounded_manifest = strict_json(manifest_raw)
+    file_info = bounded_manifest.get('train_file') if isinstance(bounded_manifest, dict) else None
+    if not isinstance(file_info, dict) or type(file_info.get('bytes')) is not int \
+            or file_info['bytes'] < 1 or file_info['bytes'] > config['max_dataset_bytes']:
+        raise ValueError('private training rows exceed configured byte limit')
+    manifest, rows = multilabel.load_training_dataset(dataset, config['expected_manifest_sha256'])
+    train_raw = read_bounded(train_path, config['max_dataset_bytes'])
+    if sha(train_raw) != manifest.get('train_file', {}).get('sha256'):
+        raise ValueError('private training rows changed after adapter validation')
+    if any(len(line) > config['max_record_bytes'] for line in train_raw.splitlines()):
+        raise ValueError('private training record exceeds configured limit')
+    if len(rows) > config['max_examples']:
+        raise ValueError('private training example limit exceeded')
+    if strict_json(manifest_raw) != manifest or [strict_json(line) for line in train_raw.splitlines()] != rows:
+        raise ValueError('private training bytes differ from adapter-validated records')
+    fmt = config['framing']
+    system = config['multilabel_system_prompt']
+    records, counts, source_claims = [], Counter(), set()
+    expected_framing = framing_sha256(fmt)
+    taxonomy_sha = manifest.get('taxonomy_sha256')
+    guide_sha = manifest.get('guide_sha256')
+    instruction_sha = manifest.get('instruction_template_sha256')
+    if (not isinstance(taxonomy_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', taxonomy_sha)
+            or not isinstance(instruction_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', instruction_sha)
+            or (guide_sha is not None and (not isinstance(guide_sha, str)
+                                           or not re.fullmatch(r'[0-9a-f]{64}', guide_sha)))):
+        raise ValueError('private training contract identity is malformed')
+    for row in rows:
+        field, label, decision = row['field'], row['label'], row['decision']
+        target = strict_json(row['target_response'])
+        if (target.get('taxonomy_sha256') != taxonomy_sha or target.get('guide_sha256') != guide_sha
+                or target.get('decisions') != [{'field': field, 'label': label, 'value': decision}]):
+            raise ValueError('private training target identity mismatch')
+        # Keep claims in the record identity, but never include private text or targets in coverage.
+        source_claims.add(sha(canonical({'source_identity': row['source_identity'],
+                                         'target_origin': row['target_origin'],
+                                         'target_reviewer_claim_sha256': row['target_reviewer_claim_sha256'],
+                                         'verified_source_claim': row['verified_source_claim'],
+                                         'screening': row['screening']})))
+        prefix = (fmt['system_prefix'] + system + fmt['system_suffix'] + fmt['user_prefix']
+                  + row['instruction'] + '\n' + row['text'] + fmt['user_suffix']
+                  + fmt['assistant_prefix']).encode('utf-8')
+        response = (row['target_response'] + fmt['assistant_suffix']).encode('utf-8')
+        if not prefix or not response:
+            raise ValueError('a multilabel example needs a prefix and response')
+        if len(prefix) + len(response) - 1 > config['context'] and not config['allow_truncated_prompt']:
+            raise ValueError('full prompt and response exceed context; choose an explicit truncation policy or larger context')
+        weight = row['weight']
+        if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
+            raise ValueError('effective multilabel weight is invalid')
+        records.append({'bytes': prefix + response, 'response_start': len(prefix), 'weight': weight})
+        counts[f'decision:{decision}'] += 1
+    if not records or not math.isfinite(sum(item['weight'] for item in records)):
+        raise ValueError('no positively weighted multilabel training cells')
+    support = manifest['target_support']
+    coverage = {'selected': len(records), 'claims': dict(sorted(counts.items())),
+        'system_sha256': sha(system.encode('utf-8')), 'framing_sha256': expected_framing,
+        'taxonomy_sha256': taxonomy_sha, 'guide_sha256': guide_sha,
+        'instruction_template_sha256': instruction_sha,
+        'adapter_config_sha256': manifest.get('config_sha256'),
+        'source_export_manifest_sha256': manifest.get('source_export_manifest_sha256'),
+        'source_export_config_sha256': manifest.get('source_export_config_sha256'),
+        'source_code_digests': manifest.get('source_code_digests'),
+        'screening_policy_sha256': manifest.get('screening_policy_sha256'),
+        'masked_supervision_loader_sha256': manifest.get('masked_supervision_loader_sha256'),
+        'adapter_code_sha256': manifest['adapter_code_sha256'],
+        'response_contract_code_sha256': manifest['response_contract_code_sha256'],
+        'dataset_manifest_sha256': sha(manifest_raw), 'training_file_sha256': sha(train_raw),
+        'target_support_claim': {key: support[key] for key in ('positive', 'negative', 'unknown')},
+        'source_quality': 'unverified', 'source_identity_claim_count': len(source_claims),
+        'source_identity_claims_sha256': sha(canonical(sorted(source_claims))),
+        'initial_prompt_exceeds_context': sum(item['response_start'] > config['context'] for item in records),
+        'complete_example_exceeds_context': sum(len(item['bytes']) > config['context'] + 1 for item in records)}
+    # Reject a concurrent replacement after adapter validation; experiment rechecks after training too.
+    if (read_bounded(manifest_path, config['max_manifest_bytes']) != manifest_raw
+            or read_bounded(train_path, config['max_dataset_bytes']) != train_raw):
+        raise ValueError('private training inputs changed during loading')
+    return records, manifest_raw, train_raw, coverage
 
 
 def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict], bytes, bytes, dict]:
@@ -547,12 +652,15 @@ def read_user_request_training(dataset: Path, config: dict) -> tuple[list[dict],
 def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_code: dict, *,
                                        allow_unlinked_legacy: bool = False) -> dict:
     """Validate an SFT checkpoint; optionally preserve missing legacy linkage as unknown."""
+    multilabel_result = isinstance(manifest, dict) and manifest.get('schema_version') == \
+        'lfg.owned-multilabel-sft-result.v1'
     required_digests = {'weights_sha256', 'source_checkpoint_manifest_sha256',
         'source_checkpoint_weights_sha256', 'dataset_manifest_sha256', 'training_file_sha256',
         'config_sha256'}
     if (not isinstance(manifest, dict) or manifest.get('completed') is not True
             or manifest.get('schema_version') not in ('lfg.owned-assessment-sft-result.v1',
-                                                       'lfg.owned-user-request-sft-result.v1')
+                                                       'lfg.owned-user-request-sft-result.v1',
+                                                       'lfg.owned-multilabel-sft-result.v1')
             or any(not isinstance(manifest.get(name), str)
                    or not re.fullmatch(r'[0-9a-f]{64}', manifest[name]) for name in required_digests)
             or manifest['weights_sha256'] != sha(weights)
@@ -578,6 +686,8 @@ def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_
         raise ValueError('completed SFT checkpoint provenance is incomplete or inconsistent')
     expected_code_names = {'train_owned_assessment_sft.py', 'train_owned_student.py',
                            'owned_student.py', 'owned_sft_checkpoint.py'}
+    if multilabel_result:
+        expected_code_names |= {'owned_multilabel_contract.py', 'masked_supervision.py'}
     code = manifest['code_sha256']
     if (not expected_code_names <= set(code)
             or any(not isinstance(code.get(name), str) or not re.fullmatch(r'[0-9a-f]{64}', code[name])
@@ -587,27 +697,57 @@ def validate_completed_sft_checkpoint(manifest: object, weights: bytes, current_
     for name in ('steps', 'parameters', 'supervised_tokens'):
         if type(manifest.get(name)) is not int or manifest[name] < 1:
             raise ValueError('completed SFT checkpoint training provenance is invalid')
+    if multilabel_result:
+        coverage = manifest['coverage']
+        support = manifest.get('target_support_claim')
+        if (manifest.get('training_task') != 'owned_multilabel'
+                or manifest.get('source_quality') != 'unverified'
+                or manifest.get('classifier_quality_evaluated') is not False
+                or manifest.get('promotion_eligible') is not False
+                or manifest.get('validation_opened') is not False
+                or manifest.get('test_opened') is not False
+                or manifest.get('heldout_separation') != 'unknown'
+                or not isinstance(support, dict)
+                or set(support) != {'positive', 'negative', 'unknown'}
+                or any(type(support[key]) is not int or support[key] < 0 for key in support)
+                or support['positive'] + support['negative'] < 1
+                or coverage.get('target_support_claim') != support
+                or any(not isinstance(manifest.get(name), str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', manifest[name])
+                       for name in ('taxonomy_sha256', 'instruction_template_sha256', 'adapter_code_sha256',
+                                    'response_contract_code_sha256'))
+                or (manifest.get('guide_sha256') is not None
+                    and (not isinstance(manifest['guide_sha256'], str)
+                         or not re.fullmatch(r'[0-9a-f]{64}', manifest['guide_sha256'])))
+                or any(coverage.get(name) != manifest.get(name) for name in
+                       ('taxonomy_sha256', 'guide_sha256', 'instruction_template_sha256',
+                        'adapter_code_sha256', 'response_contract_code_sha256'))
+                or coverage.get('source_quality') != 'unverified'
+                or coverage.get('config_sha256') != manifest.get('config_sha256')
+                or coverage.get('code_sha256') != code
+                or coverage.get('live_masked_supervision_code_sha256') != code.get('masked_supervision.py')
+                or coverage.get('source_checkpoint_manifest_sha256') != manifest.get('source_checkpoint_manifest_sha256')
+                or coverage.get('source_checkpoint_weights_sha256') != manifest.get('source_checkpoint_weights_sha256')
+                or coverage.get('dataset_manifest_sha256') != manifest.get('dataset_manifest_sha256')
+                or coverage.get('training_file_sha256') != manifest.get('training_file_sha256')):
+            raise ValueError('completed multilabel checkpoint provenance is incomplete or inconsistent')
     return links
 
 
-def _cli_is_user_request_mode(args: argparse.Namespace) -> bool:
+def _cli_requires_private_error_redaction(args: argparse.Namespace) -> bool:
     try:
-        value = strict_json(read_bounded(args.config, args.max_config_bytes))
-        if isinstance(value, dict) and value.get('schema_version') == USER_REQUEST_CONFIG_SCHEMA:
-            return True
-    except (OSError, ValueError, TypeError, UnicodeError):
-        pass
-    try:
-        value = strict_json(read_bounded(args.dataset, 1024 * 1024))
-        return isinstance(value, dict) and value.get('schema_version') == USER_REQUEST_DATASET_SCHEMA
-    except (OSError, ValueError, TypeError, UnicodeError):
-        return False
+        config, _raw = configuration(args.config, args.max_config_bytes)
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RecursionError):
+        # If config identity is missing or invalid, assume paths may be private.
+        return True
+    # Keep detailed diagnostics only for a fully valid, identifiable legacy mode.
+    return config['schema_version'] != 'lfg.owned-assessment-sft-config.v1'
 
 
 def _format_cli_error(error: Exception, args: argparse.Namespace) -> str:
     """Hide filesystem paths in user-request errors without requiring ML dependencies."""
     detail = str(error)
-    if isinstance(error, OSError) and _cli_is_user_request_mode(args):
+    if isinstance(error, OSError) and _cli_requires_private_error_redaction(args):
         detail = f'filesystem operation failed (errno={error.errno})'
     return f'Owned assessment SFT failed ({type(error).__name__}): {detail}'
 
@@ -645,8 +785,9 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
     if max_steps_this_run is not None and (type(max_steps_this_run) is not int or max_steps_this_run < 1):
         raise ValueError('max_steps_this_run must be positive')
     user_request_mode = config['schema_version'] == USER_REQUEST_CONFIG_SCHEMA
-    if user_request_mode and os.name != 'posix':
-        raise ValueError('user-request SFT training output is disabled on Windows until private path safety is verified')
+    multilabel_mode = config['schema_version'] == MULTILABEL_CONFIG_SCHEMA
+    if (user_request_mode or multilabel_mode) and os.name != 'posix':
+        raise ValueError('private SFT training output is disabled on Windows until path safety is verified')
     try:
         import safetensors
         from safetensors.torch import load, save
@@ -655,19 +796,34 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
         import owned_student
         import owned_sft_checkpoint as checkpoints
         import train_owned_student as base
+        if multilabel_mode:
+            import owned_multilabel_contract as multilabel_contract
     except ImportError as error:
         raise RuntimeError('owned SFT training requires torch and safetensors') from error
     records, dataset_manifest, train_raw, coverage = read_training(dataset, config)
-    checkpoint_schema = ('lfg.owned-user-request-sft-checkpoint.v1' if user_request_mode
-                         else 'lfg.owned-assessment-sft-checkpoint.v1')
+    checkpoint_schema = ('lfg.owned-user-request-sft-checkpoint.v1' if user_request_mode else
+                         'lfg.owned-multilabel-sft-checkpoint.v1' if multilabel_mode else
+                         'lfg.owned-assessment-sft-checkpoint.v1')
     checkpoint_manifest = base.read_bounded(checkpoint / 'manifest.json', config['max_manifest_bytes'])
     initial = json.loads(checkpoint_manifest)
     initial_weights = base.read_bounded(checkpoint / 'weights.safetensors', config['max_checkpoint_bytes'])
-    code_paths = (Path(__file__), Path(base.__file__), Path(owned_student.__file__), Path(checkpoints.__file__))
-    code = {path.name: base.sha(path.read_bytes()) for path in code_paths}
+    code_paths = {'train_owned_assessment_sft.py': Path(__file__),
+                  'train_owned_student.py': Path(base.__file__),
+                  'owned_student.py': Path(owned_student.__file__),
+                  'owned_sft_checkpoint.py': Path(checkpoints.__file__)}
+    if multilabel_mode:
+        code_paths.update({'owned_multilabel_contract.py': Path(multilabel_contract.__file__),
+                           'masked_supervision.py': Path(multilabel_contract.masked.__file__)})
+    code = {name: base.sha(path.read_bytes()) for name, path in code_paths.items()}
+    if multilabel_mode:
+        coverage.update({'config_sha256': base.sha(config_raw), 'trainer_code_sha256': code['train_owned_assessment_sft.py'],
+                         'code_sha256': code, 'source_checkpoint_manifest_sha256': base.sha(checkpoint_manifest),
+                         'source_checkpoint_weights_sha256': base.sha(initial_weights),
+                         'live_masked_supervision_code_sha256': code['masked_supervision.py']})
     allowed_checkpoint_schemas = ('lfg.owned-student-experiment-result.v1', 'lfg.owned-distillation-result.v1',
         *(('lfg.owned-user-request-sft-result.v1', 'lfg.owned-assessment-sft-result.v1')
-          if user_request_mode else ('lfg.owned-assessment-sft-result.v1',)))
+          if user_request_mode else ('lfg.owned-assessment-sft-result.v1',)),
+        *(('lfg.owned-multilabel-sft-result.v1',) if multilabel_mode else ()))
     if (not isinstance(initial, dict) or initial.get('schema_version') not in allowed_checkpoint_schemas
             or initial.get('weights_sha256') != base.sha(initial_weights)
             or not isinstance(initial.get('code_sha256'), dict)
@@ -675,7 +831,8 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
         raise ValueError('owned checkpoint identity does not match')
     source_checkpoint_links = {'system_sha256': 'not_applicable', 'framing_sha256': 'not_applicable'}
     if initial['schema_version'] in ('lfg.owned-user-request-sft-result.v1',
-                                     'lfg.owned-assessment-sft-result.v1'):
+                                     'lfg.owned-assessment-sft-result.v1',
+                                     'lfg.owned-multilabel-sft-result.v1'):
         allow_unlinked = (user_request_mode and config.get('allow_unlinked_legacy_sft_checkpoint', False)
                           and initial['schema_version'] == 'lfg.owned-assessment-sft-result.v1')
         source_checkpoint_links = validate_completed_sft_checkpoint(
@@ -740,6 +897,9 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                 'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG') if config['device'] == 'cuda' else None,
                 'cuda_devices': ([torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
                                  if config['device'] == 'cuda' else [])}
+    if multilabel_mode:
+        identity['training_config_sha256'] = base.sha(config_raw)
+        identity['multilabel_coverage_sha256'] = base.sha(canonical(coverage))
     initial_step = 0
     if resume is not None:
         progress = checkpoints.restore(resume, resume_state_sha256, model, optimizer, rng, identity, config,
@@ -780,13 +940,14 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
             or not dataset_stable
             or base.read_bounded(checkpoint / 'manifest.json', config['max_manifest_bytes']) != checkpoint_manifest
             or base.read_bounded(checkpoint / 'weights.safetensors', config['max_checkpoint_bytes']) != initial_weights
-            or any(base.sha(path.read_bytes()) != code[path.name] for path in code_paths)):
+            or any(base.sha(path.read_bytes()) != code[name] for name, path in code_paths.items())):
         raise ValueError('training inputs changed during execution')
     if any(not bool(torch.isfinite(value).all()) for value in model.state_dict().values()):
         raise ValueError('non-finite trained weights')
     if end_step < config['steps']:
-        partial_schema = ('lfg.owned-user-request-sft-partial.v1' if user_request_mode
-                          else 'lfg.owned-assessment-sft-partial.v1')
+        partial_schema = ('lfg.owned-user-request-sft-partial.v1' if user_request_mode else
+                          'lfg.owned-multilabel-sft-partial.v1' if multilabel_mode else
+                          'lfg.owned-assessment-sft-partial.v1')
         partial = {'schema_version': partial_schema, 'completed': False,
                 'steps': end_step, 'parameters': parameters, 'supervised_tokens': supervised,
                 'source_checkpoint_schema': initial['schema_version'],
@@ -797,12 +958,15 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                 'promotion_eligible': False}
         if user_request_mode:
             partial.update({'quality_evaluated': False, 'runtime_compatible': False})
+        elif multilabel_mode:
+            partial.update({'source_quality': 'unverified', 'classifier_quality_evaluated': False})
         else:
             partial['assessment_quality_evaluated'] = False
         return partial
     trained = save({name: value.detach().cpu().contiguous() for name, value in model.state_dict().items()})
-    result_schema = ('lfg.owned-user-request-sft-result.v1' if user_request_mode
-                     else 'lfg.owned-assessment-sft-result.v1')
+    result_schema = ('lfg.owned-user-request-sft-result.v1' if user_request_mode else
+                     'lfg.owned-multilabel-sft-result.v1' if multilabel_mode else
+                     'lfg.owned-assessment-sft-result.v1')
     manifest = {'schema_version': result_schema, 'architecture': architecture,
                 'completed': True, 'resumed_from_step': initial_step,
                 'source_checkpoint_schema': initial['schema_version'],
@@ -834,6 +998,17 @@ def experiment(dataset: Path, checkpoint: Path, config_path: Path, output: Path,
                          'total_agent_count': None, 'heldout_separation': 'unknown',
                          'runtime_compatible': False, 'deployment_ready': False,
                          'user_request_quality_evaluated': False})
+    elif multilabel_mode:
+        manifest.pop('assessment_quality_evaluated')
+        manifest.update({'training_task': 'owned_multilabel', 'source_quality': 'unverified',
+                         'classifier_quality_evaluated': False,
+                         'target_support_claim': coverage['target_support_claim'],
+                         'taxonomy_sha256': coverage['taxonomy_sha256'],
+                         'guide_sha256': coverage['guide_sha256'],
+                         'adapter_code_sha256': coverage['adapter_code_sha256'],
+                         'response_contract_code_sha256': coverage['response_contract_code_sha256'],
+                         'instruction_template_sha256': coverage['instruction_template_sha256'],
+                         'heldout_separation': 'unknown'})
     if config['device'] == 'cuda':
         manifest['cuda_device'] = torch.cuda.get_device_name(device)
         manifest['cuda_device_index'] = config['cuda_device_index']
@@ -868,6 +1043,9 @@ if __name__ == '__main__':
         if result.get('schema_version', '').startswith('lfg.owned-user-request-sft-'):
             summary_fields += ('schema_version', 'training_task', 'review_status', 'outcome_claim',
                                'heldout_separation', 'runtime_compatible', 'user_request_quality_evaluated')
+        elif result.get('schema_version', '').startswith('lfg.owned-multilabel-sft-'):
+            summary_fields += ('schema_version', 'training_task', 'source_quality', 'classifier_quality_evaluated',
+                               'target_support_claim', 'taxonomy_sha256', 'guide_sha256')
         print(json.dumps({key: result.get(key) for key in summary_fields}))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError, RuntimeError) as error:
         raise SystemExit(_format_cli_error(error, args)) from None

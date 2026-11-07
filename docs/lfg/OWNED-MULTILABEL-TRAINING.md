@@ -50,10 +50,42 @@ permissions where the host supports them. Standard output contains only the
 manifest digest, aggregate positive/negative/unknown counts, row count and
 weight totals. It does not print output paths, per-label support, prompts or
 label text. Readers must pin the manifest digest when calling
-`load_training_dataset(directory, expected_manifest_sha256)`. The adapter does
-not train a model, and the existing owned SFT trainer does not yet consume this
-schema; the next integration task must bind training framing to this response
-contract and these taxonomy/source digests.
+`load_training_dataset(directory, expected_manifest_sha256)`. The owned SFT
+trainer has a separate `lfg.owned-multilabel-sft-config.v1` mode. It requires
+`expected_manifest_sha256` and `multilabel_system_prompt`, plus the shared SFT
+training, framing, context, resource, checkpoint and optimizer settings. Pass
+the adapter output directory as `--dataset`; do not reuse the assessment or
+user-request config schema for this mode. Six framing delimiters wrap the
+configured system prompt, the row's exact instruction and screened text, and
+that row's serialized `target_response`. The target response alone is learned;
+prompt and padding bytes are masked. The adapter-supplied effective weight is
+used once for weighted record sampling. Unknown cells are omitted entirely and
+remain counted as unknown in source support claims.
+
+The trainer loads the adapter through `load_training_dataset`, checks the
+caller-pinned manifest and row-file digests, and rechecks the bytes around
+loading and after execution. It binds manifest, train bytes, configuration,
+framing, taxonomy and guide digests, source identity claims, code digests and
+source checkpoint digests into coverage and resumable checkpoint identity.
+Coverage records aggregate support and states that source quality is
+unverified. It does not emit prompts or target text. Checkpoints and trained
+weights must be written under an ignored, untracked private output directory.
+The validation and heldout splits are never opened by this trainer mode.
+The live `masked_supervision.py` loader code digest is recorded separately from
+the adapter manifest's loader digest claim and is checked again before a run
+can complete. Completed multilabel results can seed another run only after
+their weights, architecture, internally linked historical code digests,
+framing and source provenance validate. Historical adapter and loader digests
+remain provenance; new runs bind the current runtime code, and resume requires
+that exact runtime identity. If the config is missing or invalid, filesystem
+errors are redacted conservatively. Private filesystem errors from this mode
+are reported without printing filesystem paths.
+
+This integration makes the adapter consumable; it does not qualify the
+classifier. Unreviewed labels and zero-negative datasets remain trainable, but
+they cannot establish discrimination or independent accuracy. Promotion stays
+disabled until a separate evaluation supports it. Existing assessment and
+user-request SFT config schemas retain their prior behavior.
 
 Training support is cell-level and may contain no negative labels. Unknown and
 unreviewed status remain explicit claims; use does not imply quality, review,
