@@ -11,9 +11,11 @@ user-request, and multilabel checkpoint/result schema pairs. Before launching a
 segment it checks the checkpoint identity against the configured dataset,
 starting checkpoint, continuation config, architecture, and trainer code; the
 trainer also checks its full continuation identity, including runtime versions.
-On POSIX hosts with the trainer dependencies installed, the supervisor uses the
-configured multilabel trainer's reader to recompute the coverage identity
-before resume. Source SFT checkpoints record `verified_linked` or
+For multilabel SFT, the supervisor recomputes coverage identity in a subprocess
+using the configured trainer interpreter, including its required PyTorch and
+safetensors dependencies. This works when the supervisor itself uses a lighter
+Python environment; identity validation fails closed if the configured trainer
+environment cannot run it. Source SFT checkpoints record `verified_linked` or
 `unknown_unlinked` provenance; the latter is accepted only for user-request SFT
 when its config explicitly enables the legacy-unlinked policy. The SFT config
 byte limit defaults to 65,536 bytes, applies to the supervisor read, and is

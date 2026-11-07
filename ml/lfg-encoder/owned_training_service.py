@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -46,7 +45,7 @@ def bounded_bytes(path: Path, limit: int) -> bytes:
     with path.open('rb') as stream:
         raw = stream.read(limit + 1)
     if len(raw) > limit:
-        raise ValueError(f'configured input exceeds byte limit: {path}')
+        raise ValueError('configured input exceeds byte limit')
     return raw
 
 
@@ -82,41 +81,93 @@ def sft_source_linkage(manifest: dict, schema_config: str, sft: dict) -> tuple[s
     return links[0], links[1]
 
 
-def trainer_multilabel_coverage(trainer_path: Path, dataset: Path, config_path: Path,
-                                config_raw: bytes, max_config_bytes: int,
-                                source_manifest_sha256: str, source_weights_sha256: str) -> str | None:
-    """Use the configured trainer's reader to reproduce the exact resume identity on POSIX."""
-    if os.name != 'posix' or not (importlib.util.find_spec('torch') and importlib.util.find_spec('safetensors')):
-        return None
+MULTILABEL_IDENTITY_VALIDATOR = r'''
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def sha_file(path):
+    result = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            result.update(block)
+    return result.hexdigest()
+
+try:
+    request = json.load(sys.stdin)
+    import torch
+    import safetensors
+    trainer_path = Path(request['trainer'])
     trainer_dir = trainer_path.parent
-    module_name = '_lfg_owned_training_service_trainer'
-    spec = importlib.util.spec_from_file_location(module_name, trainer_path)
-    if spec is None or spec.loader is None:
-        raise ValueError('cannot load configured SFT trainer for checkpoint identity validation')
-    module = importlib.util.module_from_spec(spec)
-    prior_path = list(sys.path)
     sys.path.insert(0, str(trainer_dir))
+    spec = importlib.util.spec_from_file_location('_lfg_identity_trainer', trainer_path)
+    if spec is None or spec.loader is None:
+        raise ValueError('trainer module unavailable')
+    trainer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trainer)
+    config_path, dataset, source = Path(request['config']), Path(request['dataset']), Path(request['source'])
+    config, config_raw = trainer.configuration(config_path, request['max_config_bytes'])
+    if sha(config_raw) != request['config_sha256']:
+        raise ValueError('config changed')
+    _, manifest_raw, training_raw, coverage = trainer.read_training(dataset, config)
+    source_manifest_path = source / 'manifest.json'
+    source_weights_path = source / 'weights.safetensors'
+    source_manifest_raw = trainer.read_bounded(source_manifest_path, config['max_manifest_bytes'])
+    source_manifest_sha256 = sha(source_manifest_raw)
+    source_weights_sha256 = sha_file(source_weights_path)
+    code = {name: sha_file(trainer_dir / name) for name in (
+        'train_owned_assessment_sft.py', 'train_owned_student.py', 'owned_student.py',
+        'owned_sft_checkpoint.py', 'owned_multilabel_contract.py', 'masked_supervision.py')}
+    coverage.update({'config_sha256': sha(config_raw),
+        'trainer_code_sha256': code['train_owned_assessment_sft.py'], 'code_sha256': code,
+        'source_checkpoint_manifest_sha256': source_manifest_sha256,
+        'source_checkpoint_weights_sha256': source_weights_sha256,
+        'live_masked_supervision_code_sha256': code['masked_supervision.py']})
+    if (trainer.read_bounded(config_path, request['max_config_bytes']) != config_raw
+            or trainer.read_bounded(dataset / 'manifest.json', config['max_manifest_bytes']) != manifest_raw
+            or trainer.read_bounded(dataset / 'train.jsonl', config['max_dataset_bytes']) != training_raw
+            or trainer.read_bounded(source_manifest_path, config['max_manifest_bytes']) != source_manifest_raw
+            or sha_file(source_weights_path) != source_weights_sha256):
+        raise ValueError('input changed')
+    result = {'coverage_sha256': sha(trainer.canonical(coverage)),
+        'dataset_manifest_sha256': coverage['dataset_manifest_sha256'],
+        'training_file_sha256': coverage['training_file_sha256'],
+        'source_checkpoint_manifest_sha256': source_manifest_sha256,
+        'source_checkpoint_weights_sha256': source_weights_sha256}
+    print(json.dumps(result, separators=(',', ':')))
+except BaseException:
+    raise SystemExit(2)
+'''
+
+
+def trainer_multilabel_coverage(python_path: Path, trainer_path: Path, dataset: Path, config_path: Path,
+                                config_raw: bytes, max_config_bytes: int, source_path: Path,
+                                expected: dict) -> str:
+    """Compute the exact coverage identity in the configured trainer environment."""
+    request = {'trainer': str(trainer_path), 'dataset': str(dataset), 'config': str(config_path),
+               'source': str(source_path), 'max_config_bytes': max_config_bytes,
+               'config_sha256': hashlib.sha256(config_raw).hexdigest()}
     try:
-        spec.loader.exec_module(module)
-        trainer_config, trainer_config_raw = module.configuration(config_path, max_config_bytes)
-        if trainer_config_raw != config_raw:
-            raise ValueError('SFT config changed during checkpoint identity validation')
-        _, manifest_raw, train_raw, coverage = module.read_training(dataset, trainer_config)
-        if (digest(dataset / 'manifest.json') != hashlib.sha256(manifest_raw).hexdigest()
-                or digest(dataset / 'train.jsonl') != hashlib.sha256(train_raw).hexdigest()):
-            raise ValueError('multilabel training data changed during identity validation')
-        code = {name: digest(trainer_dir / name) for name in (
-            'train_owned_assessment_sft.py', 'train_owned_student.py', 'owned_student.py',
-            'owned_sft_checkpoint.py', 'owned_multilabel_contract.py', 'masked_supervision.py')}
-        coverage.update({'config_sha256': hashlib.sha256(config_raw).hexdigest(),
-            'trainer_code_sha256': code['train_owned_assessment_sft.py'], 'code_sha256': code,
-            'source_checkpoint_manifest_sha256': source_manifest_sha256,
-            'source_checkpoint_weights_sha256': source_weights_sha256,
-            'live_masked_supervision_code_sha256': code['masked_supervision.py']})
-        return hashlib.sha256(module.canonical(coverage)).hexdigest()
-    finally:
-        sys.path[:] = prior_path
-        sys.modules.pop(module_name, None)
+        child = subprocess.run([str(python_path), '-c', MULTILABEL_IDENTITY_VALIDATOR],
+                               input=json.dumps(request), capture_output=True, text=True, check=False)
+        if child.returncode != 0:
+            raise ValueError('trainer identity process failed')
+        result = json.loads(child.stdout)
+        if (not isinstance(result, dict)
+                or any(result.get(name) != expected[name] for name in (
+                    'dataset_manifest_sha256', 'training_file_sha256',
+                    'source_checkpoint_manifest_sha256', 'source_checkpoint_weights_sha256'))
+                or not isinstance(result.get('coverage_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', result['coverage_sha256'])):
+            raise ValueError('trainer identity result mismatch')
+        return result['coverage_sha256']
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise ValueError('cannot validate multilabel checkpoint identity in configured trainer environment') from None
 
 
 def sft_context(value: dict) -> dict:
@@ -186,8 +237,8 @@ def sft_context(value: dict) -> dict:
     if schema_config == 'lfg.owned-multilabel-sft-config.v1':
         code_names.extend(['owned_multilabel_contract.py', 'masked_supervision.py'])
         expected['multilabel_coverage_sha256'] = trainer_multilabel_coverage(
-            Path(value['trainer']), dataset, config_path, config_raw, value.get('max_sft_config_bytes', 65536),
-            expected['source_checkpoint_manifest_sha256'], expected['source_checkpoint_weights_sha256'])
+            Path(value['python']), Path(value['trainer']), dataset, config_path, config_raw,
+            value.get('max_sft_config_bytes', 65536), source, expected)
     expected['code_sha256'] = {name: digest(trainer_dir / name) for name in code_names}
     return {'schema_config': schema_config, 'checkpoint_schema': SFT_CHECKPOINT_SCHEMAS[schema_config],
             'result_schema': SFT_RESULT_SCHEMAS[schema_config], 'steps': steps,

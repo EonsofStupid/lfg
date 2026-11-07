@@ -388,7 +388,9 @@ class MultilabelSupervisorLoopTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'posix' and all(importlib.util.find_spec(name)
     for name in ('torch', 'safetensors')), 'POSIX torch and safetensors required for real trainer integration')
 class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
-    def _capture_child(self, command, real_popen, commands):
+    def _capture_child(self, command, real_popen, commands, **kwargs):
+        if kwargs:
+            return real_popen(command, **kwargs)
         commands.append(command)
         process = real_popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -433,7 +435,7 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
         commands = []
         real_popen = subprocess.Popen
         with patch.object(service.subprocess, 'Popen',
-                          lambda command: self._capture_child(command, real_popen, commands)):
+                          lambda command, **kwargs: self._capture_child(command, real_popen, commands, **kwargs)):
             service.run(service_config_path, exit_on_complete=True)
         self.assertEqual(len(commands), 1)
         self.assertIn('--resume', commands[0])
@@ -534,7 +536,7 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
         commands = []
         real_popen = subprocess.Popen
         with patch.object(service.subprocess, 'Popen',
-                          lambda command: self._capture_child(command, real_popen, commands)):
+                          lambda command, **kwargs: self._capture_child(command, real_popen, commands, **kwargs)):
             service.run(linked_path, exit_on_complete=True)
         self.assertEqual(len(commands), 1)
         self.assertIn('--resume', commands[0])
@@ -593,7 +595,9 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
             def send_signal(child, signum):
                 child.process.send_signal(signum)
 
-        with patch.object(service.subprocess, 'Popen', InterruptedChild):
+        with patch.object(service.subprocess, 'Popen',
+                          lambda command, **kwargs: actual_popen(command, **kwargs)
+                          if kwargs else InterruptedChild(command)):
             with self.assertRaisesRegex(RuntimeError, 'simulated supervisor interruption'):
                 service.run(service_config_path)
         self.assertEqual(len(commands), 1)
@@ -604,7 +608,7 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
         first_state = json.loads((first_checkpoint[1] / 'state.json').read_text())
         self.assertIn('multilabel_coverage_sha256', first_state['identity'])
         with patch.object(service.subprocess, 'Popen',
-                          lambda command: self._capture_child(command, actual_popen, commands)):
+                          lambda command, **kwargs: self._capture_child(command, actual_popen, commands, **kwargs)):
             service.run(service_config_path, exit_on_complete=True)
         self.assertEqual(len(commands), 2)
         self.assertIn('--resume', commands[1])
@@ -614,6 +618,76 @@ class TrainerGeneratedCheckpointIntegrationTests(unittest.TestCase):
         self.assertEqual(result_manifest['schema_version'], 'lfg.owned-multilabel-sft-result.v1')
         self.assertTrue(result_manifest['completed'])
         self.assertEqual(result_manifest['steps'], 2)
+
+    def test_dependencyless_supervisor_validates_checkpoint_in_configured_trainer_environment(self):
+        """A lightweight supervisor can verify a real ML checkpoint using the configured trainer Python."""
+        import subprocess
+        from test_train_owned_assessment_sft import OwnedAssessmentSFTTests
+
+        lightweight_python = Path('/usr/bin/python3')
+        if not lightweight_python.is_file():
+            self.skipTest('dependency-less system Python is unavailable')
+        dependency_probe = subprocess.run([str(lightweight_python), '-c',
+            "import importlib.util,sys; sys.exit(0 if not importlib.util.find_spec('torch') and not importlib.util.find_spec('safetensors') else 1)"],
+            capture_output=True, text=True, check=False)
+        if dependency_probe.returncode != 0:
+            self.skipTest('system Python is not dependency-less')
+        fixture = OwnedAssessmentSFTTests('test_multilabel_experiment_resumes_and_binds_source_and_configuration')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        dataset, _ = fixture.multilabel_fixture()
+        fixture.config.update(context=512, batch_size=2, steps=2, checkpoint_every=1,
+                              max_attention_elements=5_000_000, max_parameters=100_000, cpu_threads=1)
+        fixture.write_config()
+        trainer_path = Path(fixture.subject.__file__).resolve()
+        state_dir = fixture.root / 'dependencyless-supervisor-state'
+        segment = state_dir / 'segments' / 'seeded-segment'
+        segment.parent.mkdir(parents=True)
+        trained = fixture.subject.experiment(dataset, fixture.checkpoint, fixture.config_path,
+                                             segment, max_steps_this_run=1)
+        self.assertFalse(trained['completed'])
+        service_config = {'schema_version': 'lfg.owned-training-service.v1', 'trainer_kind': 'assessment_sft',
+            'python': sys.executable, 'trainer': str(trainer_path), 'state_dir': str(state_dir),
+            'dataset': str(dataset), 'checkpoint': str(fixture.checkpoint),
+            'sft_config': str(fixture.config_path), 'segment_steps': 1, 'status_poll_seconds': 1}
+        service_path = fixture.root / 'dependencyless-supervisor.json'
+        service_path.write_text(json.dumps(service_config))
+        driver = r'''import json, sys
+sys.path.insert(0, sys.argv[1])
+import owned_training_service as service
+value = service.config(service.Path(sys.argv[2]))
+contract = service.sft_context(value)
+latest = service.latest_checkpoint(service.Path(value['state_dir']) / 'segments', contract['checkpoint_schema'], sft=contract)
+print(json.dumps({'schema': contract['checkpoint_schema'], 'step': latest[0]}))
+'''
+        result = subprocess.run([str(lightweight_python), '-c', driver,
+                                 str(Path(service.__file__).resolve().parent), str(service_path)],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(json.loads(result.stdout),
+                         {'schema': 'lfg.owned-multilabel-sft-checkpoint.v1', 'step': 1})
+
+        # A configured interpreter without ML dependencies must fail closed, without a raw path/error leak.
+        bad_config = dict(service_config, python=str(lightweight_python))
+        bad_path = fixture.root / 'missing-trainer-dependencies.json'
+        bad_path.write_text(json.dumps(bad_config))
+        bad_driver = r'''import sys
+sys.path.insert(0, sys.argv[1])
+import owned_training_service as service
+try:
+    service.sft_context(service.config(service.Path(sys.argv[2])))
+except ValueError as error:
+    print(str(error))
+else:
+    raise SystemExit(3)
+'''
+        failed = subprocess.run([str(lightweight_python), '-c', bad_driver,
+                                 str(Path(service.__file__).resolve().parent), str(bad_path)],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(failed.returncode, 0, msg=failed.stderr)
+        self.assertEqual(failed.stdout.strip(),
+                         'cannot validate multilabel checkpoint identity in configured trainer environment')
+        self.assertNotIn(str(fixture.root), failed.stdout + failed.stderr)
 
 
 if __name__ == '__main__':
