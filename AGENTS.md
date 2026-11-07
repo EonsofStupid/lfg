@@ -15,6 +15,13 @@ Read this before planning work. It is the owner's direction.
   Top-K distillation, and RIPL's real-time latency targets (the owner's
   hypothesis is that RIPL uses a distinctive KV-cache design and organized
   shards). Do not adopt or rebrand their models, or anyone else's, as LFG.
+- **The first dev model can build on open models.** For the owner's own
+  deployment, the first dev model may be distilled from or built on open models
+  whose licenses allow it, so LFG can start developing itself alongside a dev
+  RRFlow. Use the owner's Sparks for the next few weeks and rent hardware only
+  for gaps measured there. A fully owned model remains the goal, and nothing
+  released to others may present another model as LFG's own. See the
+  [first dev model](docs/lfg/FIRST-DEV-MODEL.md).
 - **Organizational knowledge makes it hit above its weight.** Build the record
   of relationships between projects, prompts, models, agents and outcomes.
   Hold it in organized KV-cache shards, and periodically fine-tune stable
