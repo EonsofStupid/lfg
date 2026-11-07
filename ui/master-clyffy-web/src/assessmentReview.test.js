@@ -9,7 +9,7 @@ const script = readFileSync(resolve(root, 'app.js'), 'utf8')
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); document.body.replaceChildren() })
 
-async function openReview() {
+async function openReview(partialReview = null) {
   document.documentElement.innerHTML = markup
   window.location.hash = '#fixture-token'
   const profile = {project: 'fixture', complexities: [{id: 'c1', label: 'First'}],
@@ -19,9 +19,9 @@ async function openReview() {
   const item = {id: 'one', text: 'fixture request', project: 'fixture', split: 'train', source: {},
     labels: {intents: ['build'], capabilities: [], risks: []}, labels_pending: false,
     annotation_sha256: 'b'.repeat(64), redaction_suggestions: [{label: 'Preview redaction', start: 0, end: 7, replacement: '[redacted]'}], assessment_targets: null,
-    partial_review: {enabled: true, state: 'not_reviewed', binding: {source_sha256: '1'.repeat(64),
+    partial_review: partialReview || {enabled: true, state: 'not_reviewed', binding: {source_sha256: '1'.repeat(64),
       annotation_sha256: 'b'.repeat(64), taxonomy_sha256: '2'.repeat(64), text_sha256: '3'.repeat(64),
-      proposal_sha256: '4'.repeat(64), guide_sha256: null}, context_checks: []}}
+      proposal_sha256: '4'.repeat(64), guide_sha256: null}, context_checks: [], revision: null, history: []}}
   const itemResponse = {item, pending: 1, offset: 0, taxonomy: {intents: ['build'], capabilities: ['write'], risks: []},
     guide: null, guide_sha256: null, assessment_profile: profile, assessment_config_sha256: 'a'.repeat(64)}
   let submitted
@@ -72,8 +72,59 @@ test('partial mode records explicit judgments separately from rejected suggestio
   await waitFor(() => expect(submitted()).toBeDefined())
   expect(submitted().judgments).toEqual({intents: {build: 'positive'}, capabilities: {write: 'unknown'}})
   expect(submitted().proposal_actions).toEqual({intents: {build: 'rejected'}})
+  expect(submitted().operation).toBe('create')
+  expect(submitted().supersedes_event_id).toBeNull()
   expect(submitted().attestation).toBe('REVIEW PARTIAL LABELS')
   expect(vi.mocked(fetch).mock.calls.find(([url]) => String(url) === '/api/partial-decision')).toBeDefined()
+})
+
+function existingPartialReview(state = 'current') {
+  const binding = {source_sha256: '1'.repeat(64), annotation_sha256: 'b'.repeat(64),
+    taxonomy_sha256: '2'.repeat(64), text_sha256: '3'.repeat(64), proposal_sha256: '4'.repeat(64), guide_sha256: null}
+  const event = {schema_version: 'lfg.partial-label-review.v1', event_id: 'e'.repeat(32), id: 'one',
+    reviewer_claim: 'reviewer', reviewed_at: '2026-11-06T00:00:00+00:00', binding, judgments: {intents: {build: 'positive'}},
+    proposal_actions: {}, context_checks: [], revision: 1, event_type: 'decision', supersedes_event_id: null,
+    supersedes_event_sha256: null, attestation: 'Reviewer explicitly recorded partial label judgments; unknown cells remain unknown.'}
+  return {enabled: true, state, binding, event, history: [event],
+    revision: {event_id: event.event_id, event_sha256: 'f'.repeat(64), revision: 1, event_type: 'decision'}, context_checks: []}
+}
+
+test('saved partial labels are visible and full approval requires explicit reconciliation', async () => {
+  const submitted = await openReview(existingPartialReview())
+  expect(document.querySelector('#partial-history').hidden).toBe(false)
+  expect(document.querySelector('#partial-history-content').textContent).toContain('intents.build: positive')
+  document.querySelector('#attest').checked = true
+  document.querySelector('#approve').click()
+  await waitFor(() => expect(document.querySelector('#notice').textContent).toContain('reconciliation'))
+  expect(submitted()).toBeUndefined()
+  document.querySelector('#partial-reconcile').checked = true
+  vi.mocked(window.prompt).mockReturnValueOnce('RECONCILE PARTIAL REVIEW')
+  document.querySelector('#approve').click()
+  await waitFor(() => expect(submitted()).toBeDefined())
+  expect(submitted().partial_reconciliation).toEqual({event_id: 'e'.repeat(32),
+    event_sha256: 'f'.repeat(64), confirmation: 'RECONCILE PARTIAL REVIEW'})
+})
+
+test('existing partial review can be revised or retracted with a new event', async () => {
+  const submitted = await openReview(existingPartialReview('stale'))
+  expect(document.querySelector('#partial-history-status').textContent).toContain('stale and inactive')
+  document.querySelector('#partial-mode').click()
+  expect(document.querySelector('[aria-label="intents build judgment"]').value).toBe('')
+  document.querySelector('[aria-label="intents build judgment"]').value = 'negative'
+  document.querySelector('#partial-attest').checked = true
+  vi.mocked(window.prompt).mockReturnValue('REVISE PARTIAL REVIEW')
+  document.querySelector('#save-partial').click()
+  await waitFor(() => expect(submitted()?.operation).toBe('revise'))
+  expect(submitted().supersedes_event_id).toBe('e'.repeat(32))
+  expect(submitted().judgments).toEqual({intents: {build: 'negative'}})
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/item')).length).toBeGreaterThanOrEqual(2))
+  document.querySelector('#partial-mode').click()
+  expect(document.querySelector('#retract-partial').hidden).toBe(false)
+  vi.mocked(window.prompt).mockReturnValue('RETRACT PARTIAL REVIEW')
+  document.querySelector('#retract-partial').click()
+  await waitFor(() => expect(submitted()?.operation).toBe('retract'))
+  expect(submitted().judgments).toEqual({})
+  expect(submitted().supersedes_event_sha256).toBe('f'.repeat(64))
 })
 
 test('partial judgment cannot be saved against a redacted preview', async () => {

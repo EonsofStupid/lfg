@@ -4,8 +4,10 @@ import io
 import hashlib
 import os
 import subprocess
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,7 +74,7 @@ class ReviewWorkspaceTests(unittest.TestCase):
         self.assertFalse(state['event']['judgments'].get('capabilities'))
         stale = review.partial_review_state(self.workspace, 'id-0', 65536, 'f' * 64)
         self.assertEqual(stale['state'], 'stale')
-        self.assertIsNone(stale['event'])
+        self.assertEqual(stale['event']['judgments'], {'intents': {'build': 'positive'}})
         if os.name != 'nt':
             self.assertEqual((self.workspace / review.PARTIAL_REVIEW_FILE).stat().st_mode & 0o777, 0o600)
         with self.assertRaisesRegex(ValueError, 'already exists'):
@@ -95,11 +97,8 @@ class ReviewWorkspaceTests(unittest.TestCase):
         self.assertEqual(review.partial_review_state(self.workspace, 'id-1', 65536)['event']['judgments'],
                          {'intents': {'explain': 'negative'}})
 
-    def test_partial_review_requires_lock_and_rejects_stale_or_unsupported_data(self):
+    def test_partial_review_rejects_stale_or_unsupported_data(self):
         binding = self.partial_binding()
-        with self.assertRaisesRegex(ValueError, 'active workspace review lock'):
-            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
-                {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
         with train.run_lock(self.workspace / 'review'):
             with self.assertRaisesRegex(ValueError, 'changed'):
                 review.record_partial_decision(self.workspace, 'id-0', 'reviewer', {**binding, 'guide_sha256': 'f' * 64},
@@ -121,7 +120,7 @@ class ReviewWorkspaceTests(unittest.TestCase):
             lock = self.workspace / 'review.lock'
             original = lock.read_text(encoding='utf-8')
             lock.write_text('pid=99999999\n', encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'active workspace review lock'):
+            with self.assertRaisesRegex(ValueError, 'workspace review lock'):
                 review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
                     {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
             lock.write_text(original, encoding='utf-8')
@@ -131,6 +130,105 @@ class ReviewWorkspaceTests(unittest.TestCase):
                         {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
         self.assertFalse(sidecar.exists())
 
+    def test_direct_partial_write_acquires_process_lock(self):
+        binding = self.partial_binding()
+        review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+            {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        self.assertEqual(review.partial_review_state(self.workspace, 'id-0', 65536)['state'], 'current')
+
+    def test_full_approval_rejects_a_competing_process_lock(self):
+        marker = self.workspace / 'review.lock'
+        marker.write_text('pid=99999999\n', encoding='utf-8')
+        try:
+            with self.assertRaisesRegex(ValueError, 'another process holds'):
+                review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'))
+        finally:
+            marker.unlink()
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+
+    def test_partial_review_revisions_retractions_and_stale_revision_rejection(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+            first_state = review.partial_review_state(self.workspace, 'id-0', 65536)
+            first = first_state['revision']
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'negative'}}, {}, None, [], 65536, 'REVISE PARTIAL REVIEW',
+                'revise', first['event_id'], first['event_sha256'])
+            second_state = review.partial_review_state(self.workspace, 'id-0', 65536)
+            second = second_state['revision']
+            self.assertEqual(second_state['state'], 'current')
+            self.assertEqual(second_state['event']['judgments'], {'intents': {'build': 'negative'}})
+            self.assertEqual(len(second_state['history']), 2)
+            with self.assertRaisesRegex(ValueError, 'stale or conflicts'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                    {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVISE PARTIAL REVIEW',
+                    'revise', first['event_id'], first['event_sha256'])
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {}, {}, None, [], 65536, 'RETRACT PARTIAL REVIEW',
+                'retract', second['event_id'], second['event_sha256'])
+        retracted = review.partial_review_state(self.workspace, 'id-0', 65536)
+        self.assertEqual(retracted['state'], 'retracted')
+        self.assertEqual(len(retracted['history']), 3)
+        self.assertEqual(retracted['event']['judgments'], {})
+
+    def test_partial_review_can_be_revised_after_guide_change_and_checks_guide_at_commit(self):
+        guide = self.root / 'guide.json'
+        guide.write_text('old guidance', encoding='utf-8')
+        old_sha = hashlib.sha256(guide.read_bytes()).hexdigest()
+        binding = self.partial_binding(guide=old_sha)
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, old_sha, [], 65536, 'REVIEW PARTIAL LABELS',
+                guide_path=guide)
+        first = review.partial_review_state(self.workspace, 'id-0', 65536, old_sha)['revision']
+        guide.write_text('new reviewed guidance', encoding='utf-8')
+        new_sha = hashlib.sha256(guide.read_bytes()).hexdigest()
+        stale = review.partial_review_state(self.workspace, 'id-0', 65536, new_sha)
+        self.assertEqual(stale['state'], 'stale')
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', stale['binding'],
+                {'intents': {'build': 'negative'}}, {}, new_sha, [], 65536, 'REVISE PARTIAL REVIEW',
+                'revise', first['event_id'], first['event_sha256'], guide)
+        self.assertEqual(review.partial_review_state(self.workspace, 'id-0', 65536, new_sha)['state'], 'current')
+        second = review.partial_review_state(self.workspace, 'id-0', 65536, new_sha)['revision']
+        guide.write_text('changed while saving', encoding='utf-8')
+        changed_binding = review.partial_review_state(self.workspace, 'id-0', 65536, new_sha)['binding']
+        with train.run_lock(self.workspace / 'review'):
+            with self.assertRaisesRegex(ValueError, 'guide changed'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', changed_binding,
+                    {'intents': {'build': 'positive'}}, {}, new_sha, [], 65536, 'REVISE PARTIAL REVIEW',
+                    'revise', second['event_id'], second['event_sha256'], guide)
+
+    def test_partial_writers_serialize_same_process_threads_without_lost_updates(self):
+        barrier = threading.Barrier(2)
+
+        def save(identifier, label):
+            binding = self.partial_binding(identifier)
+            barrier.wait(timeout=5)
+            try:
+                review.record_partial_decision(self.workspace, identifier, 'reviewer', binding,
+                    {'intents': {label: 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+                return 'saved'
+            except ValueError as error:
+                return str(error)
+
+        with train.run_lock(self.workspace / 'review'):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                different = list(pool.map(lambda value: save(*value), [('id-0', 'build'), ('id-1', 'explain')]))
+        self.assertEqual(different, ['saved', 'saved'])
+        self.assertEqual(len(review._read_partial_events(self.workspace / review.PARTIAL_REVIEW_FILE, 65536)), 2)
+
+        barrier = threading.Barrier(2)
+        with train.run_lock(self.workspace / 'review'):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                same = list(pool.map(lambda _: save('id-2', 'build'), range(2)))
+        self.assertEqual(sum(result == 'saved' for result in same), 1)
+        self.assertEqual(sum('already exists' in result for result in same), 1)
+        events = review._read_partial_events(self.workspace / review.PARTIAL_REVIEW_FILE, 65536)
+        self.assertEqual(len(events), 3)
+
     def test_partial_review_is_separate_from_approved_export(self):
         binding = self.partial_binding()
         with train.run_lock(self.workspace / 'review'):
@@ -138,6 +236,52 @@ class ReviewWorkspaceTests(unittest.TestCase):
                 {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
         with self.assertRaisesRegex(ValueError, 'no current approvals'):
             review.export_approved(self.workspace, self.root / 'partial-export')
+
+    def test_library_approval_requires_and_persists_partial_reconciliation(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        partial = review.partial_review_state(self.workspace, 'id-0', 65536)
+        revision = partial['revision']
+        with self.assertRaisesRegex(ValueError, 'explicitly reconcile'):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+                {'intents': ['build'], 'capabilities': ['write'], 'risks': []},
+                max_partial_review_bytes=65536)
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+        reconciliation = {'event_id': revision['event_id'], 'event_sha256': revision['event_sha256'],
+                           'confirmation': 'RECONCILE PARTIAL REVIEW'}
+        review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+            {'intents': ['build'], 'capabilities': ['write'], 'risks': []},
+            partial_reconciliation=reconciliation, max_partial_review_bytes=65536)
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['partial_reconciliation'], {
+            'event_id': revision['event_id'], 'event_sha256': revision['event_sha256'],
+            'event_type': 'decision', 'revision': 1, 'acknowledgment': 'RECONCILE PARTIAL REVIEW'})
+
+    def test_interactive_cli_cannot_approve_past_partial_review(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        with patch('builtins.input', side_effect=['a', 'APPROVE']), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, 'configure --max-partial-review-bytes'):
+                review.interactive_review(self.workspace, 'reviewer')
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+
+    def test_interactive_cli_reconciles_only_after_showing_partial_history(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        output = io.StringIO()
+        with patch('builtins.input', side_effect=['a', 'APPROVE', 'RECONCILE PARTIAL REVIEW', 'q']), \
+                contextlib.redirect_stdout(output):
+            review.interactive_review(self.workspace, 'reviewer', 65536)
+        self.assertIn('SAVED PARTIAL REVIEW HISTORY', output.getvalue())
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['partial_reconciliation']['acknowledgment'],
+                         'RECONCILE PARTIAL REVIEW')
 
     def test_truncated_partial_sidecar_fails_closed(self):
         sidecar = self.workspace / review.PARTIAL_REVIEW_FILE
@@ -151,6 +295,18 @@ class ReviewWorkspaceTests(unittest.TestCase):
             review.partial_review_state(self.workspace, 'id-0', 65536)
         (self.root / '.gitignore').write_text('workspace/partial-reviews.v1.jsonl\n', encoding='utf-8')
         self.assertEqual(review.partial_review_state(self.workspace, 'id-0', 65536)['state'], 'not_reviewed')
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            with self.assertRaisesRegex(ValueError, 'ignored by Git'):
+                review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                    {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        self.assertFalse((self.workspace / review.PARTIAL_REVIEW_FILE).exists())
+        self.assertFalse(list(self.workspace.glob('.partial-review-*')))
+        (self.root / '.gitignore').write_text(
+            'workspace/partial-reviews.v1.jsonl\nworkspace/.partial-review-*\n', encoding='utf-8')
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
 
     def test_initialization_is_pending_private_and_does_not_overwrite(self):
         result = review.status(self.workspace)
@@ -296,6 +452,124 @@ class ReviewWorkspaceTests(unittest.TestCase):
         row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
         self.assertEqual(len(row['review_transforms']), 1)
         self.assertEqual(review.status(self.workspace)['decisions']['approved'], 1)
+
+    def test_interrupted_approval_with_partial_history_can_be_reconciled_on_recovery(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        state = review.partial_review_state(self.workspace, 'id-0', 65536)
+        revision = state['revision']
+        reconciliation = {'event_id': revision['event_id'], 'event_sha256': revision['event_sha256'],
+                           'confirmation': 'RECONCILE PARTIAL REVIEW'}
+        original = review.atomic_replace
+
+        def fail_ledger(path, content):
+            if path.name == 'reviews.jsonl':
+                raise OSError('simulated interruption')
+            original(path, content)
+
+        with patch.object(review, 'atomic_replace', side_effect=fail_ledger), self.assertRaises(OSError):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+                {'intents': ['explain'], 'capabilities': [], 'risks': []},
+                [{'start': 8, 'end': 15, 'replacement': '[request]'}],
+                partial_reconciliation=reconciliation, max_partial_review_bytes=65536)
+        row = json.loads((self.workspace / 'source-0000.jsonl').read_text(encoding='utf-8'))
+        self.assertTrue(row['verified'])
+        self.assertEqual(row['intents'], ['explain'])
+        self.assertEqual(row['text'], 'fixture [request] 0')
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+        recovered = review.partial_review_state(self.workspace, 'id-0', 65536)
+        self.assertEqual(recovered['state'], 'stale')
+        self.assertEqual(recovered['event']['judgments'], {'intents': {'build': 'positive'}})
+        review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+            partial_reconciliation=reconciliation, max_partial_review_bytes=65536)
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['decision'], 'approved')
+        self.assertEqual(ledger['id-0']['partial_reconciliation']['event_id'], revision['event_id'])
+
+    def test_interrupted_approval_rejects_externally_changed_verified_content(self):
+        binding = self.partial_binding()
+        with train.run_lock(self.workspace / 'review'):
+            review.record_partial_decision(self.workspace, 'id-0', 'reviewer', binding,
+                {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        revision = review.partial_review_state(self.workspace, 'id-0', 65536)['revision']
+        reconciliation = {'event_id': revision['event_id'], 'event_sha256': revision['event_sha256'],
+                           'confirmation': 'RECONCILE PARTIAL REVIEW'}
+        original = review.atomic_replace
+
+        def fail_ledger(path, content):
+            if path.name == 'reviews.jsonl':
+                raise OSError('simulated interruption')
+            original(path, content)
+
+        with patch.object(review, 'atomic_replace', side_effect=fail_ledger), self.assertRaises(OSError):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+                {'intents': ['explain'], 'capabilities': ['write'], 'risks': []},
+                partial_reconciliation=reconciliation, max_partial_review_bytes=65536)
+        path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        row['text'] = 'unrelated external modification'
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'interrupted review source content changed'):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+                partial_reconciliation=reconciliation, max_partial_review_bytes=65536)
+        self.assertEqual(review.status(self.workspace)['decisions']['pending'], 3)
+
+    def test_interrupted_write_accepts_previous_bound_marker_shape(self):
+        original = review.atomic_replace
+
+        def fail_ledger(path, content):
+            if path.name == 'reviews.jsonl':
+                raise OSError('simulated interruption')
+            original(path, content)
+
+        with patch.object(review, 'atomic_replace', side_effect=fail_ledger), self.assertRaises(OSError):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'),
+                                   {'intents': ['explain'], 'capabilities': [], 'risks': []})
+        path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        marker = row['review_write_provenance']
+        marker.pop('recovery_mode')
+        marker.pop('legacy_recovery_acknowledgment')
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', self.digest('id-0'))
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['decision'], 'approved')
+
+    def test_legacy_interrupted_approval_requires_fresh_attested_rereview(self):
+        path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        row['verified'] = True
+        row['text'] = 'legacy interrupted content to re-review'
+        row['intents'] = ['explain']
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        digest = self.digest('id-0')
+        with self.assertRaisesRegex(ValueError, 'requires explicit re-review'):
+            review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', digest)
+        review.record_decision(self.workspace, 'id-0', 'reviewer', 'approved', digest,
+            interrupted_recovery_ack='REVIEW CURRENT INTERRUPTED RECORD')
+        rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+        marker = rows[0]['review_write_provenance']
+        self.assertEqual(marker['recovery_mode'], 'legacy_explicit_rereview')
+        self.assertEqual(marker['legacy_recovery_acknowledgment'], 'REVIEW CURRENT INTERRUPTED RECORD')
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['decision'], 'approved')
+
+    def test_interactive_cli_supports_explicit_legacy_interrupted_rereview(self):
+        path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(path.read_text(encoding='utf-8'))
+        row['verified'] = True
+        row['text'] = 'legacy interrupted content to re-review'
+        path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        output = io.StringIO()
+        with patch('builtins.input', side_effect=['a', 'APPROVE', 'REVIEW CURRENT INTERRUPTED RECORD', 'q']), \
+                contextlib.redirect_stdout(output):
+            review.interactive_review(self.workspace, 'reviewer')
+        _, _, ledger = review.load_workspace(self.workspace)
+        self.assertEqual(ledger['id-0']['decision'], 'approved')
+        saved_row = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved_row['review_write_provenance']['recovery_mode'], 'legacy_explicit_rereview')
 
     def test_interactive_approval_requires_the_exact_confirmation(self):
         with patch('builtins.input', side_effect=['a', 'no', 'a', 'APPROVE', 'q']), contextlib.redirect_stdout(io.StringIO()):

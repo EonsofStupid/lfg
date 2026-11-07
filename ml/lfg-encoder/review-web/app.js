@@ -122,6 +122,34 @@
     }
   }
 
+  function renderPartialHistory(partial) {
+    const history = partial?.history || [];
+    const hasRevision = !!partial?.revision;
+    el('partial-history').hidden = !hasRevision;
+    el('partial-reconcile-label').hidden = !hasRevision;
+    el('partial-reconcile').checked = false;
+    if (!hasRevision) {
+      el('partial-history-status').textContent = '';
+      el('partial-history-content').textContent = '';
+      return;
+    }
+    const state = partial.state === 'current' ? 'Current partial review is active for this exact source and guide binding.' :
+      partial.state === 'stale' ? 'Earlier partial review is stale and inactive; review it as history only.' :
+        'The latest partial review was retracted; prior revisions remain in the audit history.';
+    el('partial-history-status').textContent = `${state} Full approval requires explicit reconciliation.`;
+    const lines = [];
+    for (const event of history) {
+      const sameBinding = Object.keys(partial.binding || {}).every(key => event.binding?.[key] === partial.binding[key]);
+      lines.push(`Revision ${event.revision}: ${event.event_type}${sameBinding ? ' (current binding)' : ' (stale binding)'}; reviewer claim: ${event.reviewer_claim}`);
+      for (const [field, labelsByState] of Object.entries(event.judgments || {}))
+        for (const [label, judgment] of Object.entries(labelsByState)) lines.push(`  ${field}.${label}: ${judgment}`);
+      for (const [field, labelsByAction] of Object.entries(event.proposal_actions || {}))
+        for (const [label, action] of Object.entries(labelsByAction)) lines.push(`  ${field}.${label} proposal: ${action}`);
+      if (event.event_type === 'retraction') lines.push('  This revision retracts the preceding partial review.');
+    }
+    el('partial-history-content').textContent = lines.join('\n');
+  }
+
   function renderAssessment(profile, configHash) {
     assessmentProfile = profile;
     assessmentModels = [];
@@ -239,6 +267,7 @@
     el('review-note').textContent = current.review_note || 'No review note recorded.';
     if (current.labels_pending) el('notice').textContent = 'No labels have been provided. Select every applicable label before approving.';
     if (current.interrupted_write) el('notice').textContent = 'An earlier write was interrupted. Review the current record again.';
+    if (current.legacy_interrupted_write) el('notice').textContent = 'This older interrupted write has no content-binding recovery marker. Review the current record and explicitly confirm that review before approval.';
     if (current.pending_changed) el('notice').textContent = 'This pending record changed. Reinitialize the workspace before deciding.';
     if (current.partial_review?.state === 'current') el('notice').textContent = 'A partial review is already recorded. It does not approve the record or make it training-ready.';
     if (current.partial_review?.state === 'stale') el('notice').textContent = 'An earlier partial review is stale because its source or guide changed. Its judgments are not active.';
@@ -250,10 +279,12 @@
     el('guide-notice').textContent = result.guide ? `${result.guide.notice} Guide revision: ${result.guide.revision}.` :
       'No label guide was configured for this review server.';
     labels(result.taxonomy, current.labels, result.guide);
-    const partialAvailable = current.partial_review?.enabled === true && current.partial_review.state === 'not_reviewed' &&
+    const partialAvailable = current.partial_review?.enabled === true &&
+      ['not_reviewed', 'current', 'stale', 'retracted'].includes(current.partial_review.state) &&
       current.pending_changed !== true && current.interrupted_write !== true;
     el('partial-mode-label').hidden = !partialAvailable;
     el('partial-mode').checked = false;
+    el('partial-attest').checked = false;
     el('partial-labels').hidden = true;
     el('labels').hidden = false;
     el('attest').closest('label').hidden = false;
@@ -261,6 +292,8 @@
     el('reject').hidden = false;
     el('approve').hidden = false;
     if (partialAvailable) partialLabels(result.taxonomy, current.labels, result.guide);
+    el('retract-partial').hidden = !partialAvailable || !current.partial_review.revision || current.partial_review.revision.event_type === 'retraction';
+    renderPartialHistory(current.partial_review);
     current.assessment_config_sha256 = result.assessment_config_sha256;
     renderAssessment(result.assessment_profile, result.assessment_config_sha256);
   }
@@ -271,12 +304,29 @@
       el('notice').textContent = 'Check the attestation after reviewing the source and every label.';
       return;
     }
+    let partialReconciliation = null;
+    if (decision === 'approved' && current.partial_review?.revision) {
+      if (!el('partial-reconcile').checked) {
+        el('notice').textContent = 'Inspect the partial review history and check the reconciliation attestation before full approval.';
+        return;
+      }
+      if (prompt('Type RECONCILE PARTIAL REVIEW to confirm this full decision reconciles prior partial labels.') !== 'RECONCILE PARTIAL REVIEW') return;
+      partialReconciliation = {event_id: current.partial_review.revision.event_id,
+        event_sha256: current.partial_review.revision.event_sha256, confirmation: 'RECONCILE PARTIAL REVIEW'};
+    }
+    let interruptedRecoveryAck = null;
+    if (decision === 'approved' && current.legacy_interrupted_write) {
+      if (prompt('Review the current record contents. Type REVIEW CURRENT INTERRUPTED RECORD to explicitly re-review this unbound legacy interrupted write.') !== 'REVIEW CURRENT INTERRUPTED RECORD') return;
+      interruptedRecoveryAck = 'REVIEW CURRENT INTERRUPTED RECORD';
+    }
     const confirmation = decision === 'approved' ? 'APPROVE' : 'REJECT';
     if (prompt(`Type ${confirmation} to ${decision === 'approved' ? 'approve' : 'reject'} this record.`) !== confirmation) return;
     const selected = { intents: [], capabilities: [], risks: [] };
     for (const box of document.querySelectorAll('#labels input:checked')) selected[box.dataset.field].push(box.value);
     const data = { id: current.id, annotation_sha256: current.annotation_sha256, decision,
       confirmation, labels: selected };
+    if (partialReconciliation) data.partial_reconciliation = partialReconciliation;
+    if (interruptedRecoveryAck) data.interrupted_recovery_ack = interruptedRecoveryAck;
     if (decision === 'approved' && current.guide_sha256) data.guide_sha256 = current.guide_sha256;
     if (decision === 'approved' && assessmentProfile) {
       const raw = el('assessment-agents').value;
@@ -324,10 +374,24 @@
       el('notice').textContent = 'Choose at least one explicit judgment or proposal action.';
       return;
     }
-    if (prompt('Type REVIEW PARTIAL LABELS to save this partial review.') !== 'REVIEW PARTIAL LABELS') return;
+    const operation = current.partial_review.revision ? 'revise' : 'create';
+    const operationPhrase = operation === 'revise' ? 'REVISE PARTIAL REVIEW' : 'REVIEW PARTIAL LABELS';
+    if (prompt(`Type ${operationPhrase} to save this partial review.`) !== operationPhrase) return;
     await api('/api/partial-decision', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({id: current.id, binding: current.partial_review.binding, judgments,
-        proposal_actions, attestation: 'REVIEW PARTIAL LABELS'})});
+        proposal_actions, operation, supersedes_event_id: current.partial_review.revision?.event_id || null,
+        supersedes_event_sha256: current.partial_review.revision?.event_sha256 || null, attestation: operationPhrase})});
+    await refresh(current.id);
+  }
+
+  async function retractPartial() {
+    if (!current?.partial_review?.revision || redactions.length || modelText !== current.text) return;
+    if (prompt('Type RETRACT PARTIAL REVIEW to retract the saved partial review.') !== 'RETRACT PARTIAL REVIEW') return;
+    await api('/api/partial-decision', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: current.id, binding: current.partial_review.binding, judgments: {}, proposal_actions: {},
+        operation: 'retract', supersedes_event_id: current.partial_review.revision.event_id,
+        supersedes_event_sha256: current.partial_review.revision.event_sha256,
+        attestation: 'RETRACT PARTIAL REVIEW'})});
     await refresh(current.id);
   }
 
@@ -438,8 +502,10 @@
     el('skip').hidden = enabled;
     el('reject').hidden = enabled;
     el('approve').hidden = enabled;
+    el('retract-partial').hidden = !enabled || !current?.partial_review?.revision || current.partial_review.revision.event_type === 'retraction';
   });
   el('save-partial').addEventListener('click', () => handle(savePartial()));
+  el('retract-partial').addEventListener('click', () => handle(retractPartial()));
   if (!token) el('notice').textContent = 'Open the complete local URL printed by the review server.';
   else {
     if (initialRecord) el('find-id').value = initialRecord;

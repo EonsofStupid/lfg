@@ -1122,9 +1122,28 @@ Partial decisions are stored in the workspace's private
 the source artifact, current annotation, text, taxonomy, guide, and proposal
 digests; it contains only digest/status/count context provenance, not source
 context text. The sidecar write is atomic and Windows ACLs are restricted to
-the current user (POSIX permissions are owner-only). If a binding changes, the earlier event is shown as stale and is
-not active. A partial review cannot be edited twice for the same record; start
-a new review workspace if a correction is required.
+the current user (POSIX permissions are owner-only). Revision and retraction
+are new append-only events that bind the prior event ID and digest. A changed
+source or guide makes the prior decision stale and inactive; after reviewing
+the current source and guide, a reviewer can record a new revision or retract
+the prior decision. Concurrent or stale revision attempts are rejected. The UI
+shows saved judgments and requires explicit reconciliation of the recorded
+history before full approval; the full-review ledger records the exact partial
+event ID and digest plus the typed acknowledgment. The shared approval operation
+enforces this for browser and command-line/library callers, so an ordinary full
+approval cannot silently overwrite partial judgments. Context provenance is
+marked `response_prepared`: producing an HTTP response does not prove that a
+client received or displayed it. For the terminal reviewer, pass
+`review --max-partial-review-bytes LIMIT`; it prints the saved history and asks
+for the same exact reconciliation phrase before approving. An approval write
+stores a digest-only recovery marker in the source before updating the ledger;
+retry accepts it only when the pending ledger digest, prior reconciliation
+attestation and current source content match that marker. A changed interrupted
+source remains visible as stale history but cannot be silently approved. Older
+interrupted rows without this marker can be recovered only after reviewing the
+current contents and typing `REVIEW CURRENT INTERRUPTED RECORD`; the new marker
+records that explicit fresh review, while the exact contents of the older
+interrupted action remain unknown.
 
 Partial decisions do not alter source rows, `verified`, or the full-review
 ledger. They are not approved records, are not exported by the existing

@@ -44,13 +44,20 @@
         <article class="panel">
           <h2>Labels</h2><p class="hint">Full review: unchecked labels count as negative. Partial review uses separate explicit positive, negative, or unknown judgments.</p>
           <p id="guide-notice" class="hint"></p>
-          <label id="partial-mode-label" class="attest" hidden><input type="checkbox" id="partial-mode"> Record a partial label review</label>
+          <section id="partial-history" hidden>
+            <h3>Partial review history</h3>
+            <p id="partial-history-status" class="hint"></p>
+            <pre id="partial-history-content" class="source"></pre>
+          </section>
+          <label id="partial-reconcile-label" class="attest" hidden><input type="checkbox" id="partial-reconcile"> I reviewed the saved partial history and reconciled it with this full decision.</label>
+          <label id="partial-mode-label" class="attest" hidden><input type="checkbox" id="partial-mode"> Record or revise a partial label review</label>
           <div id="labels"></div>
           <section id="partial-labels" hidden>
             <p class="hint">Draft suggestions are unverified. Accepting or rejecting a suggestion does not set a label judgment. Unset cells remain unknown.</p>
             <div id="partial-label-controls"></div>
             <label class="attest"><input type="checkbox" id="partial-attest"> I reviewed the source and explicitly selected only judgments I can support.</label>
             <button id="save-partial" type="button" class="primary">Save partial review</button>
+            <button id="retract-partial" type="button" class="danger" hidden>Retract saved partial review</button>
           </section>
           <section id="assessment" hidden>
             <h3>Assessment targets</h3>

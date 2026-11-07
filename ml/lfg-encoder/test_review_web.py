@@ -465,6 +465,18 @@ class ReviewWebTests(unittest.TestCase):
         session.write_bytes(b''.join(lines).replace(b'prior private text', b'changed private text'))
         self.assertEqual(self.request('POST', '/api/source-context', body=body, origin=self.server.origin)[0], 400)
         self.assertEqual(self.request('POST', '/api/following-source-context', body=body, origin=self.server.origin)[0], 400)
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        current_item = json.loads(raw)['item']
+        partial_body = {'id': current_item['id'], 'binding': current_item['partial_review']['binding'],
+            'judgments': {'intents': {'build': 'positive'}}, 'proposal_actions': {}, 'operation': 'create',
+            'supersedes_event_id': None, 'supersedes_event_sha256': None, 'attestation': 'REVIEW PARTIAL LABELS'}
+        with train.run_lock(workspace / 'review'):
+            status, _, data = self.request('POST', '/api/partial-decision', body=partial_body, origin=self.server.origin)
+        self.assertEqual(status, 200)
+        stored_partial = review_corpus.partial_review_state(workspace, current_item['id'], 65536)['event']
+        by_kind = {entry['kind'] for entry in stored_partial['context_checks']}
+        self.assertEqual(by_kind, {'prior_user_context', 'following_user_context'})
+        self.assertTrue(all(entry['status'] == 'response_prepared' for entry in stored_partial['context_checks']))
 
     def test_guided_review_binds_approval_to_displayed_guide_and_rejects_changes(self):
         guide = {'schema_version': 'lfg.review-label-guide.v1', 'revision': 'fixture', 'notice': 'Review carefully.',
@@ -642,6 +654,7 @@ class ReviewWebTests(unittest.TestCase):
         body = {'id': item['id'], 'binding': item['partial_review']['binding'],
                 'judgments': {'intents': {'build': 'positive', 'explain': 'unknown'}},
                 'proposal_actions': {'intents': {'build': 'rejected'}},
+                'operation': 'create', 'supersedes_event_id': None, 'supersedes_event_sha256': None,
                 'attestation': 'REVIEW PARTIAL LABELS'}
         self.assertEqual(self.request('POST', '/api/partial-decision', body=body, origin='https://evil.example')[0], 403)
         status, headers, raw = self.request('POST', '/api/partial-decision', body=body, origin=self.server.origin)
@@ -653,6 +666,58 @@ class ReviewWebTests(unittest.TestCase):
         self.assertEqual(stored['state'], 'current')
         self.assertEqual(stored['event']['judgments'], body['judgments'])
         self.assertEqual(stored['event']['proposal_actions'], body['proposal_actions'])
+        self.assertEqual(stored['revision']['revision'], 1)
+        self.assertEqual(len(stored['history']), 1)
+        full = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': {'intents': ['build'], 'capabilities': [], 'risks': []}}
+        self.assertEqual(self.request('POST', '/api/decision', body=full, origin=self.server.origin)[0], 400)
+        full['partial_reconciliation'] = {'event_id': stored['revision']['event_id'],
+            'event_sha256': stored['revision']['event_sha256'], 'confirmation': 'RECONCILE PARTIAL REVIEW'}
+        self.assertEqual(self.request('POST', '/api/decision', body=full, origin=self.server.origin)[0], 200)
+        self.assertEqual(review_corpus.status(self.workspace)['decisions']['approved'], 1)
+        _, _, ledger = review_corpus.load_workspace(self.workspace)
+        self.assertEqual(ledger[item['id']]['partial_reconciliation'], {
+            'event_id': stored['revision']['event_id'], 'event_sha256': stored['revision']['event_sha256'],
+            'event_type': 'decision', 'revision': 1, 'acknowledgment': 'RECONCILE PARTIAL REVIEW'})
+
+    def test_interrupted_approval_exposes_stale_partial_history_for_reconciliation(self):
+        status, _, raw = self.request('GET', '/api/item?offset=0')
+        item = json.loads(raw)['item']
+        partial = item['partial_review']
+        review_corpus.record_partial_decision(self.workspace, item['id'], 'fixture reviewer', partial['binding'],
+            {'intents': {'build': 'positive'}}, {}, None, [], 65536, 'REVIEW PARTIAL LABELS')
+        source_path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(source_path.read_text(encoding='utf-8'))
+        row['verified'] = True
+        source_path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+
+        status, _, raw = self.request('GET', '/api/item?offset=0')
+        recovered = json.loads(raw)['item']
+        self.assertTrue(recovered['interrupted_write'])
+        self.assertEqual(recovered['partial_review']['state'], 'stale')
+        self.assertEqual(recovered['partial_review']['event']['judgments'],
+                         {'intents': {'build': 'positive'}})
+        self.assertEqual(len(recovered['partial_review']['history']), 1)
+
+    def test_legacy_interrupted_api_requires_explicit_rereview_acknowledgment(self):
+        source_path = self.workspace / 'source-0000.jsonl'
+        row = json.loads(source_path.read_text(encoding='utf-8'))
+        row['verified'] = True
+        row['text'] = 'legacy interrupted content to re-review'
+        row['intents'] = ['explain']
+        source_path.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        _, _, raw = self.request('GET', '/api/item?offset=0')
+        item = json.loads(raw)['item']
+        self.assertTrue(item['legacy_interrupted_write'])
+        body = {'id': item['id'], 'annotation_sha256': item['annotation_sha256'],
+                'decision': 'approved', 'confirmation': 'APPROVE',
+                'labels': item['labels']}
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 400)
+        body['interrupted_recovery_ack'] = 'REVIEW CURRENT INTERRUPTED RECORD'
+        self.assertEqual(self.request('POST', '/api/decision', body=body, origin=self.server.origin)[0], 200)
+        _, _, ledger = review_corpus.load_workspace(self.workspace)
+        self.assertEqual(ledger[item['id']]['decision'], 'approved')
 
 
 if __name__ == '__main__':
