@@ -269,3 +269,46 @@ h1 { font-size: clamp(1.55rem, 3.2vw, 3.1rem); font-weight: 500; letter-spacing:
 .owned-fields dt { color: var(--muted); font-size: .8rem; }
 .owned-fields dd { margin: .3rem 0 0; overflow-wrap: anywhere; }
 .owned-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow: auto; }
+.classifier-comparison {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 1rem;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.classifier-file-inputs,
+.classifier-comparators {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.classifier-file-inputs label {
+  display: grid;
+  gap: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.classifier-comparison-results section {
+  padding: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.75rem;
+}
+
+.classifier-comparison-results dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(4rem, auto);
+  gap: 0.35rem 0.75rem;
+}
+
+.classifier-comparison-results dt {
+  color: var(--muted, #a8b2c2);
+  text-transform: capitalize;
+}
+
+.classifier-comparison-results dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { OwnedStatus } from './ownedAssessmentApi'
 import { compareReportedIdentity, feedbackStatusBounded, parsePairedReport, scanFeedbackJournal,
   type FeedbackAggregate, type PairedReport, type PathSummary } from './scorecard'
+import { compareArtifacts, digestSortedIdSet, parseClassifierReport,
+  type ClassifierArtifact, type ComparisonLink } from './classifierComparison'
 
 const DISPLAY_STATUSES = [
   'ok', 'busy', 'timeout', 'client_timeout', 'truncated', 'incomplete_output', 'malformed_output',
@@ -167,6 +169,9 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
   currentOwnedStatus: OwnedStatus | null
 }) {
   const [report, setReport] = useState<PairedReport | null>(null)
+  const [comparisonReports, setComparisonReports] = useState<{ classical: ClassifierArtifact | null; local: ClassifierArtifact | null; owned: ClassifierArtifact | null }>({ classical: null, local: null, owned: null })
+  const [comparisonError, setComparisonError] = useState('')
+  const [comparisonLink, setComparisonLink] = useState<ComparisonLink>({ state: 'unavailable', reasons: ['Select the three reports to inspect reported links.'] })
   const [fileError, setFileError] = useState('')
   const [feedbackTokenInput, setFeedbackTokenInput] = useState('')
   const [feedbackToken, setFeedbackToken] = useState<string | null>(null)
@@ -174,6 +179,10 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
   const [feedbackError, setFeedbackError] = useState('')
   const [feedbackAggregate, setFeedbackAggregate] = useState<FeedbackAggregate | null>(null)
   const importGeneration = useRef(0)
+  const comparisonGenerations = useRef({ classical: 0, local: 0, owned: 0 })
+  const comparisonReaders = useRef<{ classical: FileReader | null; local: FileReader | null; owned: FileReader | null }>({
+    classical: null, local: null, owned: null,
+  })
   const feedbackGeneration = useRef(0)
   const feedbackAbort = useRef<AbortController | null>(null)
   const fileReader = useRef<FileReader | null>(null)
@@ -192,10 +201,30 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
 
   useEffect(() => () => {
     importGeneration.current += 1
+    comparisonGenerations.current.classical += 1
+    comparisonGenerations.current.local += 1
+    comparisonGenerations.current.owned += 1
+    comparisonReaders.current.classical?.abort()
+    comparisonReaders.current.local?.abort()
+    comparisonReaders.current.owned?.abort()
     feedbackGeneration.current += 1
     feedbackAbort.current?.abort()
     fileReader.current?.abort()
   }, [])
+
+  useEffect(() => {
+    let active = true
+    const classical = comparisonReports.classical
+    const digestPromise = classical?.validationIdSetSha256
+      ? Promise.resolve(classical.validationIdSetSha256)
+      : classical?.validationIds ? digestSortedIdSet(classical.validationIds) : Promise.resolve(null)
+    void digestPromise.then((idDigest) => {
+      if (active) setComparisonLink(compareArtifacts(classical, comparisonReports.local, comparisonReports.owned, idDigest))
+    }).catch(() => {
+      if (active) setComparisonLink({ state: 'unavailable', reasons: ['Browser-local report linkage could not be computed.'] })
+    })
+    return () => { active = false }
+  }, [comparisonReports])
 
   const identityKey = currentOwnedStatus?.status === 'ready' && currentOwnedStatus.engine
     ? JSON.stringify([currentOwnedStatus.engine.inferenceBackend, currentOwnedStatus.engine.modelIdentityKind,
@@ -238,6 +267,64 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
       if (importGeneration.current === current) setReport(parsed)
     } catch {
       if (importGeneration.current === current) setFileError('The selected report could not be read or validated.')
+    }
+  }
+
+  async function importComparisonFile(slot: 'classical' | 'local' | 'owned', file?: File) {
+    const current = ++comparisonGenerations.current[slot]
+    comparisonReaders.current[slot]?.abort()
+    comparisonReaders.current[slot] = null
+    setComparisonError('')
+    setComparisonLink({ state: 'unavailable', reasons: ['Rechecking selected report links.'] })
+    setComparisonReports((previous) => ({ ...previous, [slot]: null }))
+    if (!file) return
+    const maxCombined = Number.isSafeInteger(maxBytes * 3) ? maxBytes * 3 : Number.MAX_SAFE_INTEGER
+    const retainedSize = (['classical', 'local', 'owned'] as const)
+      .filter((key) => key !== slot).reduce((sum, key) => sum + (comparisonReports[key]?.rawSize ?? 0), 0)
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || file.size > maxBytes
+        || !Number.isSafeInteger(retainedSize + file.size) || retainedSize + file.size > maxCombined) {
+      setComparisonError('A selected comparison report exceeds the configured per-file or combined byte limit.')
+      return
+    }
+    let buffer: ArrayBuffer | null = null
+    try {
+      buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader()
+        comparisonReaders.current[slot] = reader
+        reader.onload = () => resolve(reader.result as ArrayBuffer)
+        reader.onerror = () => reject(new Error('unreadable file'))
+        reader.onabort = () => reject(new Error('cancelled file'))
+        reader.readAsArrayBuffer(file)
+      })
+      if (comparisonGenerations.current[slot] !== current) return
+      comparisonReaders.current[slot] = null
+      if (buffer.byteLength > maxBytes || buffer.byteLength > maxCombined - retainedSize) throw new Error('oversized file')
+      let rawSha256: string | null = null
+      if (globalThis.crypto?.subtle) {
+        try {
+          const hash = await globalThis.crypto.subtle.digest('SHA-256', buffer)
+          if (comparisonGenerations.current[slot] !== current) return
+          rawSha256 = [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+        } catch { rawSha256 = null }
+      }
+      let parsed: unknown
+      try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer)) as unknown }
+      catch { throw new Error('invalid report') }
+      let artifact = parseClassifierReport(parsed, rawSha256)
+      let validationIdSetSha256 = artifact.validationIdSetSha256
+      if (artifact.validationIds && globalThis.crypto?.subtle) {
+        try { validationIdSetSha256 = await digestSortedIdSet(artifact.validationIds) }
+        catch { validationIdSetSha256 = null }
+      } else if (artifact.validationIds) validationIdSetSha256 = null
+      if (comparisonGenerations.current[slot] !== current) return
+      artifact = { ...artifact, validationIds: null, validationIdSetSha256 }
+      const rawSize = buffer.byteLength
+      setComparisonReports((previous) => ({ ...previous, [slot]: { ...artifact, rawSize } }))
+      setComparisonError('')
+    } catch {
+      if (comparisonGenerations.current[slot] === current) setComparisonError('The selected comparison report could not be read or validated.')
+    } finally {
+      if (buffer) new Uint8Array(buffer).fill(0)
     }
   }
 
@@ -340,6 +427,35 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
     </label>
     {fileError && <p role="alert">{fileError}</p>}
     {report && <ReportView report={report} currentOwnedStatus={currentOwnedStatus} />}
+    <section className="classifier-comparison" aria-label="Imported classifier comparison">
+      <h3>Exploratory classifier comparison</h3>
+      <p>Select the three aggregate reports explicitly. Each file is read locally in bounded memory. Report identities, screening and labels are author claims; this panel does not verify source content.</p>
+      <div className="classifier-file-inputs">
+        <label>Classical report JSON
+          <input type="file" accept="application/json,.json" onChange={(event) => {
+            const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void importComparisonFile('classical', file)
+          }} />
+        </label>
+        <label>Local model report JSON
+          <input type="file" accept="application/json,.json" onChange={(event) => {
+            const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void importComparisonFile('local', file)
+          }} />
+        </label>
+        <label>Owned LFG report JSON
+          <input type="file" accept="application/json,.json" onChange={(event) => {
+            const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; void importComparisonFile('owned', file)
+          }} />
+        </label>
+      </div>
+      <p>Each file is limited to {maxBytes.toLocaleString()} bytes; combined imported bytes are limited to {Number.isSafeInteger(maxBytes * 3) ? (maxBytes * 3).toLocaleString() : 'the safe configured maximum'}.</p>
+      {comparisonError && <p role="alert">{comparisonError}</p>}
+      <p role="status">Reported linkage: {comparisonLink.state === 'matching_reported_fields'
+        ? 'selected reports agree on the checked report-supplied fields.'
+        : comparisonLink.state === 'mismatch' ? 'one or more checked report-supplied fields differ.'
+          : 'unavailable until all reports and browser-local digests are available.'}</p>
+      {comparisonLink.reasons.length > 0 && <ul aria-label="Linkage details">{comparisonLink.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}
+      <ClassifierComparisonView reports={comparisonReports} link={comparisonLink} />
+    </section>
     <section aria-label="Feedback journal summary">
       <h3>Local feedback journal summary</h3>
       <p>This is a bounded count of current records traversed. The journal can change during traversal; this is not a snapshot. Confirmed outcomes are operator-reported observations, not verified success. Records can refer to the same assessment, so counts are not independent tasks or accuracy.</p>
@@ -372,6 +488,89 @@ export function ScorecardPanel({ maxBytes, maxFeedbackPages, maxFeedbackPageSize
       {feedbackToken && <p>Feedback token is held in this browser component's memory only. Feedback counts are journal-wide and are not linked to the imported report.</p>}
     </section>
   </section>
+}
+
+function formatComparisonMetric(key: string, value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'Unknown'
+  if (['accuracy', 'f1', 'precision', 'recall', 'coverage', 'macro_f1', 'macro_precision', 'macro_recall',
+    'micro_f1_on_covered', 'micro_precision_on_covered', 'micro_recall_on_covered', 'overall_coverage',
+    'prediction_coverage_on_known_targets', 'target_coverage', 'subset_accuracy_on_fully_scored'].includes(key))
+    return `${(value * 100).toFixed(2)}%`
+  return Number.isInteger(value) ? String(value) : value.toPrecision(4)
+}
+
+function TargetSupport({ support }: { support: ClassifierArtifact['targetSupport'] }) {
+  if (!support) return <p>Target support counts: Unknown.</p>
+  const rows = Object.entries(support as Record<string, Record<string, number>>)
+  if (!rows.length) return <p>Target support counts: Unknown.</p>
+  return <div><strong>Reported target observation support</strong><ul>
+    {rows.map(([label, counts]) => <li key={label}>{label}: {Object.entries(counts).map(([kind, count]) => `${kind.replaceAll('_', ' ')} ${count}`).join(' · ')}</li>)}
+  </ul></div>
+}
+
+function ClassifierComparisonView({ reports, link }: {
+  reports: { classical: ClassifierArtifact | null; local: ClassifierArtifact | null; owned: ClassifierArtifact | null }
+  link: ComparisonLink
+}) {
+  const classical = reports.classical
+  const local = reports.local
+  const owned = reports.owned
+  if (!classical && !local && !owned) return <p>No comparison reports selected.</p>
+  const metricList = (metrics: ClassifierArtifact['metrics'][string] | undefined) => {
+    if (!metrics) return <p>No report selected.</p>
+    const entries = Object.entries(metrics.values).filter(([key]) => key !== 'labels')
+    return entries.length === 0 ? <p>Metrics unavailable.</p> : <dl>{entries.map(([key, value]) =>
+      <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{formatComparisonMetric(key, value)}</dd></div>)}</dl>
+  }
+  const algorithmSections = classical ? Object.entries(classical.algorithms).map(([name, algorithm]) =>
+    <section key={name} aria-label={`Classical algorithm ${name}`}><h5>{name}</h5>
+      <p>Reported status: {algorithm.status}. Vectorize, fit and bulk-predict elapsed: {formatComparisonMetric('elapsed_ms', algorithm.elapsedMs)} ms.</p>
+      {metricList(algorithm.metrics)}
+    </section>) : null
+  const ownCoverage = owned?.metrics.owned?.values.coverage ?? owned?.metrics.owned?.values.overall_coverage ?? null
+  const directAssessment = link.state === 'matching_reported_fields' && ownCoverage !== null && ownCoverage > 0
+  const imported = [classical, local, owned].filter((value): value is ClassifierArtifact => value !== null)
+  const unreviewedClaim = imported.some((value) => value.labelsUnverifiedClaim === true)
+  const reviewedClaim = imported.length > 0 && imported.every((value) => value.labelsUnverifiedClaim === false)
+  const priorUseClaim = imported.some((value) => value.validationPreviouslyUsedClaim === true)
+  const independenceUnverified = imported.some((value) => value.validationIndependenceVerifiedClaim === false)
+  const independenceClaim = imported.some((value) => value.validationIndependenceVerifiedClaim === true)
+  return <div className="classifier-comparison-results">
+    <p><strong>Task:</strong> {classical?.taskField ?? local?.taskField ?? owned?.taskField ?? 'Unknown'}
+      {' · '}<strong>Validation rows:</strong> {classical?.validationRows ?? local?.validationRows ?? owned?.validationRows ?? 'Unknown'}
+      {' · '}<strong>Labels:</strong> {(classical?.labels ?? local?.labels ?? owned?.labels ?? []).join(', ') || 'Unknown'}</p>
+    <p>Report label-review claim: {unreviewedClaim ? 'metadata says labels are unreviewed.'
+      : reviewedClaim ? 'metadata says labels were reviewed; this is not independently verified.' : 'not established.'}
+      {' '}Validation history claim: {priorUseClaim ? 'a report states the development validation set had prior use.'
+        : independenceUnverified ? 'independence is not verified.'
+          : independenceClaim ? 'a report claims independent validation; this is not independently verified.' : 'not established.'}
+      {' '}Reports do not carry per-row target values or the per-row prediction intersection, so paired significance and winner claims are unavailable.</p>
+    <p>{directAssessment ? 'Reported fields link and the owned report records some coverage; this permits only an aggregate inspection.'
+      : 'Direct LFG competition is not assessable from these reports: reported coverage is absent/zero or report linkage is incomplete.'}</p>
+    <div className="classifier-comparators">
+      <section aria-label="Classical comparison results"><h4>Classical baselines</h4>
+        <p>{classical ? `${Object.keys(classical.algorithms).length} dynamically reported algorithms · ${classical.validationRows} validation rows` : 'Not selected.'}</p>
+        {classical && <TargetSupport support={classical.targetSupport} />}
+        {algorithmSections}
+      </section>
+      <section aria-label="Local model comparison results"><h4>Local model</h4>
+        <p>{local ? `${local.identity ?? 'Model identity unknown'} · ${local.validationRows} validation rows` : 'Not selected.'}</p>
+        {local && <p>Model identity is report-supplied and does not establish binary identity.</p>}
+        {metricList(local?.metrics.local_12b)}
+        {local && <TargetSupport support={local.targetSupport} />}
+        {local && <p>Reported request latency: median {formatComparisonMetric('median_ms', local.timing.median_ms)} ms; p95 {formatComparisonMetric('p95_ms', local.timing.p95_ms)} ms. Reported scope only.</p>}
+        {local && <p>Observed answer outcomes: {Object.entries(local.statuses).map(([k, v]) => `${k} ${v}`).join(' · ') || 'Unknown'}.</p>}
+      </section>
+      <section aria-label="Owned LFG comparison results"><h4>Owned LFG</h4>
+        <p>{owned ? `${owned.identity ?? 'Model identity unknown'} · ${owned.validationRows} validation rows` : 'Not selected.'}</p>
+        {owned && <p>Model identity is report-supplied and does not establish binary identity. Reported end-to-end timing: median {formatComparisonMetric('median_ms', owned.timing.median_ms)} ms; p95 {formatComparisonMetric('p95_ms', owned.timing.p95_ms)} ms.</p>}
+        {metricList(owned?.metrics.owned)}
+        {owned && <TargetSupport support={owned.targetSupport} />}
+        {owned && <p>Observed response statuses: {Object.entries(owned.statuses).map(([k, v]) => `${k} ${v}`).join(' · ') || 'Unknown'}.</p>}
+      </section>
+    </div>
+    <p>Differences in covered subsets remain. No metric is inferred when absent or null. Elapsed values are report-supplied scopes, not CPU time, model-only time, or cost. This exploratory comparison does not qualify a model or promote it.</p>
+  </div>
 }
 
 export default ScorecardPanel
