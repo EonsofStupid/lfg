@@ -37,9 +37,58 @@ WORKER_CONFIG_LIMIT = comparator.MAX_CONFIG_BYTES
 MASKED_ROW_SCHEMA = "lfg.masked-supervision-row.v1"
 MAX_TRAIN_PAYLOAD_ROWS = 100_000
 
+# These diagnostics are deliberately independent of exception text and config values.
+DIAGNOSTIC_SCHEMA = "lfg.teacher-lifecycle-diagnostic.v1"
+DIAGNOSTIC_PHASES = frozenset({
+    "config_validation", "receipt_validation", "remote_snapshot", "port_check",
+    "transient_preflight", "task_directory", "file_staging", "file_verification",
+    "model_install", "worker_startup", "control_handshake", "outside_port_denial",
+    "warmup_readiness", "payload_result", "host_recheck", "cleanup", "unknown",
+    "worker_config_validation", "worker_receipt_validation", "worker_boundary_check",
+    "worker_resource_snapshot", "worker_artifact_check", "worker_server_startup",
+    "worker_warmup", "worker_payload", "worker_result", "worker_cleanup",
+})
+_DIAGNOSTIC_PHASE = "unknown"
+_DIAGNOSTIC_CLEANUP = "not_started"
+
+
+def _diagnostic_phase(value: str) -> None:
+    global _DIAGNOSTIC_PHASE
+    _DIAGNOSTIC_PHASE = value if value in DIAGNOSTIC_PHASES else "unknown"
+
+
+def _diagnostic_category(exc: BaseException) -> str:
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    if isinstance(exc, (OSError, subprocess.SubprocessError)):
+        return "transport_or_io_failure"
+    if isinstance(exc, ProposalError):
+        return "validation_or_protocol_failure"
+    if isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+        return "validation_or_protocol_failure"
+    return "internal_failure"
+
+
+def _diagnostic_record(exc: BaseException) -> dict[str, str]:
+    record = {"schema_version": DIAGNOSTIC_SCHEMA,
+              "phase": _DIAGNOSTIC_PHASE if _DIAGNOSTIC_PHASE in DIAGNOSTIC_PHASES else "unknown",
+              "category": _diagnostic_category(exc), "cleanup": _DIAGNOSTIC_CLEANUP}
+    if isinstance(exc, WorkerDiagnosticError):
+        record.update({"worker_phase": exc.worker_phase, "worker_category": exc.worker_category,
+                       "worker_cleanup": exc.worker_cleanup})
+    return record
+
 
 class ProposalError(ValueError):
     pass
+
+
+class WorkerDiagnosticError(ProposalError):
+    def __init__(self, phase: str, category: str, cleanup: str):
+        super().__init__("worker reported a bounded lifecycle failure")
+        self.worker_phase = phase
+        self.worker_category = category
+        self.worker_cleanup = cleanup
 
 
 def _sha(raw: bytes) -> str:
@@ -462,25 +511,34 @@ def _worker_loop(records: list[dict], columns: list[dict], config: dict,
 
 
 def _worker(config_path: Path, expected_config_sha256: str) -> None:
+    _diagnostic_phase("worker_config_validation")
     cfg, config_sha = comparator.load_config(config_path)
     if config_sha != expected_config_sha256 or cfg.get("worker_code_sha256") != _sha(Path(__file__).read_bytes()):
         raise ProposalError("worker code or configuration digest mismatch")
+    _diagnostic_phase("worker_receipt_validation")
     receipt, receipt_sha = comparator.verify_acquisition(cfg)
+    _diagnostic_phase("worker_boundary_check")
     if (not sys.platform.startswith("linux") or not comparator._route_is_private()
             or os.geteuid() != cfg["remote_uid"]):
         raise ProposalError("worker is outside its configured private network namespace")
+    _diagnostic_phase("worker_resource_snapshot")
     resources_before = comparator.resource_snapshot(cfg, enforce=True)
+    _diagnostic_phase("worker_artifact_check")
     artifact = comparator.verify_installed_artifact(cfg, receipt)
     address, port, _ = comparator._loopback_endpoint(cfg["endpoint_url"])
     if address != "127.0.0.1":
         raise ProposalError("worker must use IPv4 loopback")
+    _diagnostic_phase("worker_server_startup")
     server = subprocess.Popen([cfg["server_binary_path"], "serve"], stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False, start_new_session=True,
         env={**os.environ, "OLLAMA_NO_CLOUD": "1", "OLLAMA_MODELS": cfg["model_store"],
              "OLLAMA_HOST": f"127.0.0.1:{port}"})
     response = None
     cleanup_verified = False
+    worker_primary_error = None
+    worker_primary_phase = None
     try:
+        _diagnostic_phase("worker_warmup")
         deadline = time.monotonic() + cfg["worker_start_timeout_seconds"]
         while time.monotonic() < deadline:
             if server.poll() is not None:
@@ -510,6 +568,7 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                  "worker_config_sha256": config_sha, "runtime_boundary": boundary,
                  "resources_before": resources_before}
         print(json.dumps(control_ready, sort_keys=True, separators=(",", ":")), flush=True)
+        _diagnostic_phase("worker_warmup")
         raw_ack = sys.stdin.buffer.readline(4097)
         if not raw_ack or len(raw_ack) > 4096 or not raw_ack.endswith(b"\n"):
             raise ProposalError("outside-boundary warmup acknowledgement is absent or invalid")
@@ -539,6 +598,7 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                  "model_identity": artifact_identity, "warmup": warmup,
                  "resources_before": resources_before}
         print(json.dumps(ready, sort_keys=True, separators=(",", ":")), flush=True)
+        _diagnostic_phase("worker_payload")
         raw_payload = sys.stdin.buffer.readline(cfg["max_payload_bytes"] + 1)
         if not raw_payload or len(raw_payload) > cfg["max_payload_bytes"] or not raw_payload.endswith(b"\n"):
             raise ProposalError("bounded worker payload is absent, oversized or incomplete")
@@ -560,6 +620,7 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
             raise ProposalError("bounded worker progress protocol exceeded its configured limit")
         for line in encoded_progress:
             print(line.decode("utf-8").rstrip("\n"), flush=True)
+        _diagnostic_phase("worker_result")
         resources_after = comparator.resource_snapshot(cfg, enforce=False)
         response = {"phase": "result", "schema_version": WORKER_RESULT_SCHEMA,
                     "payload_sha256": _sha(raw_payload), "rows_received": len(outputs),
@@ -570,12 +631,23 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                     "model_identity": artifact_identity, "model_layer_bytes": artifact["model_layer_bytes"],
                     "receipt_sha256": receipt_sha,
                     "runtime_boundary": boundary, "worker_config_sha256": config_sha}
+    except BaseException as exc:
+        worker_primary_error = exc
+        worker_primary_phase = _DIAGNOSTIC_PHASE
     finally:
-        children = comparator._descendant_pids(server.pid)
+        _diagnostic_phase("worker_cleanup")
+        cleanup_failure = False
+        try:
+            children = comparator._descendant_pids(server.pid)
+        except Exception:
+            children = []
+            cleanup_failure = True
         try:
             os.killpg(server.pid, 15)
         except ProcessLookupError:
             pass
+        except Exception:
+            cleanup_failure = True
         try:
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -583,10 +655,20 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                 os.killpg(server.pid, 9)
             except ProcessLookupError:
                 pass
-            server.wait(timeout=5)
-        lingering = [pid for pid in children if Path(f"/proc/{pid}").exists()]
-        if not lingering and server.poll() is not None:
-            cleanup_verified = True
+            except Exception:
+                cleanup_failure = True
+            try:
+                server.wait(timeout=5)
+            except Exception:
+                cleanup_failure = True
+        except Exception:
+            cleanup_failure = True
+        try:
+            lingering = [pid for pid in children if Path(f"/proc/{pid}").exists()]
+            if not cleanup_failure and not lingering and server.poll() is not None:
+                cleanup_verified = True
+        except Exception:
+            cleanup_failure = True
         if response is None:
             response = {"phase": "result", "schema_version": WORKER_RESULT_SCHEMA,
                         "worker_failed": True, "payload_sha256": None, "rows_received": 0,
@@ -594,8 +676,16 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                         "abort_reason": "worker_failed_before_result", "cleanup_verified": cleanup_verified}
         response["cleanup_verified"] = cleanup_verified
         response["server_exit_code"] = server.returncode
+        global _DIAGNOSTIC_CLEANUP
+        _DIAGNOSTIC_CLEANUP = "succeeded" if cleanup_verified else "failed"
     if not cleanup_verified:
+        if worker_primary_error is not None:
+            _diagnostic_phase(worker_primary_phase or "unknown")
+            raise worker_primary_error.with_traceback(worker_primary_error.__traceback__)
         raise ProposalError("task-owned worker server cleanup failed")
+    if worker_primary_error is not None:
+        _diagnostic_phase(worker_primary_phase or "unknown")
+        raise worker_primary_error.with_traceback(worker_primary_error.__traceback__)
     encoded = json.dumps(response, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     if len(encoded.encode("utf-8")) > cfg["max_response_bytes"]:
         raise ProposalError("bounded worker result exceeds configured response limit")
@@ -636,6 +726,16 @@ def _read_worker_line(process: subprocess.Popen, lines: queue.Queue, timeout: fl
     value = _json(line.encode("utf-8"), "worker protocol")
     if not isinstance(value, dict):
         raise ProposalError("isolated worker protocol must be an object")
+    if value.get("phase") == "worker_diagnostic":
+        valid_categories = {"timeout", "transport_or_io_failure", "validation_or_protocol_failure", "internal_failure"}
+        if (set(value) != {"phase", "schema_version", "worker_phase", "category", "cleanup"}
+                or value.get("schema_version") != DIAGNOSTIC_SCHEMA
+                or value.get("worker_phase") not in DIAGNOSTIC_PHASES
+                or not value.get("worker_phase", "").startswith("worker_")
+                or value.get("category") not in valid_categories
+                or value.get("cleanup") not in {"not_started", "succeeded", "failed"}):
+            raise ProposalError("isolated worker diagnostic protocol is invalid")
+        raise WorkerDiagnosticError(value["worker_phase"], value["category"], value["cleanup"])
     return value
 
 
@@ -663,6 +763,7 @@ def _worker_warmup_handshake(process: subprocess.Popen, lines: queue.Queue, comp
             or boundary.get("server_binary_sha256") != control.get("server_binary_sha256")
             or boundary.get("server_version") != control.get("server_version")):
         raise ProposalError("transient worker control boundary does not match pinned host/runtime identity")
+    _diagnostic_phase("outside_port_denial")
     if not comparator._remote_port_closed(comp):
         raise ProposalError("host namespace can reach the task worker loopback listener")
     ack = {"phase": "warmup_ack", "control_nonce": nonce,
@@ -673,6 +774,7 @@ def _worker_warmup_handshake(process: subprocess.Popen, lines: queue.Queue, comp
         process.stdin.flush()
     except OSError:
         raise ProposalError("empty warmup acknowledgement transport failed") from None
+    _diagnostic_phase("warmup_readiness")
     ready = _read_worker_line(process, lines,
         comp["worker_start_timeout_seconds"] + comp["timeout_seconds"]
         + comp["worker_ready_wait_margin_seconds"])
@@ -977,11 +1079,15 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
                           local_receipt: dict, local_receipt_sha: str,
                           manifest: dict | None, rows: list[dict] | None, binding: dict | None,
                           zero_rows: bool, expected_probe: dict | None = None) -> dict:
+    global _DIAGNOSTIC_CLEANUP
+    _DIAGNOSTIC_CLEANUP = "not_started"
+    _diagnostic_phase("remote_snapshot")
     host_before = _remote_identity_snapshot(comp)
     if (host_before["memory_available_bytes"] < comp["min_memory_available_bytes"]
             or host_before["home_disk_free_bytes"] < comp["min_disk_free_bytes"]
             or type(host_before.get("loaded_model_count")) is not int):
         raise ProposalError("remote host identity, capacity or service coexistence preflight failed")
+    _diagnostic_phase("port_check")
     if not comparator._remote_port_closed(comp):
         raise ProposalError("configured outside-host loopback port is occupied")
     run_id = uuid.uuid4().hex
@@ -996,6 +1102,7 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         "-p", f"CPUQuota={comp['resource_cpu_quota_percent']}%",
         "-p", f"TasksMax={comp['remote_scope_tasks_max']}", "--", comp["remote_true_path"]]
     preflight_script = f"import subprocess,sys; r=subprocess.run({preflight_argv!r},capture_output=True,timeout=30); sys.exit(r.returncode)"
+    _diagnostic_phase("transient_preflight")
     if comparator._ssh_run(comp, preflight_script, timeout=40).returncode != 0:
         raise ProposalError("transient cgroup resource preflight failed")
 
@@ -1036,13 +1143,17 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
     result = None
     installed = None
     cleanup_error = None
+    primary_error = None
+    primary_phase = None
     try:
+        _diagnostic_phase("task_directory")
         _remote_create_workdir(comp, workdir)
         work_created = True
         local_config_dir = _private_temp_directory("lfg-teacher-worker-config")
         worker_config_path_local = local_config_dir / "worker-config.json"
         _write_new(worker_config_path_local, worker_config_raw)
         _masked()._verify_owner_private_access(worker_config_path_local, is_directory=False)
+        _diagnostic_phase("file_staging")
         for local_path, remote_path, raw in ((adapter_path, paths["teacher"], adapter_raw),
                                               (comparator_path, paths["comparator"], comparator_raw),
                                               (worker_config_path_local, paths["config"], worker_config_raw)):
@@ -1051,27 +1162,33 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             copied = subprocess.run(argv, check=False, capture_output=True, timeout=120, shell=False)
             if copied.returncode != 0:
                 raise ProposalError("bounded private worker file transfer failed")
+        _diagnostic_phase("file_verification")
         _remote_verify_files(comp, paths, {paths["teacher"]: (adapter_sha, len(adapter_raw)),
             paths["comparator"]: (comparator_sha, len(comparator_raw)),
             paths["config"]: (worker_config_sha, len(worker_config_raw))})
         install_config["remote_adapter_path"] = paths["comparator"]
+        _diagnostic_phase("model_install")
         installed = comparator._remote_install(install_config, paths["config"])
         if installed.get("receipt_sha256") != local_receipt_sha:
             raise ProposalError("remote model receipt differs from locally pinned receipt")
         if not comparator._remote_port_closed(comp):
             raise ProposalError("outside-host loopback port became occupied before worker start")
+        _diagnostic_phase("worker_startup")
         command = _worker_command(comp, paths["teacher"], paths["config"], worker_config_sha, unit)
         process = subprocess.Popen(["ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-p", str(comp["ssh_port"]),
             f"{comp['remote_user']}@{comp['remote_host']}", command], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)
         lines = comparator._queue_protocol(process)
+        _diagnostic_phase("control_handshake")
         ready = _worker_warmup_handshake(process, lines, comp, host_before, adapter_sha,
                                          worker_config_sha, local_receipt_sha)
+        _diagnostic_phase("warmup_readiness")
         if ready.get("model_manifest_sha256") != comp["expected_manifest_sha256"]:
             raise ProposalError("warmed model identity differs from the pinned expected manifest")
         if not zero_rows:
             _validate_zero_probe_match(expected_probe, ready, host_before, cfg_sha, comp_sha,
                                        adapter_sha, comparator_sha, local_receipt_sha)
+        _diagnostic_phase("payload_result")
         if zero_rows:
             payload = {"schema_version": PAYLOAD_SCHEMA, "binding": payload_binding,
                        "records": [], "zero_row_probe": True}
@@ -1137,28 +1254,41 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             raise ProposalError("worker result, cleanup, or progress accounting failed")
         if zero_rows and (result.get("rows_received") != 0 or result.get("warmup", {}).get("status") != "completed"):
             raise ProposalError("zero-row probe did not complete isolated empty-input warmup")
+        _diagnostic_phase("host_recheck")
         host_after = comparator._remote_snapshot(comp)
         if (host_after["ollama_service_pid"] != host_before["ollama_service_pid"]
                 or host_after["ollama_version"] != host_before["ollama_version"]
                 or host_after["loaded_model_count"] != host_before["loaded_model_count"]):
             raise ProposalError("persistent host Ollama state changed during task-owned run")
+    except BaseException as exc:
+        primary_error = exc
+        primary_phase = _DIAGNOSTIC_PHASE
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
+        _diagnostic_phase("cleanup")
+        _DIAGNOSTIC_CLEANUP = "succeeded"
+        if process is not None:
             try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=15)
+            except Exception:
+                cleanup_error = "task-owned worker process cleanup failed"
+                _DIAGNOSTIC_CLEANUP = "failed"
         if work_created:
             try:
                 _remote_cleanup_worker(comp, workdir, unit)
-            except (OSError, ValueError, subprocess.SubprocessError):
+            except Exception:
                 cleanup_error = "task-owned remote cleanup failed"
+                _DIAGNOSTIC_CLEANUP = "failed"
         if 'local_config_dir' in locals():
             try:
                 shutil.rmtree(local_config_dir)
-            except OSError:
+            except Exception:
                 cleanup_error = "private local worker-config cleanup failed"
+                _DIAGNOSTIC_CLEANUP = "failed"
+    if primary_error is not None:
+        _diagnostic_phase(primary_phase or "unknown")
+        raise primary_error.with_traceback(primary_error.__traceback__)
     if cleanup_error:
         raise ProposalError(cleanup_error)
     if result is None:
@@ -1245,6 +1375,9 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
 
 
 def run(config_path: Path, zero_rows: bool = False) -> dict:
+    global _DIAGNOSTIC_CLEANUP
+    _DIAGNOSTIC_CLEANUP = "not_started"
+    _diagnostic_phase("config_validation")
     cfg, cfg_sha = load_config(config_path)
     comp_input = Path(cfg["comparison_config"])
     if comp_input.is_symlink():
@@ -1252,9 +1385,12 @@ def run(config_path: Path, zero_rows: bool = False) -> dict:
     comp_path = comp_input.resolve(strict=True)
     if not _private_file(comp_path):
         raise ProposalError("comparator configuration must be owner-private")
+    _diagnostic_phase("config_validation")
     comp, comp_sha = comparator.load_config(comp_path)
+    _diagnostic_phase("receipt_validation")
     local_receipt, local_receipt_sha = comparator.verify_acquisition(comp)
     # Reject a stale or unintended destination before opening any train payload.
+    _diagnostic_phase("remote_snapshot")
     _remote_identity_snapshot(comp)
     manifest = rows = binding = None
     if not zero_rows:
@@ -1273,6 +1409,9 @@ def run(config_path: Path, zero_rows: bool = False) -> dict:
 
 
 def main() -> None:
+    global _DIAGNOSTIC_CLEANUP
+    _diagnostic_phase("config_validation")
+    _DIAGNOSTIC_CLEANUP = "not_started"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--zero-row-probe", action="store_true")
@@ -1289,7 +1428,14 @@ def main() -> None:
             raise ProposalError("worker config digest is only valid in worker mode")
         result = run(args.config, zero_rows=args.zero_row_probe)
         print(json.dumps(result, sort_keys=True))
-    except (ProposalError, OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
+    except Exception as exc:
+        record = _diagnostic_record(exc)
+        if args.worker and record["phase"].startswith("worker_"):
+            worker_record = {"phase": "worker_diagnostic", "schema_version": DIAGNOSTIC_SCHEMA,
+                             "worker_phase": record["phase"], "category": record["category"],
+                             "cleanup": record["cleanup"]}
+            print(json.dumps(worker_record, sort_keys=True, separators=(",", ":")), flush=True)
+        print(json.dumps(record, sort_keys=True, separators=(",", ":")), file=sys.stderr)
         raise SystemExit("Teacher proposal task failed; check private configuration, source identity and bounds.") from None
 
 
