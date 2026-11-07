@@ -130,6 +130,16 @@ Check activation without consuming a model run:
 curl -sS http://127.0.0.1:4317/api/shippin/intelligence/lfg/status
 ```
 
+`POST /api/shippin/intelligence/lfg/runs` starts `codex exec` on your own Codex
+account in the server's working folder, so it is off by default. To turn it
+on, set `LFG_CODEX_RUNS_TOKEN` to a random value of at least 32 characters
+before starting a loopback server, and send that value in the
+`X-LFG-Session-Token` header. The route then serves only loopback callers
+whose `Host` is the listener's address, and refuses any other `Origin`. It
+never runs on a container or network listener. Allow other hosts or origins
+with comma-separated `LFG_CODEX_RUNS_ALLOWED_HOSTS` and
+`LFG_CODEX_RUNS_ALLOWED_ORIGINS`.
+
 ## Build and deployment
 
 Build the release binary:
