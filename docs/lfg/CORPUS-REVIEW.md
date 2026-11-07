@@ -1108,3 +1108,50 @@ python ml/lfg-encoder/inventory_checkpoint_prompts.py --repo REPO_PATH --revisio
 Add `--output PRIVATE_NEW_FILE.jsonl` only when a private review copy is needed.
 The destination must not already exist. The scanner reports source and code
 hashes, but those hashes and session identifiers are also sensitive metadata.
+
+### Partial per-label review
+
+The local review server can opt into partial decisions by setting the configured
+`max_partial_review_bytes` limit in `review-web-config.v1.json`. When enabled,
+the reviewer can record a positive, negative, or unknown judgment for selected
+taxonomy labels and can separately accept or reject a draft proposal. A rejected
+proposal does not imply a negative label. Unset cells are not judgments.
+
+Partial decisions are stored in the workspace's private
+`partial-reviews.v1.jsonl` sidecar under the active review lock. Each event binds
+the source artifact, current annotation, text, taxonomy, guide, and proposal
+digests; it contains only digest/status/count context provenance, not source
+context text. The sidecar write is atomic and Windows ACLs are restricted to
+the current user (POSIX permissions are owner-only). Revision and retraction
+are new append-only events that bind the prior event ID and digest. A changed
+source or guide makes the prior decision stale and inactive; after reviewing
+the current source and guide, a reviewer can record a new revision or retract
+the prior decision. Concurrent or stale revision attempts are rejected. The UI
+shows saved judgments and requires explicit reconciliation of the recorded
+history before full approval; the full-review ledger records the exact partial
+event ID and digest plus the typed acknowledgment. The shared approval operation
+enforces this for browser and command-line/library callers, so an ordinary full
+approval cannot silently overwrite partial judgments. Context provenance is
+marked `response_prepared`: producing an HTTP response does not prove that a
+client received or displayed it. For the terminal reviewer, pass
+`review --max-partial-review-bytes LIMIT`; it prints the saved history and asks
+for the same exact reconciliation phrase before approving. An approval write
+stores a digest-only recovery marker in the source before updating the ledger;
+retry accepts it only when the pending ledger digest, prior reconciliation
+attestation and current source content match that marker. A changed interrupted
+source remains visible as stale history but cannot be silently approved. Older
+interrupted rows without this marker can be recovered only after reviewing the
+current contents and typing `REVIEW CURRENT INTERRUPTED RECORD`; the new marker
+records that explicit fresh review, while the exact contents of the older
+interrupted action remain unknown.
+
+Partial decisions do not alter source rows, `verified`, or the full-review
+ledger. They are not approved records, are not exported by the existing
+approved-record export, and cannot be consumed by `train.py`. The current
+training loader does not support these partial masks. A future mask-aware
+consumer must preserve unknown cells explicitly before partial judgments can
+be used for training. Reviewer identity, source rights, screening, and label
+accuracy remain claims; this workflow does not independently verify them. A
+redacted preview changes the text binding, so partial review is blocked until
+the original request is restored. Legacy full approval/rejection remains a
+separate workflow with its existing checkbox semantics.

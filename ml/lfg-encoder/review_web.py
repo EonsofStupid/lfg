@@ -55,7 +55,7 @@ def load_config(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_bytes())
     fields = {'max_request_bytes', 'max_prompt_bytes', 'request_timeout_seconds'}
     if not isinstance(value, dict) or not fields | {'schema_version'} <= set(value) or \
-            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes', 'developer_ui_origins'}) or \
+            set(value) - (fields | {'schema_version', 'source_verification', 'source_context', 'source_following', 'checkpoint_verification', 'redaction_suggestions', 'max_assessment_profile_bytes', 'developer_ui_origins', 'max_partial_review_bytes'}) or \
             value['schema_version'] != 'lfg.review-web-config.v1' or \
             any(type(value[name]) is not int or value[name] < 1 for name in fields):
         raise ValueError('invalid local review web configuration')
@@ -67,6 +67,9 @@ def load_config(path: Path) -> dict[str, Any]:
     if 'max_assessment_profile_bytes' in value and (type(value['max_assessment_profile_bytes']) is not int
                                                      or value['max_assessment_profile_bytes'] < 1):
         raise ValueError('invalid assessment profile byte limit')
+    if 'max_partial_review_bytes' in value and (type(value['max_partial_review_bytes']) is not int
+                                                 or value['max_partial_review_bytes'] < 1):
+        raise ValueError('invalid partial review byte limit')
     if 'source_verification' in value:
         limits = value['source_verification']
         if (not isinstance(limits, dict) or set(limits) != {'max_session_bytes', 'max_line_bytes'}
@@ -248,6 +251,7 @@ class ReviewServer(HTTPServer):
         self.guide_path = guide_path.resolve(strict=True) if guide_path is not None else None
         self.guide, self.guide_sha256 = load_guide(self.guide_path, taxonomy) if self.guide_path else (None, None)
         self.assessment_path = assessment_path.resolve(strict=True) if assessment_path is not None else None
+        self.context_checks: dict[str, list[dict[str, Any]]] = {}
         if self.assessment_path:
             limit = self.config.get('max_assessment_profile_bytes')
             if type(limit) is not int or limit < 1:
@@ -381,16 +385,25 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     review_corpus.private_path(self.server.workspace, plan['taxonomy']))
                 if taxonomy_hash != self.server.taxonomy_hash:
                     raise ValueError('workspace taxonomy changed; restart review')
+                current_guide, current_guide_sha = (load_guide(self.server.guide_path, taxonomy)
+                                                    if self.server.guide_path is not None else (None, None))
                 if len(row['text'].encode('utf-8')) > self.server.config['max_prompt_bytes']:
                     self.json_reply(200, {'item': None, 'blocked': 'Request exceeds configured display limit.',
                                           'pending': len(pending), 'offset': offset})
                     return
                 annotation = corpus_audit.annotation_digest(row, source['project'], source['split'], taxonomy_hash)
-                stale = (not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation) or row['verified']
+                pending_changed = not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation
+                stale = pending_changed or row['verified']
                 suggestions = [] if stale else redaction_suggestions(row['text'], self.server.config.get('redaction_suggestions', []))
                 config, config_sha = (assessment_targets.load_config(self.server.assessment_path, self.server.config['max_assessment_profile_bytes'])
                                       if self.server.assessment_path else (None, None))
                 profile = assessment_targets.project_profile(config, source['project']) if config else None
+                partial = {'enabled': 'max_partial_review_bytes' in self.server.config,
+                           'state': 'disabled'}
+                if partial['enabled'] and not pending_changed:
+                    partial = review_corpus.partial_review_state(
+                        self.server.workspace, identifier, self.server.config['max_partial_review_bytes'], current_guide_sha)
+                partial['context_checks'] = self.server.context_checks.get(identifier, [])
                 self.json_reply(200, {'item': {'id': identifier, 'text': row['text'], 'source': row['source'],
                                                'review_note': row.get('review_note'), 'labels': {k: row[k] for k in evaluate.FIELDS},
                                                'labels_pending': row.get('labels_pending', False),
@@ -398,10 +411,13 @@ class ReviewHandler(BaseHTTPRequestHandler):
                                                'assessment_targets': row.get('assessment_targets'),
                                                'annotation_sha256': annotation,
                                                'redaction_suggestions': suggestions,
-                                               'pending_changed': not row['verified'] and ledger[identifier]['annotation_sha256'] != annotation,
-                                               'interrupted_write': bool(row['verified'])},
+                                               'partial_review': partial,
+                                               'pending_changed': pending_changed,
+                                               'interrupted_write': bool(row['verified']),
+                                               'legacy_interrupted_write': bool(row['verified'] and
+                                                   'review_write_provenance' not in row)},
                                       'taxonomy': {k: sorted(v) for k, v in taxonomy.items()},
-                                      'guide': self.server.guide, 'guide_sha256': self.server.guide_sha256,
+                                      'guide': current_guide, 'guide_sha256': current_guide_sha,
                                       'assessment_profile': profile,
                                       'assessment_config_sha256': config_sha if profile else None,
                                       'pending': len(pending), 'offset': offset})
@@ -414,7 +430,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if not self.authorized(post=True):
             self.reject_unauthorized_post(self.server.config['max_request_bytes'])
             return
-        if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context', '/api/following-source-context') or self.headers.get('Transfer-Encoding') or \
+        if self.path not in ('/api/decision', '/api/verify-source', '/api/source-context', '/api/following-source-context', '/api/partial-decision') or self.headers.get('Transfer-Encoding') or \
                 self.headers.get_content_type() != 'application/json':
             self.json_reply(400, {'error': 'invalid request'})
             return
@@ -429,6 +445,29 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError('incomplete request')
             value = json.loads(raw)
+            if self.path == '/api/partial-decision':
+                if 'max_partial_review_bytes' not in self.server.config:
+                    raise ValueError('partial review is not enabled by local configuration')
+                required = {'id', 'binding', 'judgments', 'proposal_actions', 'attestation', 'operation',
+                            'supersedes_event_id', 'supersedes_event_sha256'}
+                if not isinstance(value, dict) or set(value) != required or not isinstance(value['id'], str):
+                    raise ValueError('invalid partial review')
+                plan, _, _ = review_corpus.load_workspace(self.server.workspace)
+                taxonomy, taxonomy_hash = evaluate.load_taxonomy(
+                    review_corpus.private_path(self.server.workspace, plan['taxonomy']))
+                if taxonomy_hash != self.server.taxonomy_hash:
+                    raise ValueError('workspace taxonomy changed; restart review')
+                guide_sha = None
+                if self.server.guide_path is not None:
+                    _, guide_sha = load_guide(self.server.guide_path, taxonomy)
+                review_corpus.record_partial_decision(
+                    self.server.workspace, value['id'], self.server.reviewer, value['binding'],
+                    value['judgments'], value['proposal_actions'], guide_sha,
+                    self.server.context_checks.get(value['id'], []),
+                    self.server.config['max_partial_review_bytes'], value['attestation'], value['operation'],
+                    value['supersedes_event_id'], value['supersedes_event_sha256'], self.server.guide_path)
+                self.json_reply(200, {'saved': True, 'decision': 'partial'})
+                return
             if self.path in ('/api/verify-source', '/api/source-context', '/api/following-source-context'):
                 if (not isinstance(value, dict) or set(value) != {'id', 'annotation_sha256'}
                         or not isinstance(value['id'], str) or not isinstance(value['annotation_sha256'], str)):
@@ -439,6 +478,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         raise ValueError('following source context is not configured')
                     result = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
                                            self.server.config.get('source_verification'), following_limits=limits)
+                    check = {'kind': 'following_user_context', 'status': 'response_prepared',
+                        'count': len(result.get('messages', [])), 'digest': hashlib.sha256(json.dumps(
+                            result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()}
+                    checks = self.server.context_checks.setdefault(value['id'], [])
+                    if check not in checks:
+                        checks.append(check)
                     self.json_reply(200, result)
                 elif self.path == '/api/source-context':
                     limits = self.server.config.get('source_context')
@@ -446,6 +491,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
                         raise ValueError('source context is not configured')
                     result = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
                                            self.server.config.get('source_verification'), limits)
+                    check = {'kind': 'prior_user_context', 'status': 'response_prepared',
+                        'count': len(result.get('messages', [])), 'digest': hashlib.sha256(json.dumps(
+                            result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()}
+                    checks = self.server.context_checks.setdefault(value['id'], [])
+                    if check not in checks:
+                        checks.append(check)
                     self.json_reply(200, result)
                 else:
                     status = verify_source(self.server.workspace, value['id'], value['annotation_sha256'],
@@ -454,7 +505,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     self.json_reply(200, {'status': status})
                 return
             required = {'id', 'annotation_sha256', 'decision', 'confirmation', 'labels'}
-            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256', 'assessment_values', 'assessment_config_sha256'}):
+            if not isinstance(value, dict) or not required <= set(value) or set(value) - (required | {'redactions', 'guide_sha256', 'assessment_values', 'assessment_config_sha256', 'partial_reconciliation', 'interrupted_recovery_ack'}):
                 raise ValueError('invalid decision')
             decision = value['decision']
             if decision not in ('approved', 'rejected') or value['confirmation'] != ('APPROVE' if decision == 'approved' else 'REJECT'):
@@ -488,11 +539,35 @@ class ReviewHandler(BaseHTTPRequestHandler):
                     raise ValueError('no assessment profile is configured for this project')
             elif 'assessment_values' in value or 'assessment_config_sha256' in value:
                 raise ValueError('assessment values require an approved record and configured profile')
-            review_corpus.record_decision(self.server.workspace, value['id'], self.server.reviewer,
-                                          decision, value['annotation_sha256'], labels,
-                                          value.get('redactions'), self.server.config['max_prompt_bytes'], guide_sha256,
-                                          assessment, self.server.assessment_path if assessment is not None else None,
-                                          self.server.config.get('max_assessment_profile_bytes') if assessment is not None else None)
+            with review_corpus.partial_review_write_lock(self.server.workspace):
+                sidecar = self.server.workspace / review_corpus.PARTIAL_REVIEW_FILE
+                if decision == 'approved' and sidecar.exists():
+                    limit = self.server.config.get('max_partial_review_bytes')
+                    if type(limit) is not int or limit < 1:
+                        raise ValueError('configure a partial-review byte limit to reconcile the saved partial review')
+                    partial = review_corpus.partial_review_state(self.server.workspace, value['id'], limit,
+                                                                 guide_sha256)
+                    revision = partial.get('revision')
+                    reconciliation = value.get('partial_reconciliation')
+                    if revision is not None:
+                        if (not isinstance(reconciliation, dict) or set(reconciliation) !=
+                                {'event_id', 'event_sha256', 'confirmation'} or
+                                reconciliation.get('event_id') != revision['event_id'] or
+                                reconciliation.get('event_sha256') != revision['event_sha256'] or
+                                reconciliation.get('confirmation') != 'RECONCILE PARTIAL REVIEW'):
+                            raise ValueError('inspect and explicitly reconcile the saved partial review before approval')
+                    elif reconciliation is not None:
+                        raise ValueError('there is no partial review revision to reconcile')
+                elif value.get('partial_reconciliation') is not None:
+                    raise ValueError('there is no partial review revision to reconcile')
+                review_corpus.record_decision(self.server.workspace, value['id'], self.server.reviewer,
+                                              decision, value['annotation_sha256'], labels,
+                                              value.get('redactions'), self.server.config['max_prompt_bytes'], guide_sha256,
+                                              assessment, self.server.assessment_path if assessment is not None else None,
+                                              self.server.config.get('max_assessment_profile_bytes') if assessment is not None else None,
+                                              value.get('partial_reconciliation'),
+                                              self.server.config.get('max_partial_review_bytes'),
+                                              value.get('interrupted_recovery_ack'))
             self.json_reply(200, {'saved': True, 'decision': decision})
         except (OSError, ValueError, KeyError, TypeError, UnicodeError, socket.timeout) as error:
             self.json_reply(400, {'error': str(error)})
