@@ -3,6 +3,8 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import shlex
+import socket
 import tempfile
 import threading
 import time
@@ -11,6 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 import compare_local_12b as comparison
+
+TEST_MODEL = "fixture/model:development-tag"
 
 
 class ComparisonAdapterTests(unittest.TestCase):
@@ -53,6 +57,7 @@ class ComparisonAdapterTests(unittest.TestCase):
 
         class Redirect(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
                 seen.append(self.path)
                 self.send_response(307)
                 self.send_header("Location", "http://127.0.0.1:1/other")
@@ -110,15 +115,47 @@ class ComparisonAdapterTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_total_deadline_applies_to_slow_drip_headers(self):
+        class SlowHeaders(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.connection.sendall(b"HTTP/1.1 200 OK\r\n")
+                self.connection.sendall(b"Content-Type: application/json\r\n")
+                time.sleep(0.06)
+                try:
+                    self.connection.sendall(b"Content-Length: 2\r\n")
+                    time.sleep(0.06)
+                    self.connection.sendall(b"\r\n{}")
+                except OSError:
+                    pass
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), SlowHeaders)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = {"endpoint_url": f"http://127.0.0.1:{server.server_port}/api/chat",
+                  "timeout_seconds": 0.1, "max_request_bytes": 1024, "max_response_bytes": 1024}
+        started = time.monotonic()
+        try:
+            with self.assertRaises(TimeoutError):
+                comparison._http_call(config, b"{}")
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_request_contains_only_configured_schema_and_screened_fixture(self):
         config = {"system_prompt": "Choose from {labels}; abstain when unsure. Text: {text}",
-                  "model_name": comparison.PINNED_MODEL, "keep_alive": "5m",
+                  "model_name": TEST_MODEL, "keep_alive": "5m",
                   "num_ctx": 4096, "num_predict": 64, "temperature": 0.0, "seed": 1,
                   "top_k": 40, "top_p": 0.9, "repeat_penalty": 1.0}
         schema = comparison.output_schema(["build.software"])
         raw = comparison._schema_request(config, schema, "already-screened fixture")
         request = json.loads(raw)
-        self.assertEqual(request["model"], comparison.PINNED_MODEL)
+        self.assertEqual(request["model"], TEST_MODEL)
         self.assertEqual(request["format"], schema)
         self.assertIn("build.software", request["messages"][0]["content"])
         self.assertIn("already-screened fixture", request["messages"][0]["content"])
@@ -131,9 +168,9 @@ class ComparisonAdapterTests(unittest.TestCase):
 
             def do_GET(self):
                 self.paths.append(self.path)
-                body = json.dumps({"models": [{"name": comparison.PINNED_MODEL,
+                body = json.dumps({"models": [{"name": TEST_MODEL,
                                                 "digest": "sha256:" + "a" * 64,
-                                                "size": comparison.PINNED_MODEL_BYTES + 1024}]}).encode()
+                                                "size": 1200}]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -147,8 +184,8 @@ class ComparisonAdapterTests(unittest.TestCase):
         thread.start()
         config = {"endpoint_url": f"http://127.0.0.1:{server.server_port}/api/chat",
                   "timeout_seconds": 2.0, "max_request_bytes": 1024,
-                  "max_response_bytes": 4096, "model_name": comparison.PINNED_MODEL}
-        artifact = {"manifest_sha256": "a" * 64, "model_layer_bytes": comparison.PINNED_MODEL_BYTES}
+                  "max_response_bytes": 4096, "model_name": TEST_MODEL}
+        artifact = {"manifest_sha256": "a" * 64, "model_layer_bytes": 1200}
         try:
             result = comparison.verify_loaded_model(config, artifact)
             self.assertTrue(result["identity_match"])
@@ -174,6 +211,18 @@ class ComparisonAdapterTests(unittest.TestCase):
                                                          ["always-negative"], "majority_class")
         self.assertEqual(all_negative["always-negative"]["mode"], "constant_target_majority_fallback")
         self.assertEqual(all_negative["always-negative"]["constant_train_value"], 0)
+
+    def test_model_responses_are_not_replaced_by_constant_target_fallback(self):
+        predictions = comparison._response_prediction_matrix([[1], [None], [None]], ["only-label"], 3)
+        self.assertEqual(predictions, [[1], [-1], [-1]])
+        outcomes = ["answered", "timeout_unknown_worker_lifecycle", "not_attempted_after_abort"]
+        self.assertEqual(comparison._http_requests_started(outcomes), 2)
+
+    def test_attempted_timing_excludes_not_started_zeroes(self):
+        summary = comparison._stats([12.0, None, 18.0, None])
+        self.assertEqual(summary["count"], 2)
+        self.assertEqual(summary["missing_count"], 2)
+        self.assertEqual(summary["median_ms"], 15.0)
 
     def test_worker_recomputes_text_identity_and_partial_label_masks(self):
         record_id = "a" * 64
@@ -241,14 +290,14 @@ class ComparisonAdapterTests(unittest.TestCase):
             "classical_config": "unused", "classical_config_sha256": "b" * 64,
             "acquisition_receipt": "unused", "acquisition_receipt_sha256": "c" * 64,
             "remote_acquisition_receipt": "/home/hades/receipt.json",
-            "model_store": "/tmp/model", "model_name": comparison.PINNED_MODEL,
+            "model_store": "/tmp/model", "model_name": TEST_MODEL,
             "server_binary_sha256": "d" * 64, "server_version": "0.30.11",
             "endpoint_url": "http://127.0.0.1:11434/api/chat", "keep_alive": "10m",
             "max_report_bytes": 10000, "max_baseline_report_bytes": 10000,
             "max_source_bytes": 10000, "max_total_source_bytes": 20000,
             "max_manifest_bytes": 10000, "max_screened_file_bytes": 10000,
             "max_policy_bytes": 10000, "max_ledger_bytes": 10000,
-            "max_model_manifest_bytes": 10000, "max_model_blob_bytes": comparison.PINNED_MODEL_BYTES,
+            "max_model_manifest_bytes": 10000, "max_model_blob_bytes": 999999,
             "hash_chunk_bytes": 65536, "max_server_binary_bytes": 100000000,
             "min_memory_available_bytes": 1000000000, "min_disk_free_bytes": 1000000000,
             "min_gpu_free_bytes": 0, "gpu_memory_policy": "shared_unified_memory_unavailable",
@@ -264,6 +313,20 @@ class ComparisonAdapterTests(unittest.TestCase):
             "runtime_port": 11435, "ssh_port": 22, "worker_start_timeout_seconds": 900,
             "resource_memory_max_bytes": 51539607552, "resource_cpu_quota_percent": 200,
             "max_server_binary_bytes": 100000000, "max_payload_bytes": 20000,
+            "expected_upstream_revision": "1" * 40,
+            "expected_registry_manifest_url": "https://registry.ollama.ai/v2/fixture/model/manifests/development-tag",
+            "expected_manifest_sha256": "e" * 64, "expected_model_blob_sha256": "f" * 64,
+            "expected_model_blob_bytes": 900000,
+            "expected_license_name": "Fixture License", "expected_quantization": "fixture format",
+            "remote_home": "/home/hades", "remote_expected_hostname": "clyffy-03",
+            "remote_expected_architecture": "aarch64", "remote_system_service": "ollama.service",
+            "remote_systemctl_path": "/usr/bin/systemctl", "remote_sudo_path": "/usr/bin/sudo",
+            "remote_systemd_run_path": "/usr/bin/systemd-run", "remote_unshare_path": "/usr/bin/unshare",
+            "remote_bash_path": "/usr/bin/bash", "remote_ip_path": "/usr/sbin/ip",
+            "remote_setpriv_path": "/usr/bin/setpriv", "remote_true_path": "/usr/bin/true",
+            "remote_nvidia_smi_path": "/usr/bin/nvidia-smi", "remote_scope_tasks_max": 512,
+            "worker_ready_wait_margin_seconds": 90, "artifact_install_timeout_seconds": 600,
+            "batch_overhead_margin_seconds": 120,
             "operator_extension": {"future_field": "ignored"},
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,31 +334,154 @@ class ComparisonAdapterTests(unittest.TestCase):
             path.write_text(json.dumps(config), encoding="utf-8")
             loaded, _ = comparison.load_config(path)
         self.assertEqual(loaded["operator_extension"], {"future_field": "ignored"})
+        self.assertEqual(loaded["model_name"], TEST_MODEL)
+        self.assertEqual(loaded["expected_manifest_sha256"], "e" * 64)
+        self.assertEqual(loaded["remote_scope_tasks_max"], 512)
+
+        config.update({
+            "model_name": "team/model:version-2-q8_0",
+            "expected_upstream_revision": "2" * 64,
+            "expected_registry_manifest_url": "https://registry.ollama.ai/v2/team/model/manifests/version-2-q8_0",
+            "expected_manifest_sha256": "1" * 64,
+            "expected_model_blob_sha256": "2" * 64,
+            "expected_model_blob_bytes": 900000,
+            "expected_license_name": "Alternate License",
+            "expected_quantization": "Q8_0",
+            "resource_cpu_quota_percent": 2500,
+            "remote_home": "/srv/worker home",
+            "remote_acquisition_receipt": "/srv/worker home/receipt file.json",
+            "remote_workdir": "/srv/worker home/runs",
+            "remote_model_store": "/srv/worker home/models",
+            "remote_adapter_path": "/srv/worker home/runs/compare_local_12b.py",
+            "remote_python_path": "/opt/python with space/bin/python3",
+            "server_binary_path": "/opt/ollama suite/bin/ollama",
+            "remote_expected_hostname": "example-host",
+            "remote_expected_architecture": "aarch64",
+            "remote_system_service": "ollama-alt.service",
+            "remote_scope_tasks_max": 768,
+            "worker_ready_wait_margin_seconds": 75,
+            "artifact_install_timeout_seconds": 450,
+            "batch_overhead_margin_seconds": 30,
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alternate-config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            alternate, _ = comparison.load_config(path)
+        self.assertEqual(alternate["model_name"], "team/model:version-2-q8_0")
+        self.assertEqual(alternate["expected_manifest_sha256"], "1" * 64)
+        self.assertEqual(alternate["expected_model_blob_sha256"], "2" * 64)
+        self.assertEqual(alternate["expected_quantization"], "Q8_0")
+        self.assertEqual(alternate["resource_cpu_quota_percent"], 2500)
+        self.assertEqual(alternate["remote_scope_tasks_max"], 768)
+        self.assertEqual(alternate["worker_ready_wait_margin_seconds"], 75)
+        unsafe_timeout = dict(config)
+        unsafe_timeout["batch_overhead_margin_seconds"] = 10**30
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unsafe-timeout.json"
+            path.write_text(json.dumps(unsafe_timeout), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "safe platform timeout arithmetic"):
+                comparison.load_config(path)
+
+        for field, value in (("remote_host", "host;touch /tmp/pwn"),
+                             ("remote_user", "worker$(id)")):
+            unsafe = dict(config)
+            unsafe[field] = value
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "unsafe-config.json"
+                path.write_text(json.dumps(unsafe), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "SSH user or host"):
+                    comparison.load_config(path)
+
+    def test_remote_worker_command_quotes_space_paths_and_rejects_metacharacters(self):
+        config = {"remote_sudo_path": "/usr/bin/sudo", "remote_systemd_run_path": "/usr/bin/systemd-run",
+                  "remote_unshare_path": "/usr/bin/unshare", "remote_bash_path": "/usr/bin/bash",
+                  "remote_ip_path": "/usr/sbin/ip", "remote_setpriv_path": "/usr/bin/setpriv",
+                  "remote_python_path": "/opt/python with space/bin/python3", "remote_uid": 1001,
+                  "remote_user": "worker", "remote_host": "example-host", "remote_home": "/srv/worker home",
+                  "resource_memory_max_bytes": 4096, "resource_cpu_quota_percent": 2500,
+                  "remote_scope_tasks_max": 768}
+        command = comparison._worker_remote_command(
+            config, "/srv/worker home/runs/compare script.py", "/srv/worker home/runs/config file.json",
+            "lfg12b-" + "a" * 20 + ".scope")
+        outer = shlex.split(command)
+        inner = shlex.split(outer[-1])
+        self.assertIn("/opt/python with space/bin/python3", inner)
+        self.assertIn("/srv/worker home/runs/compare script.py", inner)
+        self.assertIn("TasksMax=768", command)
+        unsafe = {**config, "remote_python_path": "/usr/bin/python3;touch /tmp/pwn"}
+        with self.assertRaisesRegex(ValueError, "unsafe remote executable"):
+            comparison._worker_remote_command(unsafe, "/srv/worker home/adapter.py",
+                                              "/srv/worker home/config.json", "lfg12b-" + "b" * 20 + ".scope")
+
+    def test_ssh_script_command_quotes_interpreter_and_rejects_destination_injection(self):
+        config = {"remote_python_path": "/opt/python with space/bin/python3", "remote_user": "worker",
+                  "remote_host": "example-host", "ssh_port": 2222}
+        with mock.patch.object(comparison.subprocess, "run") as run_mock:
+            comparison._ssh_run(config, "print('fixture')")
+        command = run_mock.call_args.args[0][-1]
+        self.assertIn("'/opt/python with space/bin/python3'", command)
+        self.assertIn("-I", command)
+        unsafe = {**config, "remote_host": "example-host;touch /tmp/pwn"}
+        with mock.patch.object(comparison.subprocess, "run") as run_mock:
+            with self.assertRaisesRegex(ValueError, "unsafe SSH destination"):
+                comparison._ssh_run(unsafe, "print('fixture')")
+            run_mock.assert_not_called()
+
+    def test_acquisition_identity_uses_configured_alternate_pins(self):
+        receipt = {"schema": comparison.RECEIPT_SCHEMA, "outcome": "verified_downloaded_not_loaded",
+                   "manifest": {"sha256": "1" * 64, "bytes": 80, "file": "manifest.json"},
+                   "objects": [{"digest": "sha256:" + "2" * 64, "bytes": 90,
+                                "sha256_verified": True}],
+                   "sources": {"upstream_model_revision": "3" * 40,
+                               "registry_manifest": "https://registry.ollama.ai/v2/team/model/manifests/tag"},
+                   "provenance": {}, "staging_locator": "private fixture locator"}
+        raw = json.dumps(receipt, separators=(",", ":")).encode()
+        config = {"acquisition_receipt_sha256": comparison.sha(raw), "max_report_bytes": 10000,
+                  "expected_manifest_sha256": "1" * 64, "expected_model_blob_sha256": "2" * 64,
+                  "expected_model_blob_bytes": 90, "expected_upstream_revision": "3" * 40,
+                  "expected_registry_manifest_url": "https://registry.ollama.ai/v2/team/model/manifests/tag"}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "receipt.json"
+            path.write_bytes(raw)
+            config["acquisition_receipt"] = str(path)
+            loaded, digest = comparison.verify_acquisition(config)
+        self.assertEqual(digest, comparison.sha(raw))
+        self.assertEqual(loaded["manifest"]["sha256"], "1" * 64)
+        config["expected_model_blob_sha256"] = "4" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "receipt.json"
+            path.write_bytes(raw)
+            config["acquisition_receipt"] = str(path)
+            with self.assertRaisesRegex(ValueError, "configured verified model layer"):
+                comparison.verify_acquisition(config)
 
     def test_complete_aggregate_assembly_accepts_real_worker_result_shape(self):
         import numpy as np
         label = "build.software"
         train_rows = [{"id": "train-1"}, {"id": "train-2"}]
-        validation_rows = [{"id": "dev-1"}, {"id": "dev-2"}]
-        y_train = np.array([[1], [0]])
+        validation_rows = [{"id": "dev-1"}, {"id": "dev-2"}, {"id": "dev-3"}]
+        y_train = np.array([[0], [0]])
         train_known = np.array([[True], [True]])
-        y_validation = np.array([[1], [0]])
-        validation_known = np.array([[True], [True]])
+        y_validation = np.array([[1], [0], [0]])
+        validation_known = np.array([[True], [True], [True]])
         validation_ids = [comparison.sha(row["id"].encode()) for row in validation_rows]
         baseline = {"code_sha256": "1" * 64,
                     "data": {"validation_record_id_sha256": sorted(validation_ids),
                              "plan_sha256": "2" * 64, "review_ledger_sha256": "3" * 64,
                              "rejected_rows_excluded": {"train": 0, "validation": 0}},
-                    "task": {"validation_support": {label: {"positive": 1, "negative": 1}}},
+                    "task": {"validation_support": {label: {"positive": 1, "negative": 2}}},
                     "algorithms": {name: {"metrics": {"macro_f1": 0.5}} for name in
                                    ("logistic_regression", "knn", "decision_tree")}}
         classical_config = {"target_field": "intents", "selected_labels": [label],
-                            "constant_target_behavior": "abstain", "rejected_label_handling": "exclude"}
+                            "constant_target_behavior": "majority_class", "rejected_label_handling": "exclude"}
         corpus = {"taxonomy_sha256": "4" * 64, "manifest_sha256": "5" * 64,
                   "train_sha256": "6" * 64, "validation_sha256": "7" * 64,
                   "policy_sha256": "8" * 64, "screen_code_sha256": "9" * 64}
         config = {"baseline_report_sha256": "a" * 64, "server_binary_sha256": "b" * 64,
                   "server_version": "0.30.11", "prompt_revision": "fixture-prompt",
+                  "model_name": TEST_MODEL, "expected_quantization": "fixture Q4",
+                  "expected_license_name": "Fixture License", "worker_code_sha256": "9" * 64,
+                  "comparator_git_revision": None,
                   "system_prompt": "labels {labels}; text {text}", "num_ctx": 4096,
                   "num_predict": 64, "temperature": 0.0, "seed": 17, "top_k": 40,
                   "top_p": 0.9, "repeat_penalty": 1.0, "keep_alive": "10m",
@@ -303,9 +489,10 @@ class ComparisonAdapterTests(unittest.TestCase):
                   "timeout_seconds": 30, "resource_memory_max_bytes": 51539607552,
                   "resource_cpu_quota_percent": 200}
         payload = {"records": [{"id_sha256": item} for item in validation_ids]}
-        result = {"outcomes": ["answered", "abstain"], "predictions": [[1], [None]],
-                  "timing_ms": [12.0, 18.0], "aborted": False, "abort_reason": None,
-                  "artifact": {"manifest_sha256": "5" * 64},
+        result = {"outcomes": ["answered", "http_error", "not_attempted_after_abort"],
+                  "predictions": [[1], [None], [None]],
+                  "timing_ms": [12.0, 18.0, None], "aborted": True, "abort_reason": "fixture abort",
+                  "artifact": {"manifest_sha256": "5" * 64, "model_layer_bytes": 12345},
                   "loaded_model": {"identity_match": True},
                   "resources_after": {"effective_memory_available_bytes": 40_000_000_000},
                   "server_cleanup_verified": True}
@@ -315,19 +502,30 @@ class ComparisonAdapterTests(unittest.TestCase):
                 "home_disk_free_bytes": 100, "gpu_inventory": None, "ollama_service_pid": "2324",
                 "ollama_version": "ollama version is 0.30.11", "loaded_model_count": 0}
         report = comparison._assemble_report(
-            config, "c" * 64, {"sources": {"upstream_model_revision": comparison.PINNED_UPSTREAM_REVISION},
+            config, "c" * 64, {"sources": {"upstream_model_revision": "1" * 40},
                                "provenance": {}}, "d" * 64, baseline, classical_config,
             train_rows, validation_rows, y_train, train_known, y_validation, validation_known,
-            corpus, "e" * 64, payload, b"fixture-payload", ready, result, host)
+            corpus, "e" * 64, payload, b"fixture-payload", ready, result, host, host)
         self.assertEqual(report["provenance"]["plan_sha256"], "2" * 64)
-        self.assertEqual(report["inference"]["outcome_counts"], {"abstain": 1, "answered": 1})
+        self.assertEqual(report["inference"]["outcome_counts"],
+                         {"answered": 1, "http_error": 1, "not_attempted_after_abort": 1})
         self.assertEqual(report["metrics"]["labels"][label]["tp"], 1)
-        self.assertEqual(report["metrics"]["prediction_coverage_on_known_targets"], 0.5)
-        self.assertEqual(report["inference"]["worker_lifecycle"]["unknown_or_ambiguous"], 0)
+        self.assertEqual(report["metrics"]["labels"][label]["tn"], 0)
+        self.assertEqual(report["metrics"]["labels"][label]["unknown_predictions"], 2)
+        self.assertEqual(report["metrics"]["prediction_coverage_on_known_targets"], 1 / 3)
+        self.assertEqual(report["inference"]["worker_lifecycle"]["unknown_or_ambiguous"], 1)
+        self.assertEqual(report["inference"]["worker_lifecycle"]["not_started"], 1)
+        self.assertEqual(report["inference"]["timing_ms"]["count"], 2)
+        self.assertEqual(report["inference"]["timing_ms"]["missing_count"], 1)
+        self.assertEqual(report["task"]["target_scoring_policy"][label]["mode"],
+                         "constant_target_majority_fallback")
         self.assertIsNone(report["resources"]["per_run_cpu_time_usec"])
         self.assertIsNone(report["resources"]["per_run_peak_memory_bytes"])
         self.assertEqual(report["model"]["inference_device"],
                          "unknown; runtime response did not report actual CPU/GPU placement")
+        self.assertNotIn("after_existing_service_unchanged", report["host_state"])
+        self.assertTrue(report["host_state"]["sampled_service_comparisons"]["ollama_service_pid_matches"])
+        self.assertEqual(report["comparator"]["code_sha256"], "9" * 64)
         self.assertNotIn("records", json.dumps(report))
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a private, local-only Mistral NeMo comparison on a bound dev split."""
+"""Run a private, local-only configured model comparison on a bound dev split."""
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +12,7 @@ import platform
 import queue
 import csv
 import re
+import shlex
 import shutil
 import socket
 import statistics
@@ -20,18 +21,13 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
-SCHEMA = "lfg.local-12b-comparison-config.v1"
+SCHEMA = "lfg.local-12b-comparison-config.v2"
 REPORT_SCHEMA = "lfg.local-12b-comparison-report.v1"
 RECEIPT_SCHEMA = "lfg.private-acquisition-receipt.v1"
-PINNED_MODEL = "mistral-nemo:12b-instruct-2407-q4_0"
-PINNED_UPSTREAM_REVISION = "b3ff8777adb9ce554824709c2f8979963f60fd34"
-PINNED_MANIFEST_SHA256 = "e7e06d107c6c86ed0cf45445f1790720b5092149c4c95f4d965844e9afbfdc89"
-PINNED_MODEL_BLOB_SHA256 = "b559938ab7a0392fc9ea9675b82280f2a15669ec3e0e0fc491c9cb0a7681cf94"
-PINNED_MODEL_BYTES = 7_071_700_672
 HEX = re.compile(r"^[0-9a-f]{64}$")
 MAX_CONFIG_BYTES = 65_536
 CURRENT_STAGE = "configuration"
@@ -62,6 +58,26 @@ def _read_bounded(path: Path, limit: int, label: str) -> bytes:
     return raw
 
 
+def _safe_absolute_posix_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return (path.is_absolute() and ".." not in path.parts
+            and bool(re.fullmatch(r"/[A-Za-z0-9_./ -]+", value)))
+
+
+def _within_remote_home(path: str, home: str) -> bool:
+    value, root = PurePosixPath(path), PurePosixPath(home)
+    return (_safe_absolute_posix_path(path) and root != PurePosixPath("/")
+            and len(root.parts) >= 3 and value != root and value.is_relative_to(root))
+
+
+def _valid_ssh_host(host: str) -> bool:
+    return isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host) is not None
+
+
+def _valid_ssh_user(user: str) -> bool:
+    return isinstance(user, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", user) is not None
+
+
 def load_config(path: Path) -> tuple[dict[str, Any], str]:
     cfg_raw = _read_bounded(path, MAX_CONFIG_BYTES, "configuration")
     cfg = _json(cfg_raw, "configuration")
@@ -81,7 +97,15 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
         "remote_python_path", "server_binary_path", "runtime_port", "ssh_port",
         "worker_start_timeout_seconds", "resource_memory_max_bytes", "resource_cpu_quota_percent",
         "max_payload_bytes", "remote_uid",
-        "gpu_memory_policy",
+        "gpu_memory_policy", "expected_upstream_revision", "expected_registry_manifest_url",
+        "expected_manifest_sha256", "expected_model_blob_sha256", "expected_model_blob_bytes",
+        "expected_license_name", "expected_quantization", "remote_home", "remote_system_service",
+        "remote_systemctl_path", "remote_sudo_path", "remote_systemd_run_path", "remote_unshare_path",
+        "remote_bash_path", "remote_ip_path", "remote_setpriv_path", "remote_true_path",
+        "remote_scope_tasks_max", "worker_ready_wait_margin_seconds",
+        "artifact_install_timeout_seconds", "batch_overhead_margin_seconds",
+        "remote_expected_hostname", "remote_expected_architecture",
+        "remote_nvidia_smi_path",
     }
     if not isinstance(cfg, dict) or not required <= set(cfg) or cfg.get("schema_version") != SCHEMA:
         raise ValueError("invalid comparison configuration")
@@ -89,11 +113,16 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
                   "model_store", "model_name", "server_version", "endpoint_url", "keep_alive", "system_prompt",
                   "prompt_revision", "remote_acquisition_receipt", "remote_host", "remote_user",
                   "remote_workdir", "remote_model_store", "remote_adapter_path", "remote_python_path",
-                  "server_binary_path", "gpu_memory_policy"):
+                  "server_binary_path", "gpu_memory_policy", "expected_upstream_revision",
+                  "expected_registry_manifest_url", "expected_license_name", "expected_quantization",
+                  "remote_home", "remote_system_service", "remote_systemctl_path", "remote_sudo_path",
+                  "remote_systemd_run_path", "remote_unshare_path", "remote_bash_path", "remote_ip_path",
+                  "remote_setpriv_path", "remote_true_path", "remote_expected_hostname",
+                  "remote_expected_architecture", "remote_nvidia_smi_path"):
         if not isinstance(cfg[field], str) or not cfg[field].strip():
             raise ValueError(f"invalid {field}")
     for field in ("baseline_report_sha256", "classical_config_sha256", "acquisition_receipt_sha256",
-                  "server_binary_sha256"):
+                  "server_binary_sha256", "expected_manifest_sha256", "expected_model_blob_sha256"):
         if not isinstance(cfg[field], str) or not HEX.fullmatch(cfg[field]):
             raise ValueError(f"invalid {field}")
     for field in ("max_report_bytes", "max_baseline_report_bytes", "max_source_bytes",
@@ -102,9 +131,15 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
                   "max_model_blob_bytes", "hash_chunk_bytes", "max_server_binary_bytes", "min_memory_available_bytes",
                   "min_disk_free_bytes", "num_ctx", "num_predict",
                   "max_request_bytes", "max_response_bytes", "worker_start_timeout_seconds",
-                  "resource_memory_max_bytes", "resource_cpu_quota_percent", "max_payload_bytes", "remote_uid"):
+                  "resource_memory_max_bytes", "resource_cpu_quota_percent", "max_payload_bytes", "remote_uid",
+                  "expected_model_blob_bytes", "remote_scope_tasks_max", "worker_ready_wait_margin_seconds",
+                  "artifact_install_timeout_seconds", "batch_overhead_margin_seconds"):
         if type(cfg[field]) is not int or cfg[field] < 1:
             raise ValueError(f"invalid {field}")
+        if field in {"worker_start_timeout_seconds", "worker_ready_wait_margin_seconds",
+                     "artifact_install_timeout_seconds", "batch_overhead_margin_seconds"} \
+                and cfg[field] > sys.maxsize // 1_000_000_000:
+            raise ValueError(f"{field} exceeds safe platform timeout arithmetic")
     if type(cfg["runtime_port"]) is not int or not 1024 <= cfg["runtime_port"] <= 65535:
         raise ValueError("invalid runtime_port")
     if type(cfg["ssh_port"]) is not int or not 1 <= cfg["ssh_port"] <= 65535:
@@ -113,13 +148,58 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
         raise ValueError("invalid min_gpu_free_bytes")
     if cfg["min_gpu_free_bytes"] == 0 and cfg.get("gpu_memory_policy") != "shared_unified_memory_unavailable":
         raise ValueError("unknown GPU memory requires an explicit shared-memory policy")
-    if cfg["resource_cpu_quota_percent"] > 1000:
-        raise ValueError("resource CPU quota is outside the supported range")
+    if cfg["resource_cpu_quota_percent"] > sys.maxsize // 100:
+        raise ValueError("resource CPU quota exceeds safe systemd arithmetic")
+    safe_seconds = sys.maxsize / 1_000_000_000
+    if (cfg["worker_start_timeout_seconds"] + cfg["worker_ready_wait_margin_seconds"] > safe_seconds
+            or cfg["artifact_install_timeout_seconds"] + 10 > safe_seconds):
+        raise ValueError("combined timeout exceeds safe platform arithmetic")
+    for field in ("resource_memory_max_bytes", "max_model_blob_bytes", "remote_scope_tasks_max"):
+        if cfg[field] > sys.maxsize:
+            raise ValueError(f"{field} exceeds safe platform arithmetic")
     timeout = cfg["timeout_seconds"]
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+    if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+            or timeout > sys.maxsize / 1_000_000_000):
         raise ValueError("invalid timeout_seconds")
-    if cfg["model_name"] != PINNED_MODEL:
-        raise ValueError("model name does not match pinned identity")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?", cfg["model_name"]):
+        raise ValueError("invalid configured model identity")
+    revision = cfg["expected_upstream_revision"]
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", revision):
+        raise ValueError("invalid configured upstream revision")
+    registry_url = urlsplit(cfg["expected_registry_manifest_url"])
+    if (registry_url.scheme != "https" or registry_url.netloc != "registry.ollama.ai"
+            or not registry_url.path.startswith("/v2/") or "/manifests/" not in registry_url.path
+            or registry_url.query or registry_url.fragment):
+        raise ValueError("invalid configured registry manifest identity")
+    if ":" not in cfg["model_name"]:
+        raise ValueError("configured model identity must include an immutable tag")
+    repository, model_tag = cfg["model_name"].rsplit(":", 1)
+    if "/" not in repository:
+        repository = "library/" + repository
+    if (repository.count("/") != 1
+            or registry_url.path != f"/v2/{repository}/manifests/{model_tag}"):
+        raise ValueError("registry manifest URL does not match the configured model identity")
+    if cfg["expected_model_blob_bytes"] > cfg["max_model_blob_bytes"]:
+        raise ValueError("model blob size pin exceeds configured artifact byte limit")
+    if (not _safe_absolute_posix_path(cfg["remote_home"])
+            or not _within_remote_home(cfg["remote_acquisition_receipt"], cfg["remote_home"])
+            or any(not _safe_absolute_posix_path(cfg[field]) for field in
+                   ("remote_workdir", "remote_model_store", "remote_adapter_path", "remote_python_path",
+                    "server_binary_path", "remote_systemctl_path", "remote_sudo_path",
+                    "remote_systemd_run_path", "remote_unshare_path", "remote_bash_path", "remote_ip_path",
+                    "remote_setpriv_path", "remote_true_path", "remote_nvidia_smi_path"))
+            or not _within_remote_home(cfg["remote_workdir"], cfg["remote_home"])
+            or not _within_remote_home(cfg["remote_model_store"], cfg["remote_home"])
+            or not _within_remote_home(cfg["remote_adapter_path"], cfg["remote_home"])):
+        raise ValueError("remote paths must be safe absolute paths inside the configured user home")
+    if not (_valid_ssh_user(cfg["remote_user"]) and _valid_ssh_host(cfg["remote_host"])):
+        raise ValueError("invalid SSH user or host")
+    if not _valid_ssh_host(cfg["remote_expected_hostname"]):
+        raise ValueError("invalid configured remote hostname identity")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", cfg["remote_expected_architecture"]):
+        raise ValueError("invalid configured remote architecture identity")
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", cfg["remote_system_service"]):
+        raise ValueError("invalid configured service unit name")
     if "{text}" not in cfg["system_prompt"] or "{labels}" not in cfg["system_prompt"]:
         raise ValueError("system_prompt must contain {text} and {labels}")
     if cfg["num_predict"] < 2:
@@ -400,28 +480,27 @@ def verify_acquisition(config: dict[str, Any]) -> tuple[dict[str, Any], str]:
             or receipt.get("outcome") != "verified_downloaded_not_loaded"):
         raise ValueError("acquisition receipt is not a verified download receipt")
     manifest = receipt.get("manifest")
-    if (not isinstance(manifest, dict) or manifest.get("sha256") != PINNED_MANIFEST_SHA256
+    if (not isinstance(manifest, dict) or manifest.get("sha256") != config["expected_manifest_sha256"]
             or type(manifest.get("bytes")) is not int or not isinstance(manifest.get("file"), str)):
-        raise ValueError("receipt manifest does not match the pinned public artifact")
+        raise ValueError("receipt manifest does not match the configured artifact identity")
     objects = receipt.get("objects")
     if not isinstance(objects, list) or not objects:
         raise ValueError("receipt lacks verified artifact objects")
     model = [item for item in objects if isinstance(item, dict)
              and isinstance(item.get("digest"), str)
-             and item["digest"].removeprefix("sha256:") == PINNED_MODEL_BLOB_SHA256]
-    if (len(model) != 1 or model[0].get("bytes") != PINNED_MODEL_BYTES
+             and item["digest"].removeprefix("sha256:") == config["expected_model_blob_sha256"]]
+    if (len(model) != 1 or model[0].get("bytes") != config["expected_model_blob_bytes"]
             or model[0].get("sha256_verified") is not True):
-        raise ValueError("receipt lacks the pinned verified model layer")
+        raise ValueError("receipt lacks the configured verified model layer")
     if (not isinstance(receipt.get("sources"), dict) or not isinstance(receipt.get("provenance"), dict)
             or not isinstance(receipt.get("staging_locator"), str)):
         raise ValueError("acquisition receipt provenance is incomplete")
     sources = receipt["sources"]
     registry = sources.get("registry_manifest")
-    if (sources.get("upstream_model_revision") != PINNED_UPSTREAM_REVISION
+    if (sources.get("upstream_model_revision") != config["expected_upstream_revision"]
             or not isinstance(registry, str)
-            or urlsplit(registry).netloc != "registry.ollama.ai"
-            or urlsplit(registry).path != "/v2/library/mistral-nemo/manifests/12b-instruct-2407-q4_0"):
-        raise ValueError("receipt does not bind the pinned upstream and registry identities")
+            or registry != config["expected_registry_manifest_url"]):
+        raise ValueError("receipt does not bind the configured upstream and registry identities")
     return receipt, receipt_digest
 
 
@@ -430,8 +509,12 @@ def verify_installed_artifact(config: dict[str, Any], receipt: dict[str, Any]) -
     if store_configured.is_symlink() or not _private_directory(store_configured):
         raise ValueError("model store is not owner-private")
     store = store_configured.resolve(strict=True)
-    manifest_file = _no_symlink_child(store, "manifests", "registry.ollama.ai", "library",
-                                      "mistral-nemo", "12b-instruct-2407-q4_0")
+    registry = urlsplit(config["expected_registry_manifest_url"])
+    manifest_parts = registry.path.strip("/").split("/")
+    if len(manifest_parts) != 5 or manifest_parts[0] != "v2" or manifest_parts[3] != "manifests":
+        raise ValueError("configured registry manifest path is not a supported OCI layout")
+    manifest_file = _no_symlink_child(store, "manifests", registry.netloc, *manifest_parts[1:3],
+                                      manifest_parts[4])
     manifest_sha, manifest_size = _hash_file(manifest_file, config["max_model_manifest_bytes"],
                                              config["hash_chunk_bytes"])
     if manifest_sha != receipt["manifest"]["sha256"] or manifest_size != receipt["manifest"]["bytes"]:
@@ -466,16 +549,17 @@ def verify_installed_artifact(config: dict[str, Any], receipt: dict[str, Any]) -
     license_sha = (license_info.get("sha256", "").removeprefix("sha256:")
                    if isinstance(license_info, dict) and isinstance(license_info.get("sha256"), str) else "")
     if (not isinstance(license_info, dict)
-            or license_info.get("identified_as") != "Apache License, Version 2.0"
+            or license_info.get("identified_as") != config["expected_license_name"]
             or license_info.get("notice_retained_in_verified_blob") is not True
             or license_sha not in actual_digests):
         raise ValueError("license notice or identification is not verified")
-    return {"model_name": PINNED_MODEL, "manifest_sha256": manifest_sha,
+    return {"model_name": config["model_name"], "manifest_sha256": manifest_sha,
             "manifest_bytes": manifest_size,
             "verified_layer_count": len(actual_digests),
-            "model_layer_sha256": PINNED_MODEL_BLOB_SHA256,
-            "model_layer_bytes": PINNED_MODEL_BYTES,
-            "license": "Apache-2.0 per private receipt; preserve its notice"}
+            "model_layer_sha256": config["expected_model_blob_sha256"],
+            "model_layer_bytes": config["expected_model_blob_bytes"],
+            "license": config["expected_license_name"],
+            "quantization": config["expected_quantization"]}
 
 
 def _http_call(config: dict[str, Any], body: bytes | None, method: str = "POST",
@@ -489,13 +573,34 @@ def _http_call(config: dict[str, Any], body: bytes | None, method: str = "POST",
         path = path_override
     if body is not None and len(body) > config["max_request_bytes"]:
         raise RequestLimitError("model request exceeds configured byte limit")
-    deadline = time.monotonic() + float(config["timeout_seconds"])
-    connection = http.client.HTTPConnection(host, port, timeout=float(config["timeout_seconds"]))
+    timeout_seconds = float(config["timeout_seconds"])
+    deadline = time.monotonic() + timeout_seconds
+    connection = http.client.HTTPConnection(host, port, timeout=timeout_seconds)
+    expired = threading.Event()
+
+    def enforce_deadline() -> None:
+        expired.set()
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    watchdog = threading.Timer(timeout_seconds, enforce_deadline)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         headers = {"Accept": "application/json", "Connection": "close"}
         if body is not None:
             headers.update({"Content-Type": "application/json", "Content-Length": str(len(body))})
         connection.request(method, path, body=body, headers=headers)
+        if expired.is_set():
+            raise TimeoutError("model endpoint deadline exceeded")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("model endpoint deadline exceeded")
@@ -522,7 +627,12 @@ def _http_call(config: dict[str, Any], body: bytes | None, method: str = "POST",
         if time.monotonic() > deadline:
             raise TimeoutError("model endpoint deadline exceeded")
         return response.status, bytes(raw)
+    except (OSError, http.client.HTTPException):
+        if expired.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("model endpoint deadline exceeded") from None
+        raise
     finally:
+        watchdog.cancel()
         connection.close()
 
 
@@ -559,13 +669,51 @@ def _schema_request(config: dict[str, Any], label_schema: dict[str, Any], screen
     return (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _stats(values: list[float]) -> dict[str, Any]:
-    if not values:
-        return {"count": 0, "median_ms": None, "p95_ms": None, "min_ms": None, "max_ms": None}
-    ordered = sorted(values)
-    return {"count": len(values), "median_ms": statistics.median(values),
+def _stats(values: list[float | None]) -> dict[str, Any]:
+    observed = [value for value in values if type(value) in (int, float) and math.isfinite(value)]
+    if not observed:
+        return {"count": 0, "missing_count": len(values), "median_ms": None,
+                "p95_ms": None, "min_ms": None, "max_ms": None}
+    ordered = sorted(observed)
+    return {"count": len(observed), "missing_count": len(values) - len(observed),
+            "median_ms": statistics.median(observed),
             "p95_ms": ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)],
-            "min_ms": min(values), "max_ms": max(values)}
+            "min_ms": min(observed), "max_ms": max(observed)}
+
+
+NOT_STARTED_OUTCOMES = {"request_too_large_not_started", "not_attempted_after_abort"}
+
+
+def _http_requests_started(outcomes: list[str]) -> int:
+    return sum(outcome not in NOT_STARTED_OUTCOMES for outcome in outcomes)
+
+
+def _response_prediction_matrix(raw_predictions: list[list[Any]], labels: list[str], rows: int) -> list[list[int]]:
+    if len(raw_predictions) != rows:
+        raise ValueError("worker prediction row count is inconsistent")
+    normalized = []
+    for row in raw_predictions:
+        if not isinstance(row, list) or len(row) != len(labels):
+            raise ValueError("worker prediction label count is inconsistent")
+        if any(value is not None and (type(value) is not int or value not in (0, 1)) for value in row):
+            raise ValueError("worker prediction contains an invalid label value")
+        normalized.append([-1 if value is None else value for value in row])
+    return normalized
+
+
+def _git_revision_for_comparator() -> str | None:
+    repo = Path(__file__).resolve().parents[2]
+    try:
+        dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--",
+                                str(Path(__file__).resolve())], check=True, capture_output=True,
+                               timeout=10, shell=False).stdout
+        if dirty:
+            return None
+        revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True, timeout=10, shell=False).stdout.strip()
+        return revision if re.fullmatch(r"[0-9a-f]{40,64}", revision) else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _compute_metrics(y_true: list[list[int]], y_pred: list[list[int]],
@@ -808,7 +956,11 @@ def _copy_verified_artifact(config: dict[str, Any], receipt: dict[str, Any]) -> 
         raise ValueError("staged model manifest differs from acquisition receipt")
     manifest = _json(_read_bounded(source_manifest, config["max_model_manifest_bytes"], "model manifest"),
                      "model manifest")
-    target_manifest = store / "manifests" / "registry.ollama.ai" / "library" / "mistral-nemo" / "12b-instruct-2407-q4_0"
+    registry = urlsplit(config["expected_registry_manifest_url"])
+    manifest_parts = registry.path.strip("/").split("/")
+    if len(manifest_parts) != 5 or manifest_parts[0] != "v2" or manifest_parts[3] != "manifests":
+        raise ValueError("configured registry manifest path is not a supported OCI layout")
+    target_manifest = store / "manifests" / registry.netloc / manifest_parts[1] / manifest_parts[2] / manifest_parts[4]
     target_manifest.parent.mkdir(mode=0o700, parents=True)
     (store / "blobs").mkdir(mode=0o700)
     expected = {item["digest"].removeprefix("sha256:"): item for item in receipt["objects"]}
@@ -980,6 +1132,8 @@ def _worker(config: dict[str, Any]) -> None:
                  "artifact_receipt_sha256": receipt_digest,
                  "server_binary_sha256": boundary["server_binary_sha256"],
                  "server_version": boundary["server_version"], "warmup": warmup,
+                 "worker_code_sha256": config["worker_code_sha256"],
+                 "comparator_git_revision": config.get("comparator_git_revision"),
                  "resources_before": resources_before}
         print(json.dumps(ready, sort_keys=True, separators=(",", ":")), flush=True)
         payload_raw = sys.stdin.buffer.readline(config["max_payload_bytes"] + 1)
@@ -994,9 +1148,9 @@ def _worker(config: dict[str, Any]) -> None:
             if aborted:
                 results.append("not_attempted_after_abort")
                 predictions.append([None] * len(labels))
-                timings.append(0.0)
+                timings.append(None)
                 print(json.dumps({"phase": "progress", "index": index, "outcome": "not_attempted_after_abort",
-                                  "prediction": [None] * len(labels), "timing_ms": 0.0}, separators=(",", ":")),
+                                  "prediction": [None] * len(labels), "timing_ms": None}, separators=(",", ":")),
                       flush=True)
                 continue
             request = _schema_request(config, schema, record["text"])
@@ -1004,7 +1158,7 @@ def _worker(config: dict[str, Any]) -> None:
             try:
                 outcome, predicted, elapsed = _prediction_http(config, request, set(labels))
             except RequestLimitError:
-                outcome, predicted, elapsed = "request_too_large_not_started", None, 0.0
+                outcome, predicted, elapsed = "request_too_large_not_started", None, None
             except TimeoutError:
                 outcome, predicted, elapsed = "timeout_unknown_worker_lifecycle", None, (time.monotonic() - started) * 1000
                 aborted, abort_reason = True, "request deadline expired; worker lifecycle unknown"
@@ -1119,42 +1273,55 @@ def _private_report_directory(path: Path) -> Path:
 
 def _ssh_run(config: dict[str, Any], script: str, timeout: float = 30) -> subprocess.CompletedProcess:
     import base64
+    if (not _valid_ssh_host(config.get("remote_host")) or not _valid_ssh_user(config.get("remote_user"))
+            or not _safe_absolute_posix_path(config.get("remote_python_path", ""))):
+        raise ValueError("unsafe SSH destination or remote interpreter path")
     encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    command = (f"{config['remote_python_path']} -I -c "
-               f"'import base64;exec(base64.b64decode(\"{encoded}\"))'")
-    argv = ["ssh", "-T", "-p", str(config["ssh_port"]),
+    command = " ".join((shlex.quote(config["remote_python_path"]), "-I", "-c",
+                         shlex.quote(f"import base64;exec(base64.b64decode('{encoded}'))")))
+    argv = ["ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-p", str(config["ssh_port"]),
             f"{config['remote_user']}@{config['remote_host']}", command]
     return subprocess.run(argv, check=False, capture_output=True, timeout=timeout, shell=False)
 
 
 def _remote_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     script = r'''import json,os,platform,shutil,subprocess
+OLLAMA=__OLLAMA__
+HOME=__HOME__
+SERVICE=__SERVICE__
+SYSTEMCTL=__SYSTEMCTL__
+NVIDIA=__NVIDIA__
 def cmd(a):
  try:
   return subprocess.run(a,check=True,capture_output=True,text=True,timeout=8).stdout.strip()
  except Exception:
   return None
-ps=cmd(['/usr/local/bin/ollama','ps'])
+ps=cmd([OLLAMA,'ps'])
 mem=None
 for line in open('/proc/meminfo'):
  if line.startswith('MemAvailable:'): mem=int(line.split()[1])*1024; break
 gpu=None
 try:
- out=cmd(['nvidia-smi','--query-gpu=name,memory.free,memory.total,utilization.gpu','--format=csv,noheader,nounits'])
+ out=cmd([NVIDIA,'--query-gpu=name,memory.free,memory.total,utilization.gpu','--format=csv,noheader,nounits'])
  if out: gpu=[x.strip() for x in out.splitlines()]
 except Exception: pass
 print(json.dumps({'hostname':platform.node(),'architecture':platform.machine(),'uid':os.geteuid(),
  'netns_inode':os.stat('/proc/self/ns/net').st_ino,'memory_available_bytes':mem,
- 'home_disk_free_bytes':shutil.disk_usage('/home/hades').free,'gpu_inventory':gpu,
- 'ollama_service_pid':cmd(['systemctl','show','-p','MainPID','--value','ollama.service']),
- 'ollama_version':cmd(['/usr/local/bin/ollama','--version']),
+ 'home_disk_free_bytes':shutil.disk_usage(HOME).free,'gpu_inventory':gpu,
+ 'ollama_service_pid':cmd([SYSTEMCTL,'show','-p','MainPID','--value',SERVICE]),
+ 'ollama_version':cmd([OLLAMA,'--version']),
  'loaded_model_count':(len([x for x in ps.splitlines()[1:] if x.strip()]) if ps is not None else None)},separators=(',',':')))
 '''
+    script = (script.replace("__OLLAMA__", json.dumps(config["server_binary_path"]))
+              .replace("__HOME__", json.dumps(config["remote_home"]))
+              .replace("__SERVICE__", json.dumps(config["remote_system_service"]))
+              .replace("__SYSTEMCTL__", json.dumps(config["remote_systemctl_path"]))
+              .replace("__NVIDIA__", json.dumps(config["remote_nvidia_smi_path"])))
     result = _ssh_run(config, script, timeout=20)
     if result.returncode != 0:
         raise ValueError("remote host metadata preflight failed")
     value = _json(result.stdout.strip(), "remote host snapshot")
-    if (value.get("hostname") != config["remote_host"] or value.get("uid") != config["remote_uid"]
+    if (value.get("hostname") != config["remote_expected_hostname"] or value.get("uid") != config["remote_uid"]
             or not isinstance(value.get("memory_available_bytes"), int)
             or not isinstance(value.get("home_disk_free_bytes"), int)
             or type(value.get("loaded_model_count")) is not int
@@ -1174,10 +1341,11 @@ def _remote_port_closed(config: dict[str, Any]) -> bool:
 
 def _remote_install(config: dict[str, Any], remote_config_path: str) -> dict[str, Any]:
     adapter = config["remote_adapter_path"]
-    script = ("import subprocess,sys; r=subprocess.run([sys.executable,'-I',"
-              f"{adapter!r},'--install','--config',{remote_config_path!r}],capture_output=True,timeout=1800); "
+    script = ("import subprocess,sys; r=subprocess.run(["
+              f"{config['remote_python_path']!r},'-I',{adapter!r},'--install','--config',{remote_config_path!r}],"
+              f"capture_output=True,timeout={config['artifact_install_timeout_seconds']}); "
               "sys.stdout.buffer.write(r.stdout); sys.exit(r.returncode)")
-    result = _ssh_run(config, script, timeout=1810)
+    result = _ssh_run(config, script, timeout=config["artifact_install_timeout_seconds"] + 10)
     if result.returncode != 0:
         raise ValueError("verified private artifact installation failed")
     return _json(result.stdout.strip(), "private artifact installation result")
@@ -1218,38 +1386,58 @@ def _write_worker_config(path: Path, config: dict[str, Any]) -> None:
 
 
 def _remote_cleanup(config: dict[str, Any], workdir: str, unit: str) -> None:
-    if not re.fullmatch(r"/home/[A-Za-z0-9_.-]+/\.local/share/lfg-local-12b/[A-Za-z0-9_-]+", workdir):
+    root = PurePosixPath(config["remote_workdir"])
+    path = PurePosixPath(workdir)
+    if (not _within_remote_home(workdir, config["remote_home"]) or path.parent != root
+            or not re.fullmatch(r"run-[0-9a-f]{32}", path.name)):
         raise ValueError("refusing cleanup outside this task's private remote directory")
     script = ("import os,shutil,subprocess; "
-              f"subprocess.run(['sudo','-n','systemctl','stop',{unit!r}],capture_output=True,timeout=15); "
+              f"subprocess.run([{config['remote_sudo_path']!r},'-n',{config['remote_systemctl_path']!r},'stop',{unit!r}],capture_output=True,timeout=15); "
               f"shutil.rmtree({workdir!r},ignore_errors=False)")
     result = _ssh_run(config, script, timeout=30)
     if result.returncode != 0:
         raise ValueError("task-owned remote work directory cleanup failed")
 
 
+def _worker_remote_command(config: dict[str, Any], adapter_path: str,
+                           worker_config_path: str, unit: str) -> str:
+    paths = ("remote_sudo_path", "remote_systemd_run_path", "remote_unshare_path",
+             "remote_bash_path", "remote_ip_path", "remote_setpriv_path", "remote_python_path")
+    if any(not _safe_absolute_posix_path(config[field]) for field in paths):
+        raise ValueError("unsafe remote executable path in worker command")
+    if (not _valid_ssh_user(config["remote_user"]) or not _valid_ssh_host(config["remote_host"])
+            or not _within_remote_home(adapter_path, config["remote_home"])
+            or not _within_remote_home(worker_config_path, config["remote_home"])
+            or not re.fullmatch(r"lfg12b-[0-9a-f]{20}\.scope", unit)):
+        raise ValueError("unsafe remote worker command identity or path")
+    inner = (shlex.join([config["remote_ip_path"], "link", "set", "lo", "up"])
+             + " && exec " + shlex.join([config["remote_setpriv_path"], "--reuid=" + str(config["remote_uid"]),
+                                          "--regid=" + str(config["remote_uid"]), "--init-groups",
+                                          config["remote_python_path"], "-I", adapter_path,
+                                          "--worker", "--config", worker_config_path]))
+    argv = [config["remote_sudo_path"], "-n", config["remote_systemd_run_path"],
+            "--scope", "--collect", "--quiet", f"--unit={unit}",
+            "-p", f"MemoryMax={config['resource_memory_max_bytes']}",
+            "-p", f"CPUQuota={config['resource_cpu_quota_percent']}%",
+            "-p", f"TasksMax={config['remote_scope_tasks_max']}", "--",
+            config["remote_unshare_path"], "--net", "--fork", "--mount-proc",
+            config["remote_bash_path"], "-c", inner]
+    return shlex.join(argv)
+
+
 def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, receipt_digest: str,
                     baseline_report: dict, classical_config: dict, train_rows: list[dict],
                     validation_rows: list[dict], y_train, train_known, y_validation, target_known,
                     corpus: dict, classical_config_digest: str, payload: dict, payload_raw: bytes,
-                    ready: dict, result: dict, host_before: dict) -> dict[str, Any]:
+                    ready: dict, result: dict, host_before: dict, host_after: dict) -> dict[str, Any]:
     labels = sorted(classical_config["selected_labels"])
     outcomes = result["outcomes"]
     y_true = [[int(value) if value is not None else 0 for value in row]
               for row in (y_validation.tolist() if hasattr(y_validation, "tolist") else y_validation)]
     known = [[bool(value) for value in row]
              for row in (target_known.tolist() if hasattr(target_known, "tolist") else target_known)]
-    raw_predictions = result["predictions"]
-    predictions = [[-1 if value is None else value for value in row] for row in raw_predictions]
+    predictions = _response_prediction_matrix(result["predictions"], labels, len(validation_rows))
     policy = _target_scoring_policy(y_train, train_known, labels, classical_config["constant_target_behavior"])
-    for index, label in enumerate(labels):
-        mode = policy[label]["mode"]
-        if mode in ("unsupported_abstain", "constant_target_abstain"):
-            for row in predictions:
-                row[index] = -1
-        elif mode == "constant_target_majority_fallback":
-            for row in predictions:
-                row[index] = policy[label]["constant_train_value"]
     metrics = _compute_metrics(y_true, predictions, known, labels)
     status_counts = {status: outcomes.count(status) for status in sorted(set(outcomes))}
     lifecycle = {"completed_responses": sum(status in {"answered", "abstain", "malformed", "invalid_schema",
@@ -1275,16 +1463,16 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
                      "config_sha256": classical_config_digest,
                      "algorithms": {name: value.get("metrics") for name, value in baseline_report["algorithms"].items()},
                      "paired_classical_metrics": "unavailable; original aggregate report has no per-row predictions"},
-        "model": {"identity": PINNED_MODEL, "quantization": "Ollama Q4_0 per pinned private registry manifest",
+        "model": {"identity": config["model_name"], "quantization": config["expected_quantization"],
                   "receipt_sha256": receipt_digest, "artifact": result["artifact"],
                   "runtime": result["loaded_model"], "server_binary_sha256": config["server_binary_sha256"],
                   "server_version": config["server_version"], "runtime_boundary": "distinct private network namespace; loopback only",
                   "inference_device": "unknown; runtime response did not report actual CPU/GPU placement",
                   "source_revision": receipt.get("sources", {}).get("upstream_model_revision"),
-                  "exact_full_precision_conversion_linkage_independently_proven": False,
-                  "license": "Apache-2.0 per verified receipt; notice retained in source artifact"},
-        "inference": {"rows_considered": len(outcomes), "http_requests_started": sum(s not in
-                      {"request_too_large_not_started", "not_attempted_after_abort"} for s in outcomes),
+                  "exact_full_precision_conversion_linkage_independently_proven": (
+                      receipt.get("provenance", {}).get("exact_conversion_linkage_to_upstream_revision_independently_proven") is True),
+                  "license": config["expected_license_name"]},
+        "inference": {"rows_considered": len(outcomes), "http_requests_started": _http_requests_started(outcomes),
                       "validation_rows": len(validation_rows), "outcome_counts": status_counts,
                       "worker_lifecycle": lifecycle, "aborted": result["aborted"],
                       "abort_reason": result["abort_reason"], "timing_ms": _stats(result["timing_ms"]),
@@ -1309,7 +1497,7 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
                       "per_run_peak_memory_bytes": None,
                       "cgroup_usage_scope": "unknown; cgroup mount was not visible inside the worker mount namespace",
                       "gpu_memory_attribution": "unknown on shared-memory GB10; no per-process GPU memory attribution",
-                      "model_layer_size_bytes": PINNED_MODEL_BYTES,
+                      "model_layer_size_bytes": result["artifact"]["model_layer_bytes"],
                       "model_layer_size_scope": "quantized model blob size; not runtime memory"},
         "provenance": {"baseline_report_sha256": config["baseline_report_sha256"],
                        "classical_config_sha256": classical_config_digest,
@@ -1325,12 +1513,20 @@ def _assemble_report(config: dict[str, Any], config_digest: str, receipt: dict, 
         "limitations": ["validation labels are unreviewed proposals and previously used; exploratory only",
                         "source schema completeness claims are not independently verified",
                         "no final test or heldout data were opened",
-                        "quantized artifact to upstream full-precision conversion linkage is not independently proven",
+                        "conversion linkage from the configured artifact to upstream weights is not independently proven unless the receipt explicitly establishes it",
                         "GB10 unified GPU memory is not separately observable or attributable",
                         "paired classical same-answered-subset metrics unavailable without per-row baseline predictions"],
         "host_state": {"before": {k: host_before[k] for k in ("hostname", "architecture", "memory_available_bytes",
                          "home_disk_free_bytes", "gpu_inventory", "ollama_service_pid", "ollama_version", "loaded_model_count")},
-                       "after_existing_service_unchanged": True},
+                       "after": {k: host_after[k] for k in ("hostname", "architecture", "memory_available_bytes",
+                         "home_disk_free_bytes", "gpu_inventory", "ollama_service_pid", "ollama_version", "loaded_model_count")},
+                       "sampled_service_comparisons": {"ollama_service_pid_matches": host_before["ollama_service_pid"] == host_after["ollama_service_pid"],
+                                                       "ollama_version_matches": host_before["ollama_version"] == host_after["ollama_version"],
+                                                       "loaded_model_count_matches": host_before["loaded_model_count"] == host_after["loaded_model_count"],
+                                                       "loaded_model_identities": "not applicable; count was zero at both snapshots"},
+                       "observation_scope": "point-in-time snapshots only; intervening intervals and other services were not monitored"},
+        "comparator": {"code_sha256": config["worker_code_sha256"],
+                       "git_revision": config.get("comparator_git_revision")},
         "config_sha256": config_digest,
     }
     return report
@@ -1340,6 +1536,9 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
     global CURRENT_STAGE
     CURRENT_STAGE = "local_artifact_receipt"
     config, config_digest = load_config(config_path)
+    comparator_code_sha256 = sha(Path(__file__).read_bytes())
+    config = {**config, "worker_code_sha256": comparator_code_sha256,
+              "comparator_git_revision": _git_revision_for_comparator()}
     receipt, receipt_digest = verify_acquisition(config)
     CURRENT_STAGE = "baseline_binding"
     (baseline_report, classical_config, train_rows, validation_rows, y_train, train_known,
@@ -1357,9 +1556,8 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
     base = config["remote_workdir"].rstrip("/")
     workdir = f"{base}/run-{run_id}"
     model_store = config["remote_model_store"]
-    if (base != f"/home/{config['remote_user']}/.local/share/lfg-local-12b"
-            or not re.fullmatch(rf"/home/{re.escape(config['remote_user'])}/\.local/share/lfg-local-12b-models/run-[0-9a-f]{{32}}", model_store)):
-        raise ValueError("remote paths must use the task's private workspace and verified model store")
+    if not _within_remote_home(base, config["remote_home"]):
+        raise ValueError("remote work directory must remain inside the configured user home")
     adapter_path = f"{workdir}/compare_local_12b.py"
     config_path_remote = f"{workdir}/worker-config.json"
     worker_config = {**config, "acquisition_receipt": config["remote_acquisition_receipt"],
@@ -1373,7 +1571,7 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
 
     CURRENT_STAGE = "fresh_host_capacity_and_service_check"
     host_before = _remote_snapshot(config)
-    if (host_before["architecture"] != "aarch64"
+    if (host_before["architecture"] != config["remote_expected_architecture"]
             or host_before["memory_available_bytes"] < config["min_memory_available_bytes"]
             or host_before["home_disk_free_bytes"] < config["min_disk_free_bytes"]):
         raise ValueError("fresh remote capacity is below the configured coexistence floor")
@@ -1381,11 +1579,12 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
         raise ValueError("configured host loopback port is already occupied or not demonstrably closed")
     unit = f"lfg12b-{run_id[:20]}.scope"
     CURRENT_STAGE = "transient_resource_control_preflight"
-    preflight_script = ("import subprocess,sys; r=subprocess.run(['sudo','-n','systemd-run','--scope',"
-                        "'--collect','--quiet','--unit=probe-" + run_id[:12] + ".scope',"
-                        f"'-p','MemoryMax={config['resource_memory_max_bytes']}',"
-                        f"'-p','CPUQuota={config['resource_cpu_quota_percent']}%',"
-                        "'--','/usr/bin/true'],capture_output=True,timeout=30); sys.exit(r.returncode)")
+    preflight_argv = [config["remote_sudo_path"], "-n", config["remote_systemd_run_path"],
+                      "--scope", "--collect", "--quiet", f"--unit=probe-{run_id[:12]}.scope",
+                      "-p", f"MemoryMax={config['resource_memory_max_bytes']}",
+                      "-p", f"CPUQuota={config['resource_cpu_quota_percent']}%",
+                      "-p", f"TasksMax={config['remote_scope_tasks_max']}", "--", config["remote_true_path"]]
+    preflight_script = f"import subprocess,sys; r=subprocess.run({preflight_argv!r},capture_output=True,timeout=30); sys.exit(r.returncode)"
     if _ssh_run(config, preflight_script, timeout=40).returncode != 0:
         raise ValueError("temporary cgroup resource limit preflight failed")
 
@@ -1402,13 +1601,13 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
             raise ValueError("private remote task directory creation failed")
         work_created = True
         local_adapter = Path(__file__).resolve(strict=True)
-        scp_args = ["scp", "-P", str(config["ssh_port"]), str(local_adapter),
+        scp_args = ["scp", "-oBatchMode=yes", "-oConnectTimeout=10", "-P", str(config["ssh_port"]), str(local_adapter),
                     f"{config['remote_user']}@{config['remote_host']}:{adapter_path}"]
         if subprocess.run(scp_args, check=False, capture_output=True, timeout=120, shell=False).returncode != 0:
             raise ValueError("comparator transfer to the private worker failed")
         worker_config_path = output_dir / ".worker-config.json"
         _write_worker_config(worker_config_path, worker_config)
-        scp_cfg = ["scp", "-P", str(config["ssh_port"]), str(worker_config_path),
+        scp_cfg = ["scp", "-oBatchMode=yes", "-oConnectTimeout=10", "-P", str(config["ssh_port"]), str(worker_config_path),
                    f"{config['remote_user']}@{config['remote_host']}:{config_path_remote}"]
         if subprocess.run(scp_cfg, check=False, capture_output=True, timeout=30, shell=False).returncode != 0:
             raise ValueError("private worker configuration transfer failed")
@@ -1425,26 +1624,22 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
         if not _remote_port_closed(config):
             raise ValueError("configured host loopback port became occupied before worker start")
         CURRENT_STAGE = "isolated_worker_startup"
-        worker_command = (
-            "sudo -n systemd-run --scope --collect --quiet "
-            f"--unit={unit} -p MemoryMax={config['resource_memory_max_bytes']} "
-            f"-p CPUQuota={config['resource_cpu_quota_percent']}% -p TasksMax=128 -- "
-            "/usr/bin/unshare --net --fork --mount-proc /usr/bin/bash -c "
-            "'/usr/sbin/ip link set lo up && exec /usr/bin/setpriv --reuid=" + str(config["remote_uid"]) +
-            " --regid=" + str(config["remote_uid"]) + " --init-groups " + config["remote_python_path"] +
-            " -I " + adapter_path + " --worker --config " + config_path_remote + "'")
-        process = subprocess.Popen(["ssh", "-T", "-p", str(config["ssh_port"]),
+        worker_command = _worker_remote_command(config, adapter_path, config_path_remote, unit)
+        process = subprocess.Popen(["ssh", "-T", "-oBatchMode=yes", "-oConnectTimeout=10", "-p", str(config["ssh_port"]),
                                     f"{config['remote_user']}@{config['remote_host']}", worker_command],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    shell=False)
         lines = _queue_protocol(process)
-        ready = _read_protocol_line(process, lines, config["worker_start_timeout_seconds"] + 1800)
+        ready = _read_protocol_line(process, lines,
+                                    config["worker_start_timeout_seconds"] + config["worker_ready_wait_margin_seconds"])
         if ready.get("phase") != "ready":
             raise ValueError("isolated worker did not prove readiness and model identity")
-        if (ready.get("model_manifest_sha256") != PINNED_MANIFEST_SHA256
+        if (ready.get("model_manifest_sha256") != config["expected_manifest_sha256"]
                 or ready.get("artifact_receipt_sha256") != receipt_digest
                 or ready.get("server_binary_sha256") != config["server_binary_sha256"]
                 or ready.get("server_version") != config["server_version"]
+                or ready.get("worker_code_sha256") != comparator_code_sha256
+                or ready.get("comparator_git_revision") != config.get("comparator_git_revision")
                 or ready.get("netns_inode") == host_before["netns_inode"]
                 or ready.get("port") != config["runtime_port"]):
             raise ValueError("worker readiness did not match expected private runtime identity")
@@ -1457,13 +1652,22 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
         process.stdin.flush()
         process.stdin.close()
         progress = []
-        deadline = time.monotonic() + config["timeout_seconds"] * (len(validation_rows) + 2) + 120
+        batch_timeout = (config["timeout_seconds"] * (len(validation_rows) + 2)
+                         + config["batch_overhead_margin_seconds"])
+        if not math.isfinite(batch_timeout) or batch_timeout > sys.maxsize / 1_000_000_000:
+            raise ValueError("total batch timeout exceeds safe platform arithmetic")
+        deadline = time.monotonic() + batch_timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("isolated request batch exceeded total configured deadline")
             message = _read_protocol_line(process, lines, remaining)
             if message.get("phase") == "progress":
+                status = message.get("outcome")
+                elapsed = message.get("timing_ms")
+                timing_valid = ((status in NOT_STARTED_OUTCOMES and elapsed is None)
+                                or (status not in NOT_STARTED_OUTCOMES
+                                    and type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0))
                 if (message.get("index") != len(progress)
                         or message.get("outcome") not in {"answered", "abstain", "malformed", "invalid_schema",
                                                          "refusal", "truncated", "incomplete", "identity_mismatch",
@@ -1471,7 +1675,7 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
                                                          "transport_or_protocol_error", "request_too_large_not_started",
                                                          "not_attempted_after_abort"}
                         or not isinstance(message.get("prediction"), list)
-                        or len(message["prediction"]) != len(labels)):
+                        or len(message["prediction"]) != len(labels) or not timing_valid):
                     raise ValueError("worker progress protocol is incomplete or contradictory")
                 progress.append(message)
                 continue
@@ -1513,7 +1717,7 @@ def run(config_path: Path, output: Path) -> dict[str, Any]:
     report = _assemble_report(config, config_digest, receipt, receipt_digest, baseline_report,
                               classical_config, train_rows, validation_rows, y_train, train_known,
                               y_validation, target_known, corpus, classical_config_digest, payload,
-                              payload_raw, ready, result, host_before)
+                                  payload_raw, ready, result, host_before, host_after)
     output_path = output_dir / "local-12b-report.json"
     encoded_report = (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
     if len(encoded_report) > config["max_report_bytes"]:
