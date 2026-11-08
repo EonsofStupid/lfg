@@ -142,6 +142,41 @@ the Python cache reference. It records artifact/input hashes only in the
 private report and emits no prompt or generated text. `promotion_eligible`,
 `native_runtime_checked`, and quality evaluation are false in the manifest.
 
+Cached export uses its own `owned-byte-cached-onnx-export.example.json` config.
+The optional `graph_optimization_level` accepts ONNX Runtime's symbolic levels
+`ORT_DISABLE_ALL`, `ORT_ENABLE_BASIC`, `ORT_ENABLE_EXTENDED`, and
+`ORT_ENABLE_ALL`. When omitted, the exporter leaves `SessionOptions` at the
+installed ONNX Runtime library default and records the request as
+`unspecified`; it separately records the value read back from each prefill and
+decode session, or `unknown` if that API is unavailable. The manifest and
+measurement also record the ORT version, providers, and thread settings, and
+the existing config hash binds the request. Unknown extension fields remain
+inert. Invalid values of this recognized option fail before the private output
+directory is created.
+
+This ORT setting controls only the exporter's ORT validation and benchmark
+sessions and the matching ORT parity diagnostic. It does not configure the
+native tract runtime or prove which individual graph rewrites occurred. The
+native cached runtime continues to use tract and needs separate backend-specific
+parity and performance evidence.
+
+A later 10-work-item CPU prefill-isolation diagnostic on two screening-claimed
+training sources observed one cache-value failure in 7,020,544 comparisons for
+current-default ORT versus PyTorch incremental, and zero in 7,020,544 for
+`ORT_DISABLE_ALL` in that comparison. The diagnostic compared prefixes only;
+it did not rerun the strict cached exporter or its autoregressive decode
+acceptance. It therefore does not show that disabling optimization fixes strict
+cached parity, and it says nothing about model quality. The original strict
+cached export remains failed pending an independently grounded rerun.
+
+The legacy-policy regression uses a base64-stored copy of the pre-configuration
+cached exporter at `ml/lfg-encoder/fixtures/legacy_owned_cached_exporter.b64`.
+The decoded source SHA-256 is
+`e8c3ef56f26abaadeef341f7f68201754b4aeb42561b2f64641d25cd16d2ea2f`; base64
+storage keeps that source pin stable across platform line-ending conversions.
+The test creates only synthetic model inputs and artifacts and does not depend
+on repository history or claim model qualification.
+
 One private local experiment used the owner-authorized 573-byte and 603-byte
 framed development inputs with the actual private checkpoint (context 4,352,
 width 512, eight layers). ONNX Runtime 1.31.1 with one CPU thread checked

@@ -133,6 +133,21 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(subject.DiagnosticAbort):
             subject._validate_policy(policy)
 
+    def test_ort_default_is_only_selected_by_omitting_level(self):
+        import diagnose_owned_cached_parity as subject
+
+        class SessionOptions:
+            def __init__(self):
+                self.graph_optimization_level = 'library-default'
+
+        fake_ort = SimpleNamespace(SessionOptions=SessionOptions)
+        options, requested = subject._create_ort_session_options(fake_ort, 1, {})
+        self.assertEqual(requested, 'unspecified')
+        self.assertEqual(options.graph_optimization_level, 'library-default')
+        with self.assertRaisesRegex(ValueError, 'invalid ONNX Runtime graph optimization level'):
+            subject._create_ort_session_options(
+                fake_ort, 1, {'graph_optimization_level': 'unspecified'})
+
 
 @unittest.skipUnless(all(importlib.util.find_spec(name) for name in
                          ('torch', 'onnx', 'onnxruntime', 'safetensors', 'numpy')),
@@ -141,7 +156,7 @@ class PolicyTests(unittest.TestCase):
 class DiagnosticRunnerTests(unittest.TestCase):
     sentinel = 'SENTINEL-PRIVATE-PATH-OR-EXCEPTION'
 
-    def make_fixture(self, root: Path):
+    def make_fixture(self, root: Path, graph_optimization_level='ORT_DISABLE_ALL'):
         import hashlib
         import owned_student
         from safetensors.torch import save_file
@@ -163,7 +178,13 @@ class DiagnosticRunnerTests(unittest.TestCase):
                     'code_sha256': {'owned_student.py': subject.sha256(model_code)}}
         manifest_path = checkpoint / 'manifest.json'
         manifest_path.write_text(json.dumps(manifest))
-        config = json.loads(Path(exporter.__file__).with_name('owned-byte-onnx-export.example.json').read_text())
+        config = json.loads(Path(exporter.__file__).with_name(
+            'owned-byte-cached-onnx-export.example.json').read_text())
+        if graph_optimization_level is None:
+            config.pop('graph_optimization_level', None)
+        else:
+            config['graph_optimization_level'] = graph_optimization_level
+        config['future_extension'] = self.sentinel
         config['parity_lengths'] = [1]
         config_path = root / 'export-config.json'
         config_path.write_text(json.dumps(config))
@@ -246,11 +267,89 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(report['screening_claim_status'], 'operator_claim_not_independently_verified')
             self.assertFalse(report['assessment_quality_evaluated'])
             self.assertFalse(report['promotion_eligible'])
+            provenance = report['onnxruntime_validation']
+            self.assertEqual(provenance['backend'], 'onnxruntime')
+            self.assertEqual(provenance['scope'], 'cached-parity-diagnostic-validation-and-decode')
+            self.assertEqual(provenance['requested_graph_optimization_level'], 'ORT_DISABLE_ALL')
+            self.assertEqual([row['effective_graph_optimization_level_reported']
+                              for row in provenance['sessions']], ['ORT_DISABLE_ALL', 'ORT_DISABLE_ALL'])
+            self.assertTrue(all(row['providers_reported'] == ['CPUExecutionProvider']
+                                for row in provenance['sessions']))
             self.assertFalse(report['execution_control']['real_input_guard_enforced_by_runner'])
             self.assertFalse(report['execution_control']['host_supervisor_verified_by_runner'])
             self.assertEqual({path: path.read_bytes() for path in before}, before)
             self.assertNotIn(self.sentinel, (fixture['output'] / 'diagnostic.json').read_text())
             self.assertNotIn(str(fixture['source']), (fixture['output'] / 'diagnostic.json').read_text())
+            self.assertNotIn(self.sentinel, (fixture['output'] / 'diagnostic.json').read_text())
+
+    def test_omitted_graph_level_preserves_ort_default_and_records_readback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.make_fixture(Path(temporary), graph_optimization_level=None)
+            result = self.run_fixture(fixture)
+            self.assertEqual(result['status'], 'diagnostic_complete', result)
+            report = strict_json((fixture['output'] / 'diagnostic.json').read_bytes())
+            provenance = report['onnxruntime_validation']
+            self.assertEqual(provenance['requested_graph_optimization_level'], 'unspecified')
+            self.assertTrue(all(row['effective_graph_optimization_level_reported'] == 'ORT_ENABLE_ALL'
+                                for row in provenance['sessions']))
+
+    def test_legacy_policy_pinned_exporter_supports_both_ort_settings(self):
+        import base64
+        import diagnose_owned_cached_parity as subject
+
+        fixture_path = Path(__file__).resolve().parent / 'fixtures' / 'legacy_owned_cached_exporter.b64'
+        legacy_exporter = base64.b64decode(fixture_path.read_bytes().strip(), validate=True)
+        self.assertEqual(subject.sha256(legacy_exporter),
+                         'e8c3ef56f26abaadeef341f7f68201754b4aeb42561b2f64641d25cd16d2ea2f')
+        self.assertNotIn(b'create_ort_session_options', legacy_exporter)
+        expected = [('ORT_DISABLE_ALL', 'ORT_DISABLE_ALL'), (None, 'ORT_ENABLE_ALL')]
+
+        for requested_level, effective_level in expected:
+            with self.subTest(requested_level=requested_level), tempfile.TemporaryDirectory() as temporary:
+                fixture = self.make_fixture(Path(temporary), graph_optimization_level=requested_level)
+                legacy_path = fixture['root'] / 'legacy-exporter.py'
+                legacy_path.write_bytes(legacy_exporter)
+                policy = json.loads(fixture['policy'].read_bytes())
+                policy['pins']['exporter_code_sha256'] = subject.sha256(legacy_exporter)
+                fixture['policy'].write_text(json.dumps(policy))
+
+                original_with_name = Path.with_name
+                diagnostic_file = Path(subject.__file__)
+
+                def route_legacy_exporter(path, name):
+                    if path == diagnostic_file and name == 'export_owned_cached_onnx.py':
+                        return legacy_path
+                    return original_with_name(path, name)
+
+                with mock.patch.object(Path, 'with_name', route_legacy_exporter):
+                    result = self.run_fixture(fixture)
+                self.assertEqual(result['status'], 'diagnostic_complete', result)
+                report = strict_json((fixture['output'] / 'diagnostic.json').read_bytes())
+                provenance = report['onnxruntime_validation']
+                self.assertEqual(provenance['requested_graph_optimization_level'],
+                                 requested_level or 'unspecified')
+                self.assertEqual([row['effective_graph_optimization_level_reported']
+                                  for row in provenance['sessions']],
+                                 [effective_level, effective_level])
+                self.assertTrue(all(row['providers_reported'] == ['CPUExecutionProvider']
+                                    for row in provenance['sessions']))
+
+    def test_invalid_graph_level_fails_before_private_output_creation(self):
+        import diagnose_owned_cached_parity as subject
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self.make_fixture(Path(temporary))
+            config = json.loads(fixture['config'].read_bytes())
+            config['graph_optimization_level'] = 'ORT_ENABLE_UNKNOWN'
+            fixture['config'].write_text(json.dumps(config))
+            policy = json.loads(fixture['policy'].read_bytes())
+            policy['pins']['export_config_sha256'] = subject.sha256(fixture['config'].read_bytes())
+            fixture['policy'].write_text(json.dumps(policy))
+            result = self.run_fixture(fixture)
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['failure_stage'], 'preflight')
+            self.assertEqual(result['failure_code'], 'ort_graph_optimization_level_invalid_or_unavailable')
+            self.assertFalse(fixture['output'].exists())
 
     def test_swapped_path_after_pin_load_uses_pinned_weight_bytes_and_reports_mutation(self):
         from safetensors.torch import load as original_load, save_file

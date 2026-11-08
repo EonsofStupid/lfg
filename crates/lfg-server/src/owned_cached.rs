@@ -1479,6 +1479,43 @@ mod tests {
     }
 
     #[test]
+    fn legacy_and_ort_provenance_manifests_remain_tract_compatible() {
+        let root = tempfile::tempdir().unwrap();
+        let model_sha256 = "a".repeat(64);
+        let manifest_sha256 = write_test_cached_artifact(
+            root.path(),
+            &model_sha256,
+            &"b".repeat(64),
+            &"c".repeat(64),
+        );
+        let manifest_path = root.path().join("manifest.json");
+        let legacy_raw = std::fs::read(&manifest_path).unwrap();
+        let legacy: Manifest = serde_json::from_slice(&legacy_raw).unwrap();
+        assert_eq!(legacy.schema_version, "lfg.owned-byte-cached-onnx.v1");
+
+        let mut with_ort_provenance: serde_json::Value =
+            serde_json::from_slice(&legacy_raw).unwrap();
+        with_ort_provenance["onnxruntime_validation"] = serde_json::json!({
+            "backend": "onnxruntime",
+            "scope": "export-validation-and-benchmark",
+            "requested_graph_optimization_level": "ORT_DISABLE_ALL",
+            "sessions": [{
+                "name": "prefill",
+                "effective_graph_optimization_level_reported": "ORT_DISABLE_ALL",
+                "providers_reported": ["CPUExecutionProvider"]
+            }]
+        });
+        let new_raw = serde_json::to_vec(&with_ort_provenance).unwrap();
+        let parsed: Manifest = serde_json::from_slice(&new_raw).unwrap();
+        assert_eq!(parsed.schema_version, legacy.schema_version);
+        assert_eq!(parsed.model_sha256, legacy.model_sha256);
+        assert_eq!(parsed.prefill.file, legacy.prefill.file);
+        assert_eq!(parsed.decode.file, legacy.decode.file);
+        assert!(!manifest_sha256.is_empty());
+        // This metadata is ignored by the native tract session configuration.
+    }
+
+    #[test]
     fn runtime_limits_accept_configured_boundary_and_reject_excess() {
         let runtime = private_runtime_bounds();
         assert!(validate_runtime_limits(&runtime, 512, None, 171_594_288, 71_335_936).is_ok());
