@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 
@@ -31,7 +32,9 @@ class ExportOwnedCachedTests(unittest.TestCase):
             manifest = {'architecture': architecture, 'weights_sha256': sha(weights.read_bytes()),
                         'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}
             (checkpoint / 'manifest.json').write_text(json.dumps(manifest))
-            config = json.loads(Path(subject.__file__).with_name('owned-byte-onnx-export.example.json').read_text())
+            config = json.loads(Path(subject.__file__).with_name('owned-byte-cached-onnx-export.example.json').read_text())
+            config['graph_optimization_level'] = 'ORT_DISABLE_ALL'
+            config['future_extension'] = 'accepted-but-inert'
             config['parity_lengths'] = [1, 4]
             config_path = root / 'config.json'
             config_path.write_text(json.dumps(config))
@@ -52,6 +55,19 @@ class ExportOwnedCachedTests(unittest.TestCase):
             self.assertEqual(artifact['cache']['overflow'], 'reject')
             self.assertEqual(artifact['cache']['eviction'], 'none')
             self.assertEqual(artifact['prefill']['sequence_max'], 8)
+            provenance = artifact['onnxruntime_validation']
+            self.assertEqual(provenance['backend'], 'onnxruntime')
+            self.assertEqual(provenance['scope'], 'export-validation-and-benchmark')
+            self.assertEqual(provenance['requested_graph_optimization_level'], 'ORT_DISABLE_ALL')
+            self.assertEqual([row['name'] for row in provenance['sessions']], ['prefill', 'decode'])
+            self.assertTrue(all(row['effective_graph_optimization_level_reported'] == 'ORT_DISABLE_ALL'
+                                for row in provenance['sessions']))
+            self.assertTrue(all(row['providers_reported'] == ['CPUExecutionProvider']
+                                for row in provenance['sessions']))
+            self.assertEqual(measurement['onnxruntime_validation'], provenance)
+            self.assertEqual(measurement['export_config_sha256'], sha(config_path.read_bytes()))
+            manifest_canonical = (json.dumps(artifact, sort_keys=True, separators=(',', ':')) + '\n').encode()
+            self.assertEqual(measurement['artifact_manifest_sha256'], sha(manifest_canonical))
             self.assertEqual(len(measurement['samples']), 2)
             self.assertEqual([sample['source_bytes'] for sample in measurement['samples']], [4, 1])
             self.assertTrue(all(sample['full_prefix_cached_parity_checked'] for sample in measurement['samples']))
@@ -74,7 +90,8 @@ class ExportOwnedCachedTests(unittest.TestCase):
             manifest = {'architecture': architecture, 'weights_sha256': sha(weights.read_bytes()),
                         'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}
             (checkpoint / 'manifest.json').write_text(json.dumps(manifest))
-            config = json.loads(Path(subject.__file__).with_name('owned-byte-onnx-export.example.json').read_text())
+            config = json.loads(Path(subject.__file__).with_name('owned-byte-cached-onnx-export.example.json').read_text())
+            config.pop('graph_optimization_level')
             config['parity_lengths'] = [1]
             config_path = root / 'config.json'
             config_path.write_text(json.dumps(config))
@@ -85,6 +102,10 @@ class ExportOwnedCachedTests(unittest.TestCase):
             self.assertEqual(result['status'], 'verified')
             measurement = json.loads((root / 'out' / 'measurement.json').read_bytes())
             self.assertEqual(measurement['samples'][0]['decode_steps'], 1)
+            self.assertEqual(measurement['onnxruntime_validation']['requested_graph_optimization_level'],
+                             'unspecified')
+            self.assertEqual(measurement['onnxruntime_validation']['sessions'][0][
+                'effective_graph_optimization_level_reported'], 'ORT_ENABLE_ALL')
 
     def test_full_context_parity_length_fails_before_writing_output(self):
         import owned_student
@@ -103,7 +124,7 @@ class ExportOwnedCachedTests(unittest.TestCase):
             manifest = {'architecture': architecture, 'weights_sha256': sha(weights.read_bytes()),
                         'code_sha256': {'owned_student.py': sha(Path(owned_student.__file__).read_bytes())}}
             (checkpoint / 'manifest.json').write_text(json.dumps(manifest))
-            config = json.loads(Path(subject.__file__).with_name('owned-byte-onnx-export.example.json').read_text())
+            config = json.loads(Path(subject.__file__).with_name('owned-byte-cached-onnx-export.example.json').read_text())
             config['parity_lengths'] = [1, 4]
             config_path = root / 'config.json'
             config_path.write_text(json.dumps(config))
@@ -118,6 +139,102 @@ class ExportOwnedCachedTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'leave room for a decode step'):
                 subject.export(checkpoint, config_path, source, output, decode_steps=1, warmup=0, repeats=1)
             self.assertFalse(output.exists())
+
+    def test_invalid_recognized_graph_level_fails_before_output_creation(self):
+        import export_owned_cached_onnx as subject
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = json.loads(Path(subject.__file__).with_name(
+                'owned-byte-cached-onnx-export.example.json').read_text())
+            config['graph_optimization_level'] = 'ORT_ENABLE_SOMETHING_NEW'
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            output = root / 'must-not-be-created'
+            with self.assertRaisesRegex(ValueError, 'invalid ONNX Runtime graph optimization level'):
+                subject.export(root / 'missing-checkpoint', config_path, root / 'missing-source', output)
+            self.assertFalse(output.exists())
+
+
+@unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors')),
+                     'torch and safetensors required to import exporter')
+class ORTConfigurationTests(unittest.TestCase):
+    def test_each_supported_graph_optimization_level_and_omitted_default(self):
+        import export_owned_cached_onnx as subject
+
+        names = subject.ORT_GRAPH_OPTIMIZATION_LEVELS
+        levels = {name: object() for name in names}
+
+        class Options:
+            def __init__(self):
+                object.__setattr__(self, 'graph_optimization_level', 'library-default')
+                object.__setattr__(self, 'assigned', [])
+
+            def __setattr__(self, name, value):
+                if name == 'graph_optimization_level':
+                    self.assigned.append(value)
+                object.__setattr__(self, name, value)
+
+        fake_ort = SimpleNamespace(SessionOptions=Options,
+                                   GraphOptimizationLevel=SimpleNamespace(**levels),
+                                   __version__='synthetic-ort')
+        default, requested = subject.create_ort_session_options(fake_ort, 3, {})
+        self.assertEqual(requested, 'unspecified')
+        self.assertEqual(default.graph_optimization_level, 'library-default')
+        self.assertEqual(default.assigned, [])
+        self.assertEqual((default.intra_op_num_threads, default.inter_op_num_threads), (3, 1))
+        default_provenance = subject.ort_session_provenance(
+            fake_ort, {'prefill': type('S', (), {'get_session_options': lambda self: default,
+                                                 'get_providers': lambda self: ['CPUExecutionProvider']})(),
+                       'decode': type('S', (), {'get_session_options': lambda self: default,
+                                                'get_providers': lambda self: ['CPUExecutionProvider']})()},
+            requested, 3, 'synthetic-default')
+        self.assertTrue(all(row['effective_graph_optimization_level_reported'] == 'unknown'
+                            for row in default_provenance['sessions']))
+
+        for name, expected in levels.items():
+            with self.subTest(level=name):
+                options, requested = subject.create_ort_session_options(
+                    fake_ort, 2, {'graph_optimization_level': name})
+                self.assertEqual(requested, name)
+                self.assertIs(options.graph_optimization_level, expected)
+
+        class Session:
+            def __init__(self, options, providers):
+                self.options = options
+                self.providers = providers
+
+            def get_session_options(self):
+                return self.options
+
+            def get_providers(self):
+                return self.providers
+
+        selected_prefill, selected_request = subject.create_ort_session_options(
+            fake_ort, 2, {'graph_optimization_level': 'ORT_ENABLE_BASIC'})
+        selected_decode, decode_request = subject.create_ort_session_options(
+            fake_ort, 2, {'graph_optimization_level': 'ORT_ENABLE_BASIC'})
+        self.assertIsNot(selected_prefill, selected_decode)
+        self.assertEqual(selected_prefill.graph_optimization_level, levels['ORT_ENABLE_BASIC'])
+        self.assertEqual(selected_decode.graph_optimization_level, levels['ORT_ENABLE_BASIC'])
+        self.assertEqual(selected_request, decode_request)
+        provenance = subject.ort_session_provenance(
+            fake_ort, {'prefill': Session(selected_prefill, ['CPUExecutionProvider']),
+                       'decode': Session(selected_decode, ['CPUExecutionProvider'])},
+            selected_request, 2, 'synthetic-export')
+        self.assertEqual(provenance['onnxruntime_version'], 'synthetic-ort')
+        self.assertEqual([row['effective_graph_optimization_level_reported']
+                          for row in provenance['sessions']], ['ORT_ENABLE_BASIC', 'ORT_ENABLE_BASIC'])
+        self.assertTrue(all(row['providers_reported'] == ['CPUExecutionProvider']
+                            for row in provenance['sessions']))
+
+    def test_invalid_recognized_level_is_rejected(self):
+        import export_owned_cached_onnx as subject
+
+        fake_ort = SimpleNamespace(SessionOptions=lambda: object())
+        with self.assertRaisesRegex(ValueError, 'invalid ONNX Runtime graph optimization level'):
+            subject.create_ort_session_options(
+                fake_ort, 1, {'graph_optimization_level': 'ORT_ENABLE_SOMETHING_NEW'})
 
 
 @unittest.skipUnless(all(importlib.util.find_spec(name) for name in ('torch', 'safetensors', 'numpy')),

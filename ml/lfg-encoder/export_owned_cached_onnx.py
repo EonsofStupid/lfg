@@ -24,6 +24,8 @@ import owned_student
 from owned_cached_decode import DecodeSession
 
 MAX_CONFIG_BYTES = 1 << 20
+ORT_GRAPH_OPTIMIZATION_LEVELS = (
+    'ORT_DISABLE_ALL', 'ORT_ENABLE_BASIC', 'ORT_ENABLE_EXTENDED', 'ORT_ENABLE_ALL')
 
 
 def digest(raw: bytes) -> str:
@@ -36,6 +38,83 @@ def read_bounded(path: Path, maximum: int) -> bytes:
     if len(raw) > maximum:
         raise ValueError('input exceeds configured limit')
     return raw
+
+
+def requested_ort_graph_optimization_level(config: dict) -> str:
+    """Validate the optional ORT graph level without changing omitted defaults."""
+    if 'graph_optimization_level' not in config:
+        return 'unspecified'
+    requested = config['graph_optimization_level']
+    if not isinstance(requested, str) or requested not in ORT_GRAPH_OPTIMIZATION_LEVELS:
+        raise ValueError('invalid ONNX Runtime graph optimization level')
+    return requested
+
+
+def create_ort_session_options(ort, cpu_threads: int, config: dict):
+    """Create one cached-session options object, leaving omitted ORT defaults alone."""
+    requested = requested_ort_graph_optimization_level(config)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = cpu_threads
+    options.inter_op_num_threads = 1
+    if requested != 'unspecified':
+        level_api = getattr(ort, 'GraphOptimizationLevel', None)
+        level = getattr(level_api, requested, None) if level_api is not None else None
+        if level is None:
+            raise ValueError('configured ONNX Runtime graph optimization level is unavailable')
+        options.graph_optimization_level = level
+    return options, requested
+
+
+def _reported_graph_optimization_level(ort, value) -> str:
+    if isinstance(value, str) and value in ORT_GRAPH_OPTIMIZATION_LEVELS:
+        return value
+    level_api = getattr(ort, 'GraphOptimizationLevel', None)
+    if level_api is not None:
+        for name in ORT_GRAPH_OPTIMIZATION_LEVELS:
+            expected = getattr(level_api, name, None)
+            if expected is not None:
+                try:
+                    if value == expected or int(value) == int(expected):
+                        return name
+                except (TypeError, ValueError, OverflowError):
+                    pass
+    return 'unknown'
+
+
+def ort_session_provenance(ort, sessions: dict, requested: str,
+                           cpu_threads: int, scope: str) -> dict:
+    """Report read-back settings, keeping unavailable values explicitly unknown."""
+    reported = []
+    for name, session in sessions.items():
+        effective_level = 'unknown'
+        intra_threads = 'unknown'
+        inter_threads = 'unknown'
+        providers = 'unknown'
+        try:
+            options = session.get_session_options()
+            effective_level = _reported_graph_optimization_level(
+                ort, getattr(options, 'graph_optimization_level', None))
+            intra_threads = getattr(options, 'intra_op_num_threads', 'unknown')
+            inter_threads = getattr(options, 'inter_op_num_threads', 'unknown')
+        except Exception:
+            pass
+        try:
+            observed_providers = session.get_providers()
+            if isinstance(observed_providers, (list, tuple)) and observed_providers:
+                providers = list(observed_providers)
+        except Exception:
+            pass
+        reported.append({'name': name,
+                         'effective_graph_optimization_level_reported': effective_level,
+                         'intra_op_num_threads_reported': intra_threads,
+                         'inter_op_num_threads_reported': inter_threads,
+                         'providers_reported': providers})
+    return {'backend': 'onnxruntime', 'scope': scope,
+            'onnxruntime_version': str(getattr(ort, '__version__', 'unknown')),
+            'requested_graph_optimization_level': requested,
+            'cpu_threads_requested': cpu_threads,
+            'inter_op_num_threads_requested': 1,
+            'sessions': reported}
 
 
 def private_output(directory: Path) -> None:
@@ -225,6 +304,12 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             or type(decode_steps) is not int or decode_steps < 1
             or type(warmup) is not int or warmup < 0 or type(repeats) is not int or repeats < 1):
         raise ValueError('invalid cached export configuration')
+    # Validate recognized settings and instantiate the options before private
+    # output creation. When omitted, ORT retains its own SessionOptions default.
+    prefill_session_options, requested_ort_level = create_ort_session_options(
+        ort, config['cpu_threads'], config)
+    decode_session_options, _ = create_ort_session_options(
+        ort, config['cpu_threads'], config)
     manifest_path, weights_path = checkpoint / 'manifest.json', checkpoint / 'weights.safetensors'
     manifest_raw = read_bounded(manifest_path, config['max_manifest_bytes'])
     checkpoint_manifest = json.loads(manifest_raw)
@@ -291,11 +376,13 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         for tensor in graph.graph.initializer:
             if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data:
                 raise ValueError('external ONNX tensors are not supported')
-    session_options = ort.SessionOptions()
-    session_options.intra_op_num_threads = config['cpu_threads']
-    session_options.inter_op_num_threads = 1
-    prefill_session = ort.InferenceSession(prefill_raw, sess_options=session_options, providers=['CPUExecutionProvider'])
-    decode_session = ort.InferenceSession(decode_raw, sess_options=session_options, providers=['CPUExecutionProvider'])
+    prefill_session = ort.InferenceSession(
+        prefill_raw, sess_options=prefill_session_options, providers=['CPUExecutionProvider'])
+    decode_session = ort.InferenceSession(
+        decode_raw, sess_options=decode_session_options, providers=['CPUExecutionProvider'])
+    onnxruntime_validation = ort_session_provenance(
+        ort, {'prefill': prefill_session, 'decode': decode_session},
+        requested_ort_level, config['cpu_threads'], 'export-validation-and-benchmark')
     max_logit_diff = 0.0
     max_cache_diff = 0.0
     exact_greedy = True
@@ -483,6 +570,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         'max_absolute_cache_difference': max_cache_diff,
         'greedy_bytes_exact': exact_greedy,
         'torch': torch.__version__, 'onnx': onnx.__version__, 'onnxruntime': ort.__version__,
+        'onnxruntime_validation': onnxruntime_validation,
         'native_runtime_checked': False, 'assessment_quality_checked': False,
     }
     measurement = {
@@ -493,6 +581,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         'cached_reference_code_sha256': digest(Path(__file__).with_name('owned_cached_decode.py').read_bytes()),
         'export_code_sha256': digest(Path(__file__).read_bytes()), 'export_config_sha256': digest(config_raw),
         'cpu_threads': config['cpu_threads'], 'warmup_runs': warmup, 'repeats': repeats,
+        'onnxruntime_validation': onnxruntime_validation,
         'decode_steps': decode_steps, 'samples': source_measurements,
         'platform': platform.platform(), 'processor': platform.processor(),
         'parity': {'max_absolute_logit_difference': max_logit_diff,

@@ -26,6 +26,8 @@ MAX_DECODE_TRANSITIONS = 512
 MAX_DECODE_PER_SAMPLE = 64
 ORIGINAL_ATOL = 1e-5
 ORIGINAL_RTOL = 1e-5
+ORT_GRAPH_OPTIMIZATION_LEVELS = (
+    'ORT_DISABLE_ALL', 'ORT_ENABLE_BASIC', 'ORT_ENABLE_EXTENDED', 'ORT_ENABLE_ALL')
 PIN_NAMES = (
     'checkpoint_manifest_sha256', 'weights_sha256', 'model_code_sha256',
     'cached_reference_code_sha256', 'exporter_code_sha256',
@@ -61,6 +63,79 @@ def _digest(value) -> bool:
 
 def _finite_number(value) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _create_ort_session_options(ort, cpu_threads: int, config: dict):
+    """Build diagnostic options locally so old policy-pinned exporters still work."""
+    if 'graph_optimization_level' not in config:
+        requested = 'unspecified'
+    else:
+        requested = config['graph_optimization_level']
+        if not isinstance(requested, str) or requested not in ORT_GRAPH_OPTIMIZATION_LEVELS:
+            raise ValueError('invalid ONNX Runtime graph optimization level')
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = cpu_threads
+    options.inter_op_num_threads = 1
+    if requested != 'unspecified':
+        level_api = getattr(ort, 'GraphOptimizationLevel', None)
+        level = getattr(level_api, requested, None) if level_api is not None else None
+        if level is None:
+            raise ValueError('configured ONNX Runtime graph optimization level is unavailable')
+        options.graph_optimization_level = level
+    return options, requested
+
+
+def _reported_ort_graph_level(ort, value) -> str:
+    if isinstance(value, str) and value in ORT_GRAPH_OPTIMIZATION_LEVELS:
+        return value
+    level_api = getattr(ort, 'GraphOptimizationLevel', None)
+    if level_api is not None:
+        for name in ORT_GRAPH_OPTIMIZATION_LEVELS:
+            expected = getattr(level_api, name, None)
+            if expected is not None:
+                try:
+                    if value == expected or int(value) == int(expected):
+                        return name
+                except (TypeError, ValueError, OverflowError):
+                    pass
+    return 'unknown'
+
+
+def _ort_session_provenance(ort, sessions: dict, requested: str,
+                            cpu_threads: int, scope: str) -> dict:
+    """Record read-back session settings without depending on exporter version."""
+    reported = []
+    for name, session in sessions.items():
+        effective_level = 'unknown'
+        intra_threads = 'unknown'
+        inter_threads = 'unknown'
+        providers = 'unknown'
+        try:
+            options = session.get_session_options()
+            effective_level = _reported_ort_graph_level(
+                ort, getattr(options, 'graph_optimization_level', None))
+            intra_threads = getattr(options, 'intra_op_num_threads', 'unknown')
+            inter_threads = getattr(options, 'inter_op_num_threads', 'unknown')
+        except Exception:
+            pass
+        try:
+            observed_providers = session.get_providers()
+            if isinstance(observed_providers, (list, tuple)) and observed_providers:
+                providers = list(observed_providers)
+        except Exception:
+            pass
+        reported.append({'name': name,
+                         'effective_graph_optimization_level_reported': effective_level,
+                         'intra_op_num_threads_reported': intra_threads,
+                         'inter_op_num_threads_reported': inter_threads,
+                         'providers_reported': providers})
+    return {'backend': 'onnxruntime',
+            'scope': scope,
+            'onnxruntime_version': str(getattr(ort, '__version__', 'unknown')),
+            'requested_graph_optimization_level': requested,
+            'cpu_threads_requested': cpu_threads,
+            'inter_op_num_threads_requested': 1,
+            'sessions': reported}
 
 
 def _reject_json_constant(_value):
@@ -519,6 +594,13 @@ def diagnose(checkpoint: Path, export_config: Path, graphs: Path, policy_path: P
         exporter_module_name = '_lfg_pinned_exporter_' + policy['pins']['exporter_code_sha256'][:12]
         exporter = _load_pinned_module(module_stack, exporter_module_name,
                                        exporter_code_raw, exporter_code_path)
+        try:
+            prefill_options, requested_ort_level = _create_ort_session_options(
+                ort, cpu_threads, config)
+            decode_options, _ = _create_ort_session_options(
+                ort, cpu_threads, config)
+        except ValueError:
+            raise DiagnosticAbort('preflight', 'ort_graph_optimization_level_invalid_or_unavailable') from None
         # Establish private output only after all executable project code bytes
         # have been validated and registered. Failures from this point can be
         # represented by a bounded sanitized partial report.
@@ -540,7 +622,10 @@ def diagnose(checkpoint: Path, export_config: Path, graphs: Path, policy_path: P
                        'elapsed_seconds_includes': 'preflight, model/session setup, and inference',
                        'peak_rss_bytes': None,
                        'platform': platform.platform(), 'processor': platform.processor(),
-                       'torch_version': None, 'onnxruntime_version': None})
+                       'torch_version': None, 'onnxruntime_version': None,
+                       'onnxruntime_validation': _ort_session_provenance(
+                           ort, {}, requested_ort_level, cpu_threads,
+                           'cached-parity-diagnostic-validation-and-decode')})
         if not _atomic_report(output_dir, report):
             raise DiagnosticAbort('report', 'report_size_limit')
 
@@ -549,13 +634,13 @@ def diagnose(checkpoint: Path, export_config: Path, graphs: Path, policy_path: P
         model.load_state_dict(load_safetensors(weights_raw))
         torch.set_num_threads(cpu_threads)
         layout = exporter.cache_layout(architecture)
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = cpu_threads
-        options.inter_op_num_threads = 1
-        prefill = ort.InferenceSession(prefill_raw, sess_options=options,
+        prefill = ort.InferenceSession(prefill_raw, sess_options=prefill_options,
                                        providers=['CPUExecutionProvider'])
-        decode = ort.InferenceSession(decode_raw, sess_options=options,
+        decode = ort.InferenceSession(decode_raw, sess_options=decode_options,
                                       providers=['CPUExecutionProvider'])
+        report['onnxruntime_validation'] = _ort_session_provenance(
+            ort, {'prefill': prefill, 'decode': decode}, requested_ort_level,
+            cpu_threads, 'cached-parity-diagnostic-validation-and-decode')
         _validate_graph_contract(prefill, decode, layout, architecture)
         state_names = [item['name'] for item in layout]
         prefill_output_names = ['logits', *state_names]
