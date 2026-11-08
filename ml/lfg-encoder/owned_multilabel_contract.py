@@ -106,7 +106,8 @@ def validate_config(config: Any) -> dict[str, Any]:
     if not isinstance(config, dict) or not required <= set(config) or config.get('schema_version') != CONFIG_SCHEMA:
         raise ValueError('unsupported owned multilabel training configuration')
     try:
-        inert_extensions = {key: value for key, value in config.items() if key not in required}
+        inert_extensions = {key: value for key, value in config.items()
+                            if key not in required and key != 'legacy_teacher_overlay'}
         if len(_json_bytes(inert_extensions)) > MAX_EXTENSION_BYTES:
             raise ValueError('configuration extensions exceed the configured bound')
     except (TypeError, ValueError, RecursionError) as error:
@@ -142,6 +143,9 @@ def validate_config(config: Any) -> dict[str, Any]:
     if set(overrides) - valid_keys or any(isinstance(v, bool) or not isinstance(v, (int, float)) or
                                           not math.isfinite(v) or v <= 0 for v in overrides.values()):
         raise ValueError('per-label weights must be finite, positive and selected')
+    if 'legacy_teacher_overlay' in config:
+        from legacy_teacher_overlay import validate_config as validate_overlay_config
+        validate_overlay_config(config['legacy_teacher_overlay'], cols)
     return config
 
 
@@ -281,6 +285,10 @@ def _validate_source_target_semantics(row: dict[str, Any]) -> None:
 
 def _validate_training_target_semantics(row: dict[str, Any]) -> None:
     decision, origin = row.get('decision'), row.get('target_origin')
+    if origin == 'unreviewed_local_teacher_positive':
+        if decision != 'positive' or not isinstance(row.get('teacher_evidence'), dict):
+            raise ValueError('teacher target lacks its distinct unreviewed evidence')
+        return
     if origin == 'full_reviewed_legacy' and row.get('verified_source_claim') is not True:
         raise ValueError('full-reviewed target origin requires a verified source claim')
     if origin in ('partial_explicit_positive', 'owner_authorized_unreviewed_positive'):
@@ -353,6 +361,7 @@ def build_dataset(config_path: Path) -> dict[str, Any]:
                 artifact['path'] in artifact_index:
             raise ValueError('source artifact manifest is malformed')
         artifact_index[artifact['path']] = artifact
+    source_rows = []
     for source in splits['train']:
         if source.get('split') != 'train':
             raise ValueError('non-train row encountered in train-only input')
@@ -383,6 +392,7 @@ def build_dataset(config_path: Path) -> dict[str, Any]:
         _validate_review_claims(source, len(source['columns']), taxonomy_sha256=config['taxonomy_sha256'],
                                  guide_sha256=guide_sha, source_sha256=source_identity['artifact_sha256'],
                                  text_sha256=source['text_sha256'])
+        source_rows.append(source)
         for column in columns:
             index = source['columns'].index(column)
             known, target, source_weight = source['known_mask'][index], source['targets'][index], source['weights'][index]
@@ -421,6 +431,89 @@ def build_dataset(config_path: Path) -> dict[str, Any]:
                          'screening': source['screening']})
             if len(rows) > config['max_rows']:
                 raise ValueError('configured maximum training row count exceeded')
+    teacher_overlay = None
+    if 'legacy_teacher_overlay' in config:
+        from legacy_teacher_overlay import load_and_join
+        lineage_artifacts = manifest.get('source_artifacts', [])
+        lineage_hashes = {item['path']: item['sha256'] for item in lineage_artifacts
+                          if isinstance(item, dict) and isinstance(item.get('path'), str)
+                          and isinstance(item.get('sha256'), str)}
+        source_copy_claim = manifest.get('source_copy_claim', {})
+        expected_source_lineage = {'source_artifacts': lineage_artifacts,
+            'source_artifacts_sha256': lineage_hashes,
+            'source_artifact_inventory_sha256': None,
+            'screening_policy_sha256': manifest.get('screening_policy_sha256'),
+            'screening_code_sha256': manifest.get('screening_code_sha256'),
+            'taxonomy_sha256': manifest.get('taxonomy_sha256'),
+            'taxonomy_loader_sha256': manifest.get('taxonomy_loader_sha256'),
+            'export_config_sha256': manifest.get('config_sha256'),
+            'workspace_plan_sha256': manifest.get('workspace_plan_sha256') or source_copy_claim.get('plan_sha256'),
+            'review_ledger_sha256': manifest.get('review_ledger_sha256') or source_copy_claim.get('ledger_sha256'),
+            'partial_sidecar_sha256': manifest.get('partial_sidecar_sha256') or source_copy_claim.get('sidecar_sha256'),
+            'label_guide_sha256': manifest.get('label_guide_sha256'),
+            'target_policy': manifest.get('target_policy'), 'selected_columns': manifest.get('selected_columns'),
+            'counts': manifest.get('counts'), 'promotion_eligible': False}
+        teacher_overlay = load_and_join(config['legacy_teacher_overlay'], source_rows,
+            source_manifest_sha256=config['export_manifest_sha256'],
+            source_config_sha256=manifest['config_sha256'],
+            source_train_sha256=manifest['output_files']['train.jsonl']['sha256'],
+            taxonomy_sha256=config['taxonomy_sha256'], selected_columns=columns,
+            expected_source_lineage=expected_source_lineage,
+            max_rows=config['max_rows'])
+        teacher_policy = teacher_overlay['weight_policy']
+        teacher_columns = {(column['field'], column['label']): column for column in columns}
+        for candidate in teacher_overlay['candidates']:
+            source = candidate['source']
+            column_index = candidate['column_index']
+            column = teacher_columns[(columns[column_index]['field'], columns[column_index]['label'])]
+            key = candidate['label_name']
+            teacher_weight = float(teacher_policy['per_label_weights'].get(key,
+                                        teacher_policy['default_weight']))
+            source_configured_weight = float(config['per_label_weights'].get(key, config['default_weight']))
+            configured_weight = teacher_weight * source_configured_weight
+            if not math.isfinite(configured_weight) or configured_weight <= 0:
+                raise ValueError('effective teacher weight is invalid')
+            weight = configured_weight
+            template = config['instruction_template']
+            response = {'schema_version': CONTRACT_SCHEMA, 'taxonomy_sha256': config['taxonomy_sha256'],
+                        'guide_sha256': guide_sha,
+                        'decisions': [{'field': column['field'], 'label': column['label'], 'value': 'positive'}]}
+            provenance = candidate['provenance']
+            teacher_evidence = {'report_manifest_sha256': candidate['report_manifest_sha256'],
+                'proposals_sha256': candidate['proposals_sha256'],
+                'proposal_line_sha256': candidate['proposal_sha256'],
+                'proposal_index': candidate['proposal_index'],
+                'proposal_config_sha256': provenance['proposal_config_sha256'],
+                'comparison_config_sha256': provenance['comparison_config_sha256'],
+                'model_name': provenance['model_name'],
+                'model_manifest_sha256': provenance['model_manifest_sha256'],
+                'prompt_contract_sha256': provenance['prompt_contract_sha256'],
+                'proposal_schema_sha256': provenance['proposal_schema_sha256'],
+                'adapter_code_sha256': provenance['adapter_code_sha256'],
+                'comparator_code_sha256': provenance['comparator_code_sha256'],
+                'status': candidate['status'], 'terminal_worker_result_verified_claim': provenance['terminal_worker_result_verified']}
+            row = {'schema_version': DATASET_SCHEMA, 'text': source['text'],
+                'instruction': template.format(field=column['field'], label=column['label']),
+                'field': column['field'], 'label': column['label'], 'decision': 'positive',
+                'target_response': _json_bytes(response).decode('utf-8').rstrip('\n'),
+                'weight': weight, 'source_weight': 1.0, 'configured_weight': configured_weight,
+                'family_sha256': source['family'], 'source_identity': source['source_identity'],
+                'text_sha256': source['text_sha256'], 'original_text_sha256': source['original_text_sha256'],
+                'target_origin': 'unreviewed_local_teacher_positive',
+                'source_target_origin': source['target_origins'][column_index],
+                'target_reviewer_claim_sha256': source['target_reviewer_claims'][column_index],
+                'verified_source_claim': source['verified_source_claim'],
+                'partial_review_provenance': source.get('partial_review_provenance'),
+                'full_review_provenance': source.get('full_review_provenance'),
+                'screening': source['screening'], 'teacher_evidence': teacher_evidence}
+            rows.append(row)
+            state['unknown'] -= 1
+            by_label[key]['unknown'] -= 1
+            state['positive'] += 1
+            weight_totals['positive'] += weight
+            by_label.setdefault(key, {'positive': 0, 'negative': 0, 'unknown': 0})['positive'] += 1
+            if len(rows) > config['max_rows']:
+                raise ValueError('configured maximum training row count exceeded')
     if not rows:
         raise ValueError('train export has no known selected target cells')
     data_raw = b''.join(_json_bytes(row) for row in rows)
@@ -450,10 +543,38 @@ def build_dataset(config_path: Path) -> dict[str, Any]:
                     'weight_totals': weight_totals,
                     'claims_notice': 'Lineage, redaction, reviewer and verification fields preserve source claims; digests do not independently verify them.',
                     'training_only': True, 'model_training_performed': False, 'promotion_eligible': False}
+    if teacher_overlay is not None:
+        manifest_out['legacy_teacher_overlay'] = {'schema_version': 'lfg.legacy-teacher-overlay-evidence.v1',
+            'adapter_code_sha256': _sha(Path(__file__).read_bytes()),
+            'overlay_code_sha256': _sha(Path(__import__('legacy_teacher_overlay').__file__).read_bytes()),
+            'report_manifest_sha256': teacher_overlay['report_manifest_sha256'],
+            'proposals_sha256': teacher_overlay['proposals_sha256'],
+            'proposal_bytes': teacher_overlay['proposal_bytes'],
+            'report_status': teacher_overlay['report'].get('status'),
+            'report_claims': {key: teacher_overlay['report']['claims'].get(key) for key in
+                ('teacher_suggestions_are_unreviewed', 'heldout_accessed',
+                 'labels_independently_verified', 'screening_independently_verified', 'promotion_eligible')},
+            'report_uncertainty': {key: teacher_overlay['report']['uncertainty'].get(key) for key in
+                ('source_and_review_claims_independently_verified', 'teacher_labels_are_claims',
+                 'omitted_labels_are_negative', 'selection_claim')},
+            'teacher_provenance': {key: teacher_overlay['provenance'].get(key) for key in
+                ('proposal_config_sha256', 'comparison_config_sha256', 'adapter_code_sha256',
+                 'comparator_code_sha256', 'worker_config_sha256', 'payload_sha256',
+                 'export_manifest_sha256', 'export_config_sha256', 'train_file_sha256',
+                 'taxonomy_sha256', 'selected_row_ids_sha256', 'selected_text_digests_sha256',
+                 'target_mask_sha256', 'proposal_schema_sha256', 'prompt_contract_sha256',
+                 'progress_store_id_sha256', 'progress_store_events_sha256', 'model_name',
+                 'model_manifest_sha256', 'terminal_worker_result_verified', 'progress_resumed')},
+            'weight_policy': teacher_overlay['weight_policy'],
+            'counts': teacher_overlay['counts'],
+            'claims_notice': 'Teacher targets are unreviewed model claims. Integrity digests do not verify semantics or screening.'}
     manifest_out['train_file'] = {'sha256': _sha(data_raw), 'bytes': len(data_raw)}
     manifest_out_raw = _json_bytes(manifest_out)
     if len(manifest_out_raw) > MAX_MANIFEST_BYTES or len(data_raw) + len(manifest_out_raw) > config['max_output_bytes']:
         raise ValueError('private training artifact exceeds configured output byte limit')
+    if teacher_overlay is not None:
+        from legacy_teacher_overlay import reverify_package
+        reverify_package(config['legacy_teacher_overlay'], teacher_overlay)
     output = _private_output(Path(config['output']))
     output.mkdir(parents=False, mode=0o700)
     masked._secure_private_path(output, is_directory=True)
@@ -480,6 +601,23 @@ def load_training_dataset(directory: Path, expected_manifest_sha256: str) -> tup
         raise ValueError('private training manifest differs from caller-pinned digest')
     if not isinstance(manifest, dict) or manifest.get('schema_version') != MANIFEST_SCHEMA:
         raise ValueError('unsupported private training manifest')
+    overlay_manifest = manifest.get('legacy_teacher_overlay')
+    if overlay_manifest is not None and (not isinstance(overlay_manifest, dict) or
+            overlay_manifest.get('schema_version') != 'lfg.legacy-teacher-overlay-evidence.v1' or
+            overlay_manifest.get('report_status') not in ('complete', 'partial_aborted_ambiguous') or
+            not _valid_digest(overlay_manifest.get('adapter_code_sha256')) or
+            not _valid_digest(overlay_manifest.get('overlay_code_sha256')) or
+            not _valid_digest(overlay_manifest.get('report_manifest_sha256')) or
+            not _valid_digest(overlay_manifest.get('proposals_sha256')) or
+            not isinstance(overlay_manifest.get('teacher_provenance'), dict) or
+            overlay_manifest.get('report_claims') != {'teacher_suggestions_are_unreviewed': True,
+                'heldout_accessed': False, 'labels_independently_verified': False,
+                'screening_independently_verified': False, 'promotion_eligible': False} or
+            not isinstance(overlay_manifest.get('report_uncertainty'), dict) or
+            overlay_manifest['report_uncertainty'].get('teacher_labels_are_claims') is not True or
+            overlay_manifest['report_uncertainty'].get('omitted_labels_are_negative') is not False or
+            overlay_manifest['report_uncertainty'].get('source_and_review_claims_independently_verified') is not False):
+        raise ValueError('private teacher overlay manifest is malformed')
     info = manifest.get('train_file')
     if not isinstance(info, dict) or set(info) != {'sha256', 'bytes'} or type(info['bytes']) is not int or info['bytes'] < 1:
         raise ValueError('training file manifest is malformed')
@@ -527,6 +665,53 @@ def load_training_dataset(directory: Path, expected_manifest_sha256: str) -> tup
             raise ValueError('private training row identity is invalid')
         key = f"{row.get('field')}:{row.get('label')}"
         configured_weight = weights.get(key, default_weight)
+        teacher_evidence = row.get('teacher_evidence')
+        if row.get('target_origin') == 'unreviewed_local_teacher_positive':
+            overlay = manifest.get('legacy_teacher_overlay')
+            if not isinstance(overlay, dict) or overlay.get('schema_version') != 'lfg.legacy-teacher-overlay-evidence.v1':
+                raise ValueError('teacher target has no bound overlay manifest')
+            policy = overlay.get('weight_policy')
+            if not isinstance(policy, dict) or policy.get('conflict_policy') != \
+                    'retain_source_and_skip_conflicting_teacher_positive':
+                raise ValueError('teacher overlay policy is malformed')
+            teacher_weights = policy.get('per_label_weights')
+            teacher_default = policy.get('default_weight')
+            if not isinstance(teacher_weights, dict) or isinstance(teacher_default, bool) or \
+                    not isinstance(teacher_default, (int, float)) or not math.isfinite(teacher_default) or teacher_default <= 0 or \
+                    set(teacher_weights) - {f'{field}:{label}' for field, label in expected} or \
+                    any(not isinstance(k, str) or isinstance(v, bool) or not isinstance(v, (int, float)) or
+                        not math.isfinite(v) or v <= 0 for k, v in teacher_weights.items()):
+                raise ValueError('teacher overlay weight policy is malformed')
+            configured_weight *= teacher_weights.get(key, teacher_default)
+            required_evidence = {'report_manifest_sha256', 'proposals_sha256', 'proposal_line_sha256',
+                'proposal_index', 'proposal_config_sha256', 'comparison_config_sha256', 'model_name',
+                'model_manifest_sha256', 'prompt_contract_sha256', 'proposal_schema_sha256',
+                'adapter_code_sha256', 'comparator_code_sha256', 'status',
+                'terminal_worker_result_verified_claim'}
+            teacher_meta = overlay.get('teacher_provenance')
+            if not isinstance(teacher_evidence, dict) or set(teacher_evidence) != required_evidence or \
+                    not isinstance(teacher_meta, dict) or \
+                    teacher_evidence.get('report_manifest_sha256') != overlay.get('report_manifest_sha256') or \
+                    teacher_evidence.get('proposals_sha256') != overlay.get('proposals_sha256') or \
+                    any(not _valid_digest(teacher_evidence.get(name)) for name in
+                        ('report_manifest_sha256', 'proposals_sha256', 'proposal_line_sha256',
+                         'proposal_config_sha256', 'comparison_config_sha256', 'model_manifest_sha256',
+                         'prompt_contract_sha256', 'proposal_schema_sha256', 'adapter_code_sha256',
+                         'comparator_code_sha256')) or \
+                    type(teacher_evidence.get('proposal_index')) is not int or teacher_evidence['proposal_index'] < 0 or \
+                    not isinstance(teacher_evidence.get('model_name'), str) or not teacher_evidence['model_name'] or \
+                    teacher_evidence.get('status') != 'answered' or \
+                    type(teacher_evidence.get('terminal_worker_result_verified_claim')) is not bool or \
+                    any(teacher_meta.get(name) != teacher_evidence.get(name) for name in
+                        ('proposal_config_sha256', 'comparison_config_sha256', 'model_name', 'model_manifest_sha256',
+                         'prompt_contract_sha256', 'proposal_schema_sha256', 'adapter_code_sha256',
+                         'comparator_code_sha256')) or \
+                    teacher_evidence.get('terminal_worker_result_verified_claim') != \
+                        teacher_meta.get('terminal_worker_result_verified') or \
+                    overlay.get('report_status') not in ('complete', 'partial_aborted_ambiguous') or \
+                    row.get('source_target_origin') not in ('partial_explicit_unknown', 'rejected_proposal_unknown',
+                                                            'unspecified_unknown'):
+                raise ValueError('teacher target evidence is incomplete or mismatched')
         source_weight = row.get('source_weight')
         if row.get('schema_version') != DATASET_SCHEMA or \
                 (row.get('field'), row.get('label')) not in expected or \
@@ -572,8 +757,11 @@ def load_training_dataset(directory: Path, expected_manifest_sha256: str) -> tup
                     not isinstance(k, str) or type(v) is not int or v < 0
                     for k, v in screening['redaction_counts'].items()):
             raise ValueError('private training screening provenance is malformed')
+        review_origin = row['target_origin']
+        if review_origin == 'unreviewed_local_teacher_positive':
+            review_origin = row['source_target_origin']
         _validate_review_claims({'target_reviewer_claim_sha256': [row.get('target_reviewer_claim_sha256')],
-                                 'target_origin': [row['target_origin']],
+                                 'target_origin': [review_origin],
                                  'verified_source_claim': row['verified_source_claim'],
                                  'partial_review_provenance': row.get('partial_review_provenance'),
                                  'full_review_provenance': row.get('full_review_provenance')}, 1,

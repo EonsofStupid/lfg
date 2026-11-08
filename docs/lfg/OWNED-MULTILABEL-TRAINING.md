@@ -87,6 +87,77 @@ they cannot establish discrimination or independent accuracy. Promotion stays
 disabled until a separate evaluation supports it. Existing assessment and
 user-request SFT config schemas retain their prior behavior.
 
+## Optional legacy non-exhaustive teacher overlay
+
+The owned multilabel config may include a `legacy_teacher_overlay` object to
+combine source annotations with a separately pinned, source-bound legacy local
+teacher report. This path accepts only `lfg.train-teacher-proposals.v1` reports
+in `complete` or `partial_aborted_ambiguous` operational state whose explicit
+claims still say teacher suggestions are unreviewed and not promotion eligible.
+It validates the report and proposal file digests, their internal publication
+binding, source export/config/train/taxonomy identities, source lineage,
+selected-column order, ordered selected row IDs, source row evidence and the
+model/prompt/schema provenance. These checks establish package integrity and
+lineage consistency; they do not validate the meaning of the teacher labels.
+The producer places taxonomy and source lineage under
+`report.provenance.taxonomy_sha256` and
+`report.provenance.source_lineage`; selected columns are within that nested
+lineage. The bridge follows that published schema. It also requires the
+producer's uncertainty claim `omitted_labels_are_negative: false` and records
+the producer's `heldout_accessed: false` claim without reading heldout data.
+Partial reports may lack worker/payload digests when the terminal worker result
+was not verified; such rows remain operationally uncertain teacher claims.
+The report directory must pass the producer's existing owner/SYSTEM/
+Administrators policy on Windows (or owner-only `0700` on POSIX); each report
+file separately retains its stricter owner-private check. Source artifact
+inventory hashing follows the producer's serializer: terminal-verified reports
+use its completed-report JSON encoding, while terminal-unverified recovered
+reports use its canonical recovery encoding. Non-ASCII artifact paths are
+covered by the corresponding synthetic cases.
+
+Example fields (use actual absolute private paths and digests in a local config):
+
+```json
+{
+  "legacy_teacher_overlay": {
+    "schema_version": "lfg.legacy-teacher-overlay-config.v1",
+    "report_manifest": "C:/private/teacher-report/manifest.json",
+    "report_manifest_sha256": "<64 lowercase hex characters>",
+    "proposals_file": "C:/private/teacher-report/proposals.jsonl",
+    "proposals_sha256": "<64 lowercase hex characters>",
+    "default_weight": 1.0,
+    "per_label_weights": {},
+    "conflict_policy": "retain_source_and_skip_conflicting_teacher_positive",
+    "max_manifest_bytes": 67108864,
+    "max_proposals_bytes": 2147483648
+  }
+}
+```
+
+Only an explicit `proposed_positive` from an `answered` non-exhaustive row can
+add a target, and only where the pinned source cell is unknown. Omitted,
+unknown, non-answered, abstained, truncated, incomplete and not-attempted
+states remain unknown; none produces a negative. Existing source positives
+remain source examples and a teacher agreement is counted without adding a
+duplicate sample. A teacher positive that conflicts with a known source
+negative is recorded as a conflict and skipped; the source negative remains
+unchanged. Other conflict policies are rejected until they are deliberately
+implemented and reviewed.
+
+Added targets use origin `unreviewed_local_teacher_positive`, keep the original
+source origin and reviewer claim separately, and bind each row to the report,
+proposal file and exact proposal line/index, proposal and comparison config,
+model name/manifest, prompt contract, output schema and adapter/comparator code
+digests. Teacher weight is `source cell base × owned-configured multiplier ×
+teacher-overlay multiplier`; because a teacher target only fills an unknown
+source cell, its source base is `1.0`. The existing trainer then applies the
+resulting row weight once during weighted sampling. The manifest records the
+teacher weight policy and aggregate state counts, including unknown cells.
+Partial operational status and an unverified terminal claim are preserved as
+uncertainty; they are not quality gates and do not promote the model. With no
+overlay configured, the original source-only builder and loader contract is
+unchanged. Private report/proposal contents and paths must stay outside Git.
+
 Training support is cell-level and may contain no negative labels. Unknown and
 unreviewed status remain explicit claims; use does not imply quality, review,
 verification, independent validation or promotion. This atomic-query framing is
