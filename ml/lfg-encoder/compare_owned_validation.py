@@ -34,6 +34,7 @@ validate_response = multilabel_contract.validate_response
 SCHEMA = "lfg.owned-matched-validation-config.v1"
 REPORT_SCHEMA = "lfg.owned-matched-validation-report.v1"
 ATOMIC_QUERY_SCHEMA = "lfg.owned-atomic-query-config.v1"
+UNKNOWN_REFERENCE_GUIDE_POLICY_SCHEMA = "lfg.owned-unknown-reference-guide-policy.v1"
 HEX = re.compile(r"^[0-9a-f]{64}$")
 HOST_PART = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
 CURRENT_STAGE = "configuration"
@@ -253,6 +254,7 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
     for name in ("classical_report", "classical_config", "comparison_12b_report", "comparison_12b_config"):
         if not Path(config[name]).is_absolute():
             raise ValueError(f"{name} must be an absolute local path")
+    _unknown_reference_guide_policy(config)
     return config, sha(raw)
 
 
@@ -582,6 +584,62 @@ def _atomic_query_config(value: Any, target_field: str, target_label: str,
     normalized = {name: value[name] for name in required}
     normalized["checkpoint_manifest_sha256"] = value["checkpoint_manifest_sha256"]
     return normalized
+
+
+def _unknown_reference_guide_policy(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the explicit, versioned opt-in for provisional unknown-guide evaluation."""
+    value = config.get("unknown_reference_guide_policy")
+    if value is None:
+        return None
+    if (not isinstance(value, dict)
+            or value.get("schema_version") != UNKNOWN_REFERENCE_GUIDE_POLICY_SCHEMA
+            or value.get("allow_provisional_agreement") is not True):
+        raise ValueError("invalid unknown reference-guide policy")
+    return {"schema_version": UNKNOWN_REFERENCE_GUIDE_POLICY_SCHEMA,
+            "allow_provisional_agreement": True}
+
+
+def _reference_guide_assessment(config: dict[str, Any], corpus: dict[str, Any],
+                                atomic_query: dict[str, Any] | None) -> dict[str, Any]:
+    """Separate reference-label provenance from the trained model response guide."""
+    status = corpus.get("guide_provenance_status", "not_declared")
+    reference_digest = corpus.get("guide_sha256")
+    if status == "verified_sha256":
+        if not isinstance(reference_digest, str) or HEX.fullmatch(reference_digest) is None:
+            raise ValueError("development reference guide identity is invalid")
+    elif status in ("not_declared", "unknown", "explicitly_none"):
+        if reference_digest is not None:
+            raise ValueError("development reference guide digest contradicts its provenance status")
+    else:
+        raise ValueError("development reference guide provenance status is unsupported")
+
+    policy = _unknown_reference_guide_policy(config)
+    model_guide = None if atomic_query is None else {
+        "status": atomic_query["guide_provenance_status"],
+        "sha256": atomic_query["guide_sha256"],
+    }
+    if atomic_query is not None:
+        model_status = atomic_query["guide_provenance_status"]
+        model_digest = atomic_query["guide_sha256"]
+        if status == "verified_sha256":
+            if model_status != "verified_sha256" or model_digest != reference_digest:
+                raise ValueError("atomic query model guide differs from the verified development reference guide")
+        elif status == "explicitly_none":
+            if model_status != "explicitly_none" or model_digest is not None:
+                raise ValueError("atomic query model guide differs from the explicitly absent development reference guide")
+        elif policy is None:
+            raise ValueError("development reference guide provenance is unknown; explicit provisional policy is required")
+
+    unknown = status in ("not_declared", "unknown")
+    opted_in = bool(unknown and policy is not None and atomic_query is not None)
+    return {
+        "reference_guide": {"status": status, "sha256": reference_digest},
+        "model_response_guide": model_guide,
+        "policy": policy,
+        "semantic_comparability": "unknown" if unknown else "guide_identity_bound",
+        "provisional_comparison_enabled": opted_in,
+        "claim_interpretation": "report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification",
+    }
 
 
 def _atomic_query_instruction(contract: dict[str, Any]) -> str:
@@ -1099,15 +1157,9 @@ def _make_payload(config: dict[str, Any], bound: dict[str, Any], run_id: str) ->
     target_field = bound["classical_config"].get("target_field")
     atomic_query = _atomic_query_config(config.get("atomic_query_contract"), target_field,
                                         target_label, config)
-    guide_status = bound["corpus"].get("guide_provenance_status", "not_declared")
-    guide_matches = ((guide_status == "verified_sha256"
-                      and isinstance(atomic_query.get("guide_sha256"), str)
-                      and atomic_query["guide_sha256"] == bound["corpus"].get("guide_sha256"))
-                     or (guide_status == "explicitly_none" and atomic_query.get("guide_sha256") is None
-                         and atomic_query.get("guide_provenance_status") == "explicitly_none")) if atomic_query is not None else True
-    if atomic_query is not None and (atomic_query["taxonomy_sha256"] != bound["corpus"]["taxonomy_sha256"]
-                                     or not guide_matches):
-        raise ValueError("atomic query taxonomy or guide differs from the bound development sources")
+    guide_assessment = _reference_guide_assessment(config, bound["corpus"], atomic_query)
+    if atomic_query is not None and atomic_query["taxonomy_sha256"] != bound["corpus"]["taxonomy_sha256"]:
+        raise ValueError("atomic query taxonomy differs from the bound development sources")
     label_index = sorted(bound["classical_config"]["selected_labels"]).index(target_label)
     records = []
     for index, row in enumerate(validation):
@@ -1132,6 +1184,7 @@ def _make_payload(config: dict[str, Any], bound: dict[str, Any], run_id: str) ->
                            "target_label": target_label,
                            "target_field": target_field,
                            "atomic_query_contract": atomic_query,
+                           "reference_guide_assessment": guide_assessment,
                            "rows": len(records), "assessment_sha256": bound["deterministic_assessment_sha256"],
                            "rules_sha256": bound["deterministic_rules_sha256"],
                            "rule_ids": bound["deterministic_rule_ids"],
@@ -2775,10 +2828,23 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
     payload_value = _json(payload, "worker payload")
     payload_binding = payload_value.get("binding") if isinstance(payload_value, dict) else None
     atomic_contract = payload_binding.get("atomic_query_contract") if isinstance(payload_binding, dict) else None
+    guide_assessment = _reference_guide_assessment(config, bound["corpus"], atomic_contract)
+    if (isinstance(payload_binding, dict) and "reference_guide_assessment" in payload_binding
+            and payload_binding["reference_guide_assessment"] != guide_assessment):
+        raise ValueError("payload reference-guide assessment differs from the report binding")
     _validate_atomic_query_aggregate(result, atomic_contract, payload, len(bound["validation_rows"]))
     baseline = bound["classical_report"]
     report12 = bound["comparison_12b_report"]
     selected = sorted(bound["classical_config"]["selected_labels"])
+    limitations = ["development validation labels and history retain the pinned baseline's review state and claims; they are not independently verified here",
+                   "this set is development validation, not independent final evaluation",
+                   "deterministic metrics are rule-hit outcomes, not learned-model quality",
+                   "the 12B aggregate report lacks per-row predictions, so paired intersections cannot be computed",
+                   "no heldout data were opened and no training or distillation was run"]
+    if atomic_contract is None:
+        limitations.append("owned framing and output schema do not prove exact LFG intent taxonomy, so owned predictions remain unknown")
+    elif guide_assessment["semantic_comparability"] == "unknown":
+        limitations.append("owned contract decisions are compared with target claims while development reference-guide semantics remain unknown")
     report = {
         "schema_version": REPORT_SCHEMA, "promotion_eligible": False, "qualification_claim": False,
         "task": {"field": bound["classical_config"]["target_field"], "labels": selected,
@@ -2807,6 +2873,7 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
                   "lifecycle_outcome_counts": result.get("owned_lifecycle_outcome_counts"),
                   "mapping_outcome_counts": result.get("owned_mapping_outcome_counts"),
                   "atomic_query": result.get("atomic_query"),
+                  "reference_guide_assessment": guide_assessment,
                   "response_diagnostics": ({**result["owned_response_diagnostics"],
                                             "output_text_utf8_byte_bucket_boundaries":
                                                 _validated_output_text_byte_bucket_boundaries(
@@ -2860,6 +2927,10 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
                        "train_sha256": bound["corpus"]["train_sha256"],
                        "validation_sha256": bound["corpus"]["validation_sha256"],
                        "baseline_review_and_history_claims": bound["review_provenance"],
+                       "development_reference_guide": guide_assessment["reference_guide"],
+                       "model_response_guide": guide_assessment["model_response_guide"],
+                       "reference_guide_policy": guide_assessment["policy"],
+                       "reference_guide_semantic_comparability": guide_assessment["semantic_comparability"],
                        "redaction_complete": False,
                        "payload_transfer_state": result.get("payload_transfer_state", "received_by_isolated_supervisor"),
                        "private_input_policy": "no public/cloud endpoint configured; screened payload is staged in a private file after host preflight and service stdout/stderr are discarded",
@@ -2867,12 +2938,7 @@ def _report(config: dict[str, Any], config_digest: str, bound: dict[str, Any], r
                        "remote_persistence_state": ("worker aggregate received; workspace cleanup is reported separately"
                                                     if result.get("supervisor_failure") is not True
                                                     else "unknown because supervisor or transfer did not return a verified worker aggregate")},
-        "limitations": ["development validation labels and history retain the pinned baseline's review state and claims; they are not independently verified here",
-                        "this set is development validation, not independent final evaluation",
-                        "owned framing and output schema do not prove exact LFG intent taxonomy, so owned predictions remain unknown",
-                        "deterministic metrics are rule-hit outcomes, not learned-model quality",
-                        "the 12B aggregate report lacks per-row predictions, so paired intersections cannot be computed",
-                        "no heldout data were opened and no training or distillation was run"],
+        "limitations": limitations,
         "config_sha256": config_digest,
         "comparator_code_sha256": code_sha256,
         "comparator_git_revision": _git_revision(),

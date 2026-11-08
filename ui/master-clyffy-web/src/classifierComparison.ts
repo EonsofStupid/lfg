@@ -25,6 +25,15 @@ export type ClassifierArtifact = {
   labelsUnverifiedClaim: boolean | null
   validationIndependenceVerifiedClaim: boolean | null
   validationPreviouslyUsedClaim: boolean | null
+  referenceGuideAssessment: {
+    referenceStatus: 'verified_sha256' | 'explicitly_none' | 'not_declared' | 'unknown'
+    referenceSha256: string | null
+    modelStatus: 'verified_sha256' | 'explicitly_none' | null
+    modelSha256: string | null
+    semanticComparability: 'guide_identity_bound' | 'unknown'
+    provisionalComparisonEnabled: boolean
+    policy: { schemaVersion: 'lfg.owned-unknown-reference-guide-policy.v1'; allowProvisionalAgreement: true } | null
+  } | null
 }
 
 const DIGEST = /^[0-9a-f]{64}$/
@@ -232,6 +241,42 @@ function previouslyUsedClaim(value: unknown): boolean | null {
   return ['previously used', 'used previously', 'prior use', 'previous use'].includes(normalized) ? true : null
 }
 
+function parseReferenceGuideAssessment(value: unknown): ClassifierArtifact['referenceGuideAssessment'] {
+  if (value === undefined || value === null) return null
+  if (!record(value)) fail()
+  const reference = need(value.reference_guide, record)
+  const model = value.model_response_guide === null ? null : need(value.model_response_guide, record)
+  const status = need(reference.status, (item): item is 'verified_sha256' | 'explicitly_none' | 'not_declared' | 'unknown' =>
+    item === 'verified_sha256' || item === 'explicitly_none' || item === 'not_declared' || item === 'unknown')
+  const referenceSha256 = reference.sha256 === null ? null : digest(reference.sha256)
+  if ((status === 'verified_sha256') !== (referenceSha256 !== null)) fail()
+  const modelStatus = model === null ? null : need(model.status, (item): item is 'verified_sha256' | 'explicitly_none' =>
+    item === 'verified_sha256' || item === 'explicitly_none')
+  const modelSha256 = model === null ? null : model.sha256 === null ? null : digest(model.sha256)
+  if (modelStatus === 'verified_sha256' && modelSha256 === null) fail()
+  if (modelStatus === 'explicitly_none' && modelSha256 !== null) fail()
+  const semanticComparability = need(value.semantic_comparability,
+    (item): item is 'guide_identity_bound' | 'unknown' => item === 'guide_identity_bound' || item === 'unknown')
+  const provisionalComparisonEnabled = need(value.provisional_comparison_enabled,
+    (item): item is boolean => typeof item === 'boolean')
+  if (modelStatus !== null && status === 'verified_sha256'
+      && (modelStatus !== 'verified_sha256' || modelSha256 !== referenceSha256)) fail()
+  if (modelStatus !== null && status === 'explicitly_none'
+      && (modelStatus !== 'explicitly_none' || modelSha256 !== null)) fail()
+  const policy = value.policy
+  if (policy !== null && policy !== undefined && (!record(policy)
+      || policy.schema_version !== 'lfg.owned-unknown-reference-guide-policy.v1'
+      || policy.allow_provisional_agreement !== true)) fail()
+  const unknownReference = status === 'not_declared' || status === 'unknown'
+  if ((semanticComparability === 'unknown') !== unknownReference) fail()
+  if (provisionalComparisonEnabled !== (semanticComparability === 'unknown' && policy !== null && policy !== undefined
+      && modelStatus !== null)) fail()
+  return { referenceStatus: status, referenceSha256, modelStatus, modelSha256, semanticComparability,
+    provisionalComparisonEnabled, policy: policy === null || policy === undefined ? null : {
+      schemaVersion: 'lfg.owned-unknown-reference-guide-policy.v1', allowProvisionalAgreement: true,
+    } }
+}
+
 export function parseClassifierReport(value: unknown, rawSha256: string | null): ClassifierArtifact {
   if (rawSha256 !== null) digest(rawSha256)
   if (!record(value)) fail()
@@ -258,6 +303,7 @@ export function parseClassifierReport(value: unknown, rawSha256: string | null):
       labelsUnverifiedClaim: typeof manifestClaims.human_reviewed === 'boolean' ? !manifestClaims.human_reviewed : null,
       validationIndependenceVerifiedClaim: boolOrNull(manifestClaims.independent_split_verified),
       validationPreviouslyUsedClaim: previouslyUsedClaim(data.validation_group_use_claim),
+      referenceGuideAssessment: null,
     }
   }
   if (schema === 'lfg.local-12b-comparison-report.v1') {
@@ -280,6 +326,7 @@ export function parseClassifierReport(value: unknown, rawSha256: string | null):
       labelsUnverifiedClaim: boolOrNull(provenance.labels_unverified),
       validationIndependenceVerifiedClaim: boolOrNull(provenance.validation_independence_verified),
       validationPreviouslyUsedClaim: previouslyUsedClaim(provenance.validation_history_claim),
+      referenceGuideAssessment: null,
     }
   }
   if (schema === 'lfg.owned-matched-validation-report.v1') {
@@ -303,6 +350,25 @@ export function parseClassifierReport(value: unknown, rawSha256: string | null):
     const model = owned.engine_identity === null ? null : need(owned.engine_identity, record)
     const historyClaims = record(provenance.baseline_review_and_history_claims)
       ? provenance.baseline_review_and_history_claims : {}
+    const referenceGuideAssessment = parseReferenceGuideAssessment(owned.reference_guide_assessment)
+    if (referenceGuideAssessment) {
+      const referenceProvenance = need(provenance.development_reference_guide, record)
+      if (referenceProvenance.status !== referenceGuideAssessment.referenceStatus
+          || (referenceProvenance.sha256 === null ? null : digest(referenceProvenance.sha256))
+            !== referenceGuideAssessment.referenceSha256) fail()
+      const modelProvenance = provenance.model_response_guide === null
+        ? null : need(provenance.model_response_guide, record)
+      if ((modelProvenance?.status ?? null) !== referenceGuideAssessment.modelStatus
+          || (modelProvenance === null ? null : modelProvenance.sha256 === null ? null : digest(modelProvenance.sha256))
+            !== referenceGuideAssessment.modelSha256) fail()
+      const policyProvenance = provenance.reference_guide_policy
+      if ((policyProvenance === null || policyProvenance === undefined) !== (referenceGuideAssessment.policy === null)
+          || (referenceGuideAssessment.policy !== null && (!record(policyProvenance)
+            || policyProvenance.schema_version !== referenceGuideAssessment.policy.schemaVersion
+            || policyProvenance.allow_provisional_agreement
+              !== referenceGuideAssessment.policy.allowProvisionalAgreement))) fail()
+      if (provenance.reference_guide_semantic_comparability !== referenceGuideAssessment.semanticComparability) fail()
+    }
     return {
       schema, rawSha256, taskField: field, labels, validationRows: rows, validationIds: null,
       validationIdSetSha256: digest(task.validation_record_id_set_sha256),
@@ -314,6 +380,7 @@ export function parseClassifierReport(value: unknown, rawSha256: string | null):
       labelsUnverifiedClaim: boolOrNull(historyClaims.legacy_labels_unverified),
       validationIndependenceVerifiedClaim: boolOrNull(historyClaims.validation_independence_verified),
       validationPreviouslyUsedClaim: previouslyUsedClaim(historyClaims.validation_history_claim),
+      referenceGuideAssessment,
     }
   }
   fail()

@@ -309,6 +309,8 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                             "guide_provenance_status": "verified_sha256"}}
         payload = json.loads(compare._make_payload(config, bound, "a" * 32))
         self.assertEqual(payload["binding"]["atomic_query_contract"]["guide_sha256"], "e" * 64)
+        self.assertEqual(payload["binding"]["reference_guide_assessment"]["semantic_comparability"],
+                         "guide_identity_bound")
         bound["corpus"]["guide_sha256"] = None
         with self.assertRaisesRegex(ValueError, "guide"):
             compare._make_payload(config, bound, "b" * 32)
@@ -320,6 +322,49 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         bound["corpus"]["guide_provenance_status"] = "not_declared"
         with self.assertRaisesRegex(ValueError, "guide"):
             compare._make_payload(config, bound, "d" * 32)
+        config["unknown_reference_guide_policy"] = {
+            "schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+            "allow_provisional_agreement": True,
+        }
+        bound["y_validation"] = Matrix()
+        bound["target_known"] = type("Matrix", (), {"tolist": lambda self: [[False]]})()
+        payload = json.loads(compare._make_payload(config, bound, "e" * 32))
+        assessment = payload["binding"]["reference_guide_assessment"]
+        self.assertEqual(assessment["reference_guide"], {"status": "not_declared", "sha256": None})
+        self.assertEqual(assessment["model_response_guide"], {"status": "explicitly_none", "sha256": None})
+        self.assertTrue(assessment["provisional_comparison_enabled"])
+        self.assertEqual(assessment["semantic_comparability"], "unknown")
+        self.assertEqual(payload["records"][0]["target_value"], None)
+        self.assertFalse(payload["records"][0]["target_known"])
+        self.assertIsNone(compare._atomic_prediction("ok", {
+            "schema_version": "lfg.owned-multilabel-response.v1", "taxonomy_sha256": "d" * 64,
+            "decisions": [{"field": "intents", "label": "build.software", "value": "positive"}],
+        }, config["atomic_query_contract"])[0])
+        bound["corpus"]["guide_provenance_status"] = "verified_sha256"
+        bound["corpus"]["guide_sha256"] = "9" * 64
+        with self.assertRaisesRegex(ValueError, "verified development reference guide"):
+            compare._make_payload(config, bound, "f" * 32)
+
+    def test_unknown_reference_guide_policy_is_explicit_and_versioned(self):
+        corpus = {"guide_provenance_status": "not_declared", "guide_sha256": None}
+        contract = {"guide_provenance_status": "explicitly_none", "guide_sha256": None}
+        with self.assertRaisesRegex(ValueError, "explicit provisional policy"):
+            compare._reference_guide_assessment({}, corpus, contract)
+        enabled = {"unknown_reference_guide_policy": {
+            "schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+            "allow_provisional_agreement": True,
+        }}
+        result = compare._reference_guide_assessment(enabled, corpus, contract)
+        self.assertTrue(result["provisional_comparison_enabled"])
+        self.assertEqual(result["reference_guide"]["status"], "not_declared")
+        self.assertEqual(result["model_response_guide"]["status"], "explicitly_none")
+        self.assertEqual(result["claim_interpretation"],
+                         "report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification")
+        with self.assertRaisesRegex(ValueError, "policy"):
+            compare._reference_guide_assessment({"unknown_reference_guide_policy": {
+                "schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+                "allow_provisional_agreement": False,
+            }}, corpus, contract)
 
     def test_generated_worker_counts_only_allowlisted_diagnostics_and_never_emits_sentinels(self):
         namespace = {"__name__": "generated_worker_test"}
@@ -447,35 +492,59 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("secret-value", serialized)
         self.assertNotIn("outputText", serialized)
 
+        config["unknown_reference_guide_policy"] = {
+            "schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+            "allow_provisional_agreement": True,
+        }
+        bound["corpus"].update(guide_provenance_status="verified_sha256", guide_sha256="9" * 64)
+        report = compare._report(config, "e" * 64, bound, result, b"{}", "f" * 64, Path("unused"))
+        assessment = report["owned"]["reference_guide_assessment"]
+        self.assertEqual(assessment["reference_guide"], {"status": "verified_sha256", "sha256": "9" * 64})
+        self.assertEqual(assessment["policy"], config["unknown_reference_guide_policy"])
+        self.assertFalse(assessment["provisional_comparison_enabled"])
+        self.assertEqual(report["provenance"]["development_reference_guide"], assessment["reference_guide"])
+        self.assertEqual(report["provenance"]["model_response_guide"], assessment["model_response_guide"])
+        self.assertEqual(report["provenance"]["reference_guide_policy"], assessment["policy"])
+        bound["corpus"].update(guide_provenance_status="explicitly_none", guide_sha256=None)
+        report = compare._report(config, "e" * 64, bound, result, b"{}", "f" * 64, Path("unused"))
+        self.assertEqual(report["owned"]["reference_guide_assessment"]["reference_guide"],
+                         {"status": "explicitly_none", "sha256": None})
+        self.assertFalse(report["owned"]["reference_guide_assessment"]["provisional_comparison_enabled"])
+        self.assertEqual(report["provenance"]["reference_guide_semantic_comparability"], "guide_identity_bound")
+
     def test_generated_worker_main_counts_multiple_rows_and_terminal_failure_safely(self):
         import io
         from types import SimpleNamespace
 
         def run_worker(owned_responses, atomic_query=None, mutate_training=None, mutate_graph=None,
-                       mutate_engine=None, mutate_output=None):
+                       mutate_engine=None, mutate_output=None, *, target_known=(True, True),
+                       target_values=(1, 0), source_texts=("fixture row one", "fixture row two"),
+                       response_decisions=None, reference_guide_assessment=None):
             namespace = {"__name__": "generated_worker_test"}
             exec(compare._remote_worker_source(), namespace)
             boundaries = [8, 32]
             expected_hashes = {"model": "a" * 64, "framing": "b" * 64,
                                "cached": "c" * 64, "runtime": "d" * 64, "training": "e" * 64}
             rows = []
-            for index, text in enumerate(("fixture row one", "fixture row two")):
+            for index, text in enumerate(source_texts):
                 row_id = str(index + 1)
                 rows.append({"record_id_sha256": compare.sha(row_id.encode()), "text": text,
-                             "text_sha256": compare.sha(text.encode()), "target_known": True,
-                             "target_value": index % 2})
+                             "text_sha256": compare.sha(text.encode()), "target_known": target_known[index],
+                             "target_value": target_values[index] if target_known[index] else None})
             ids_digest = compare.sha(json.dumps(sorted(row["record_id_sha256"] for row in rows),
                                                   separators=(",", ":")).encode())
             masks = [[row["record_id_sha256"], [row["target_known"]]] for row in rows]
             mask_digest = compare.sha(json.dumps(masks, separators=(",", ":")).encode())
             payload = {"schema_version": "lfg.owned-matched-worker-input.v1", "run_id": "f" * 32,
-                       "binding": {"rows": 2, "validation_record_id_set_sha256": ids_digest,
+                       "binding": {"rows": len(rows), "validation_record_id_set_sha256": ids_digest,
                                    "target_mask_sha256": mask_digest, "target_label": "build.software",
                                    "target_field": "intents",
                                    "rule_ids": ["build.software"], "fallback_id": "respond.general",
                                    "assessment_sha256": "1" * 64, "rules_sha256": "2" * 64},
                        "remote": {}, "diagnostics": {"output_text_utf8_byte_bucket_boundaries": boundaries},
                        "records": rows, "outer_netns_inode": 11}
+            if reference_guide_assessment is not None:
+                payload["binding"]["reference_guide_assessment"] = reference_guide_assessment
 
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory) / "private"
@@ -642,9 +711,16 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                     "decisions": [{"field": atomic_query["field"], "label": atomic_query["label"],
                                    "value": "positive"}]} if atomic_query is not None else
                     {"intent": "sentinel-output"})
+                response_index = 0
                 def response(status="ok", stop_reason="stop_sequence", output_text='{"intent":"sentinel-output"}',
                              *, completed=True, byte_count=24):
+                    nonlocal response_index
                     output = dict(explicit_output)
+                    if (atomic_query is not None and response_decisions is not None
+                            and response_index < len(response_decisions)):
+                        output["decisions"] = [dict(explicit_output["decisions"][0],
+                                                    value=response_decisions[response_index])]
+                    response_index += 1
                     if mutate_output is not None:
                         mutate_output(output)
                     return {"schemaVersion": "lfg.owned-assessment.v1", "status": status,
@@ -657,6 +733,7 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
 
                 response_queue = list(owned_responses(response))
                 request_bodies = []
+                deterministic_request_bodies = []
                 def http(_port, path, _method="GET", _body=None, token=None, **_kwargs):
                     headers = {"cache-control": "no-store"}
                     if path.endswith("/api/lfg/assess/owned/status"):
@@ -667,6 +744,7 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                     if path == "/api/lfg/observations/capabilities":
                         return 200, headers, json.dumps(caps).encode()
                     if path == "/api/lfg/assess":
+                        deterministic_request_bodies.append(json.loads(_body))
                         return 200, headers, b"{}"
                     if path == "/api/lfg/assess/owned":
                         request_bodies.append(json.loads(_body))
@@ -710,6 +788,7 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
                     compare._validate_atomic_query_aggregate(
                         result, payload["binding"].get("atomic_query_contract"), payload_raw, len(rows))
                     result["_test_request_bodies"] = request_bodies
+                    result["_test_deterministic_request_bodies"] = deterministic_request_bodies
                     return result
 
         def response_factory(response):
@@ -753,7 +832,9 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         self.assertEqual(atomic["atomic_query"]["model_calls_per_owned_request"], 1)
         self.assertEqual(atomic["_test_request_bodies"][0]["text"],
                          "For intents, decide whether build.software applies.\nfixture row one")
-        public_result = {key: value for key, value in atomic.items() if key != "_test_request_bodies"}
+        self.assertEqual(atomic["_test_deterministic_request_bodies"][0]["text"], "fixture row one")
+        public_result = {key: value for key, value in atomic.items()
+                         if not key.startswith("_test_")}
         self.assertNotIn("sentinel-output", json.dumps(public_result))
         self.assertNotIn("For intents, decide", json.dumps(public_result))
         explicit_none_contract = {"field": "intents", "label": "build.software",
@@ -765,6 +846,55 @@ class OwnedResponseDiagnosticsTests(unittest.TestCase):
         self.assertEqual(missing_response_guide["owned_metrics"]["coverage"], 0.0)
         self.assertEqual(missing_response_guide["owned_mapping_outcome_counts"],
                          {"unknown_contract_identity_missing": 2})
+
+        unknown_reference_payload = {
+            "reference_guide": {"status": "not_declared", "sha256": None},
+            "model_response_guide": {"status": "explicitly_none", "sha256": None},
+            "policy": {"schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+                       "allow_provisional_agreement": True},
+            "semantic_comparability": "unknown", "provisional_comparison_enabled": True,
+            "claim_interpretation": "report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification",
+        }
+        mixed_factory = lambda response: [response(), response(), response()]
+        mixed = run_worker(mixed_factory, explicit_none_contract, target_known=(True, True, False),
+                           target_values=(1, 0, 1), source_texts=("private-source-sentinel-one",
+                           "fixture row two", "fixture row three"), response_decisions=("positive", "negative", "positive"),
+                           reference_guide_assessment=unknown_reference_payload)
+        self.assertEqual(mixed["owned_metrics"]["known_target_cells"], 2)
+        self.assertEqual(mixed["owned_metrics"]["covered_known_target_cells"], 2)
+        self.assertEqual((mixed["owned_metrics"]["tp"], mixed["owned_metrics"]["tn"],
+                          mixed["owned_metrics"]["fp"], mixed["owned_metrics"]["fn"]), (1, 1, 0, 0))
+        self.assertEqual(mixed["atomic_query"]["target_support"],
+                         {"positive": 1, "negative": 1, "unknown": 1})
+        self.assertEqual(mixed["_test_request_bodies"][0]["text"],
+                         "For intents, decide whether build.software applies.\nprivate-source-sentinel-one")
+        self.assertEqual(mixed["_test_deterministic_request_bodies"][0]["text"], "private-source-sentinel-one")
+        mixed_public = {key: value for key, value in mixed.items() if not key.startswith("_test_")}
+        self.assertNotIn("private-source-sentinel-one", json.dumps(mixed_public))
+        self.assertNotIn("For intents, decide", json.dumps(mixed_public))
+
+        mixed_missing_guide = run_worker(mixed_factory, explicit_none_contract,
+            mutate_output=lambda output: output.pop("guide_sha256"), target_known=(True, True, False),
+            target_values=(1, 0, 1), source_texts=("fixture row one", "fixture row two", "fixture row three"),
+            reference_guide_assessment=unknown_reference_payload)
+        self.assertEqual(mixed_missing_guide["owned_metrics"]["covered_known_target_cells"], 0)
+        self.assertEqual(mixed_missing_guide["owned_mapping_outcome_counts"],
+                         {"unknown_contract_identity_missing": 3})
+        mixed_abstained = run_worker(mixed_factory, explicit_none_contract,
+            mutate_output=lambda output: output.update(abstain=True, decisions=[
+                {"field": "intents", "label": "build.software", "value": "unknown"}]),
+            target_known=(True, True, False), target_values=(1, 0, 1),
+            source_texts=("fixture row one", "fixture row two", "fixture row three"),
+            reference_guide_assessment=unknown_reference_payload)
+        self.assertEqual(mixed_abstained["owned_metrics"]["covered_known_target_cells"], 0)
+        self.assertEqual(mixed_abstained["owned_mapping_outcome_counts"], {"unknown_abstained": 3})
+        mixed_timeout = run_worker(lambda response: [response(status="timeout", completed=False)],
+            explicit_none_contract, target_known=(True, True, False), target_values=(1, 0, 1),
+            source_texts=("fixture row one", "fixture row two", "fixture row three"),
+            reference_guide_assessment=unknown_reference_payload)
+        self.assertTrue(mixed_timeout["aborted"])
+        self.assertEqual(mixed_timeout["atomic_query"]["target_support"]["unknown"], 1)
+        self.assertEqual(mixed_timeout["owned_metrics"]["covered_known_target_cells"], 0)
 
         for description, mutate_training, mutate_graph in (
                 ("partial", lambda value: value.update(completed=False), None),

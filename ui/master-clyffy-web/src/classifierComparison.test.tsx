@@ -147,6 +147,69 @@ test('retains unknown owned worker identity and metrics as unavailable on failur
   expect(parsed.timing).toEqual({})
 })
 
+test('parses unknown reference guide separately from explicit-null model guide and requires provisional policy', () => {
+  const value = { schema_version: 'lfg.owned-matched-validation-report.v1',
+    task: { ...common, validation_rows: 1, validation_record_id_set_sha256: d('8'), target_mask_sha256: d('6'), target_observation_support: support },
+    baseline: { classical_report_sha256: d('1'), comparison_12b_report_sha256: d('4'),
+      classical_aggregate_metrics: { logistic_regression: { macro_f1: null, coverage: null } } },
+    provenance: { screened_manifest_sha256: d('d'), plan_sha256: d('e'), screening_policy_sha256: d('f'),
+      review_ledger_sha256: d('1'), taxonomy_sha256: d('a'), train_sha256: d('2'), validation_sha256: d('3'),
+      development_reference_guide: { status: 'not_declared', sha256: null },
+      model_response_guide: { status: 'explicitly_none', sha256: null },
+      reference_guide_policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+      reference_guide_semantic_comparability: 'unknown' },
+    owned: { engine_identity: null, metrics: { coverage: 0, f1: null, covered_known_target_cells: 0 }, status_counts: {},
+      reference_guide_assessment: { reference_guide: { status: 'not_declared', sha256: null },
+        model_response_guide: { status: 'explicitly_none', sha256: null },
+        policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+        semantic_comparability: 'unknown', provisional_comparison_enabled: true,
+        claim_interpretation: 'report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification' } },
+    deterministic: { coverage: null, f1: null, known_target_cells: 0, covered_known_target_cells: 0 } }
+  const withExtensions = { ...value, future_report_extension: 'private extension sentinel',
+    owned: { ...value.owned, reference_guide_assessment: { ...value.owned.reference_guide_assessment,
+      future_policy_extension: { diagnostic: 'private policy sentinel' } } } }
+  const parsed = parseClassifierReport(withExtensions, d('7'))
+  expect(parsed.referenceGuideAssessment).toEqual({ referenceStatus: 'not_declared', referenceSha256: null,
+    modelStatus: 'explicitly_none', modelSha256: null, semanticComparability: 'unknown', provisionalComparisonEnabled: true,
+    policy: { schemaVersion: 'lfg.owned-unknown-reference-guide-policy.v1', allowProvisionalAgreement: true } })
+  expect(JSON.stringify(parsed)).not.toContain('private')
+  const verifiedInactive = structuredClone(value) as Record<string, any>
+  verifiedInactive.owned.reference_guide_assessment.reference_guide = { status: 'verified_sha256', sha256: d('9') }
+  verifiedInactive.owned.reference_guide_assessment.model_response_guide = { status: 'verified_sha256', sha256: d('9') }
+  verifiedInactive.owned.reference_guide_assessment.semantic_comparability = 'guide_identity_bound'
+  verifiedInactive.owned.reference_guide_assessment.provisional_comparison_enabled = false
+  verifiedInactive.provenance.development_reference_guide = { status: 'verified_sha256', sha256: d('9') }
+  verifiedInactive.provenance.model_response_guide = { status: 'verified_sha256', sha256: d('9') }
+  verifiedInactive.provenance.reference_guide_semantic_comparability = 'guide_identity_bound'
+  const verifiedParsed = parseClassifierReport(verifiedInactive, d('7'))
+  expect(verifiedParsed.referenceGuideAssessment?.policy?.allowProvisionalAgreement).toBe(true)
+  expect(verifiedParsed.referenceGuideAssessment?.provisionalComparisonEnabled).toBe(false)
+  const conflictingGuides = structuredClone(verifiedInactive) as Record<string, any>
+  conflictingGuides.owned.reference_guide_assessment.model_response_guide.sha256 = d('8')
+  expect(() => parseClassifierReport(conflictingGuides, d('7'))).toThrow(/could not be validated/)
+  const conflictingProvenance = structuredClone(verifiedInactive) as Record<string, any>
+  conflictingProvenance.provenance.development_reference_guide.sha256 = d('8')
+  expect(() => parseClassifierReport(conflictingProvenance, d('7'))).toThrow(/could not be validated/)
+  const explicitNoneInactive = structuredClone(value) as Record<string, any>
+  explicitNoneInactive.owned.reference_guide_assessment.reference_guide = { status: 'explicitly_none', sha256: null }
+  explicitNoneInactive.owned.reference_guide_assessment.semantic_comparability = 'guide_identity_bound'
+  explicitNoneInactive.owned.reference_guide_assessment.provisional_comparison_enabled = false
+  explicitNoneInactive.provenance.development_reference_guide = { status: 'explicitly_none', sha256: null }
+  explicitNoneInactive.provenance.reference_guide_semantic_comparability = 'guide_identity_bound'
+  const explicitNoneParsed = parseClassifierReport(explicitNoneInactive, d('7'))
+  expect(explicitNoneParsed.referenceGuideAssessment?.policy?.allowProvisionalAgreement).toBe(true)
+  expect(explicitNoneParsed.referenceGuideAssessment?.provisionalComparisonEnabled).toBe(false)
+  const missingOptIn = structuredClone(value) as Record<string, any>
+  missingOptIn.owned.reference_guide_assessment.policy = null
+  expect(() => parseClassifierReport(missingOptIn, d('7'))).toThrow(/could not be validated/)
+  const missingModelIdentity = structuredClone(value) as Record<string, any>
+  missingModelIdentity.owned.reference_guide_assessment.model_response_guide = null
+  expect(() => parseClassifierReport(missingModelIdentity, d('7'))).toThrow(/could not be validated/)
+  const malformedVerified = structuredClone(value) as Record<string, any>
+  malformedVerified.owned.reference_guide_assessment.reference_guide = { status: 'verified_sha256', sha256: null }
+  expect(() => parseClassifierReport(malformedVerified, d('7'))).toThrow(/could not be validated/)
+})
+
 test('computes Python-compatible sorted opaque ID set digest and detects duplicates', async () => {
   const first = await digestSortedIdSet([d('c'), d('b')])
   expect(first).toBe(await digestSortedIdSet([d('b'), d('c')]))
@@ -183,9 +246,18 @@ test('imports all three aggregate reports locally, displays safe dynamic summari
     baseline: { classical_report_sha256: classicalHash, comparison_12b_report_sha256: localHash,
       classical_aggregate_metrics: { 'logistic_regression': { macro_f1: null, coverage: 0.5 } } },
     provenance: { screened_manifest_sha256: d('d'), plan_sha256: d('e'), screening_policy_sha256: d('f'), screening_code_sha256: d('9'),
-      review_ledger_sha256: d('1'), taxonomy_sha256: d('a'), train_sha256: d('2'), validation_sha256: d('3') },
+      review_ledger_sha256: d('1'), taxonomy_sha256: d('a'), train_sha256: d('2'), validation_sha256: d('3'),
+      development_reference_guide: { status: 'not_declared', sha256: null },
+      model_response_guide: { status: 'explicitly_none', sha256: null },
+      reference_guide_policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+      reference_guide_semantic_comparability: 'unknown' },
     owned: { engine_identity: { id: 'lfg-owned-model-identity' }, metrics: { coverage: 0, f1: null, covered_known_target_cells: 0 },
-      status_counts: { malformed_output: 1, truncated: 1 }, latency_ms: { end_to_end: { count: 2, median_ms: null } } },
+      status_counts: { malformed_output: 1, truncated: 1 }, latency_ms: { end_to_end: { count: 2, median_ms: null } },
+      reference_guide_assessment: { reference_guide: { status: 'not_declared', sha256: null },
+        model_response_guide: { status: 'explicitly_none', sha256: null },
+        policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+        semantic_comparability: 'unknown', provisional_comparison_enabled: true,
+        claim_interpretation: 'report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification' } },
     deterministic: { coverage: 0, f1: null, known_target_cells: 11, covered_known_target_cells: 0 } })
   const classicalParsed = parseClassifierReport(JSON.parse(classicalText), classicalHash)
   const localParsed = parseClassifierReport(JSON.parse(localText), localHash)
@@ -205,6 +277,9 @@ test('imports all three aggregate reports locally, displays safe dynamic summari
   expect(await screen.findByText(/selected reports agree on the checked report-supplied fields/)).toBeInTheDocument()
   expect(screen.getByText(/metadata says labels are unreviewed/)).toBeInTheDocument()
   expect(screen.getByText(/development validation set had prior use/)).toBeInTheDocument()
+  expect(screen.getByRole('note')).toHaveTextContent(/Reference labeling-guide provenance is unknown/)
+  expect(screen.getByRole('note')).toHaveTextContent(/provisional comparisons against report-supplied target claims/)
+  expect(screen.getByText(/review and history remain report claims/)).toBeInTheDocument()
   expect(screen.getByRole('heading', { name: 'logistic_regression' })).toBeInTheDocument()
   expect(screen.getByText(/Direct LFG competition is not assessable/)).toBeInTheDocument()
   expect(screen.getAllByText(/2 validation rows/)).toHaveLength(3)
@@ -214,6 +289,42 @@ test('imports all three aggregate reports locally, displays safe dynamic summari
   expect(fetchSpy).not.toHaveBeenCalled()
   expect(storageSpy).not.toHaveBeenCalled()
   expect(logSpy).not.toHaveBeenCalled()
+})
+
+test('imports configured but inactive policy on known reference guides without provisional warning', async () => {
+  const makeKnown = (referenceStatus: 'verified_sha256' | 'explicitly_none') => ({ schema_version: 'lfg.owned-matched-validation-report.v1',
+    task: { ...common, validation_rows: 1, validation_record_id_set_sha256: d('8'), target_mask_sha256: d('6'), target_observation_support: support },
+    baseline: { classical_report_sha256: d('1'), comparison_12b_report_sha256: d('2'),
+      classical_aggregate_metrics: { logistic_regression: { macro_f1: null, coverage: 0 } } },
+    provenance: { screened_manifest_sha256: d('d'), plan_sha256: d('e'), screening_policy_sha256: d('f'),
+      review_ledger_sha256: d('1'), taxonomy_sha256: d('a'), train_sha256: d('2'), validation_sha256: d('3'),
+      baseline_review_and_history_claims: { legacy_labels_unverified: null,
+        validation_independence_verified: null, validation_history_claim: 'not established' },
+      development_reference_guide: { status: referenceStatus, sha256: referenceStatus === 'verified_sha256' ? d('9') : null },
+      model_response_guide: { status: referenceStatus, sha256: referenceStatus === 'verified_sha256' ? d('9') : null },
+      reference_guide_policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+      reference_guide_semantic_comparability: 'guide_identity_bound' },
+    owned: { engine_identity: null, metrics: { coverage: 0, f1: null, covered_known_target_cells: 0 }, status_counts: {},
+      reference_guide_assessment: { reference_guide: { status: referenceStatus, sha256: referenceStatus === 'verified_sha256' ? d('9') : null },
+        model_response_guide: { status: referenceStatus, sha256: referenceStatus === 'verified_sha256' ? d('9') : null },
+        policy: { schema_version: 'lfg.owned-unknown-reference-guide-policy.v1', allow_provisional_agreement: true },
+        semantic_comparability: 'guide_identity_bound', provisional_comparison_enabled: false,
+        claim_interpretation: 'report-supplied target claims; review and history remain report claims; not adjudicated truth or qualification' } },
+    deterministic: { coverage: null, f1: null, known_target_cells: 0, covered_known_target_cells: 0 } })
+  const text = JSON.stringify(makeKnown('verified_sha256'))
+  render(<ScorecardPanel maxBytes={100_000} maxFeedbackPages={2} maxFeedbackPageSize={10} currentOwnedStatus={null} />)
+  fireEvent.change(screen.getByLabelText('Owned LFG report JSON'), {
+    target: { files: [new File([text], 'known-report.json')] },
+  })
+  expect(await screen.findByText(/Guide provenance: development reference verified_sha256/)).toBeInTheDocument()
+  expect(screen.getByText(/configured but inactive/)).toBeInTheDocument()
+  expect(screen.queryByRole('note')).not.toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('Owned LFG report JSON'), {
+    target: { files: [new File([JSON.stringify(makeKnown('explicitly_none'))], 'explicit-none-report.json')] },
+  })
+  expect(await screen.findByText(/Guide provenance: development reference explicitly_none/)).toBeInTheDocument()
+  expect(screen.getByText(/configured but inactive/)).toBeInTheDocument()
+  expect(screen.queryByRole('note')).not.toBeInTheDocument()
 })
 
 test('a stale digest cannot replace a newer selection and malformed or oversized files stay private', async () => {
