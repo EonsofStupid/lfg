@@ -154,6 +154,58 @@ the existing config hash binds the request. Unknown extension fields remain
 inert. Invalid values of this recognized option fail before the private output
 directory is created.
 
+The optional boolean `failure_evidence` config field defaults to `false` and
+does not change strict acceptance. When enabled, the first failed
+`numpy.testing.assert_allclose` writes one bounded `failure-report.json` into
+the already verified private export directory. It records only fixed phase and
+comparison labels, source ordinal, prefix/decode position, a generated cache
+state descriptor when applicable, shapes/dtypes, and safe aggregate counts and
+error bounds. The original-dtype NumPy comparison, configured tolerances,
+call order, equal-NaN behavior, and scalar rules remain the pass/fail check;
+summary calculations never decide acceptance. Shape mismatches or unsupported
+aggregates are marked unavailable. The report omits paths, source identifiers,
+input/output values, coordinates, exception text, and tracebacks. If creation
+fails, the strict export remains failed and the sanitized CLI result reports
+`failure_report_written: false` with a fixed error category. A numerical
+failure never writes the success manifest or measurement; partial ONNX graphs
+must be treated as unverified artifacts, with promotion ineligible. With the
+field omitted or `false`, no sidecar is written.
+
+Report publication uses the output directory identity captured when the
+private directory is created, opens that same directory without following the
+final path component, and exclusively creates, writes, and syncs the sidecar
+relative to its verified descriptor. The writer never removes a report by
+filename after creation; if its path or entry changes concurrently, it reports
+the uncertainty and preserves the competing entry. CLI startup import and
+argument failures are returned as fixed categories without traceback or
+argument echoes. A write interruption may leave an incomplete sidecar; a
+`failure_report_written: false` result means its contents were not verified as
+complete.
+
+When invoked as the exporter script, Python output and ordinary process file
+descriptors 1 and 2 stay redirected to the system null device for the full
+process lifetime, including native C/C++ stream flushes during shutdown. The
+fixed JSON result is written through saved status descriptors, so it remains
+available without restoring descriptors that native buffers could later use.
+This boundary applies only to the standalone script; importing the module or
+calling its library API does not redirect the host application's streams.
+Output emitted before the script starts (including interpreter startup hooks),
+custom descriptors or files, OS crashes, and malicious native libraries are
+outside this boundary.
+
+The standalone `--help` option writes fixed public usage text through the saved
+stdout channel; its program label does not expose the invoked script path.
+Status delivery is checked: success and help return exit code 7 if the complete
+status cannot be written. When the preferred status channel is unavailable
+before writing begins, the CLI tries the other saved channel; a failed or
+partial write is not replayed on the other channel. Export failures keep their
+original nonzero exit status even if their fixed error status cannot be sent.
+
+The sidecar describes only a failed `assert_allclose` comparison. Earlier
+shape or finiteness guards and the separate greedy-byte `ValueError` retain
+their existing rejection behavior and do not claim that a numeric failure
+report exists.
+
 This ORT setting controls only the exporter's ORT validation and benchmark
 sessions and the matching ORT parity diagnostic. It does not configure the
 native tract runtime or prove which individual graph rewrites occurred. The

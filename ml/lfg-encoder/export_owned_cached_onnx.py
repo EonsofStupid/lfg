@@ -14,18 +14,509 @@ import platform
 import stat
 import statistics
 import subprocess
+import sys
 import time
 
-import torch
-from torch.nn import functional as F
-from safetensors.torch import load_file
+class OutputSanitizationUnavailable(Exception):
+    pass
 
-import owned_student
-from owned_cached_decode import DecodeSession
+
+_CLI_MODE = __name__ == '__main__'
+_CLI_STATUS_STDOUT_FD = None
+_CLI_STATUS_STDERR_FD = None
+_CLI_OUTPUT_SINK = None
+_CLI_OUTPUT_BOUNDARY_READY = False
+_CLI_OUTPUT_BOUNDARY_FAILED = False
+
+
+def _duplicate_status_descriptor(source_fd: int) -> int | None:
+    """Duplicate a status stream above the standard descriptors before redirecting them."""
+    temporary_descriptors = []
+    try:
+        descriptor = os.dup(source_fd)
+        while descriptor <= 2:
+            temporary_descriptors.append(descriptor)
+            descriptor = os.dup(descriptor)
+        return descriptor
+    except OSError:
+        return None
+    finally:
+        for descriptor in temporary_descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _start_cli_output_boundary() -> None:
+    """Keep native fd 1/2 discarded until process exit; save status channels."""
+    global _CLI_STATUS_STDOUT_FD, _CLI_STATUS_STDERR_FD
+    global _CLI_OUTPUT_SINK, _CLI_OUTPUT_BOUNDARY_READY, _CLI_OUTPUT_BOUNDARY_FAILED
+    _CLI_STATUS_STDOUT_FD = _duplicate_status_descriptor(1)
+    _CLI_STATUS_STDERR_FD = _duplicate_status_descriptor(2)
+    try:
+        sink = open(os.devnull, 'w', encoding='utf-8')
+    except OSError:
+        sink = None
+    _CLI_OUTPUT_SINK = sink
+    redirect_ok = sink is not None
+    if sink is not None:
+        for target_fd in (1, 2):
+            try:
+                os.dup2(sink.fileno(), target_fd)
+            except OSError:
+                redirect_ok = False
+                try:
+                    os.close(target_fd)
+                except OSError:
+                    pass
+        sys.stdout = sink
+        sys.stderr = sink
+    else:
+        redirect_ok = False
+        for target_fd in (1, 2):
+            try:
+                os.close(target_fd)
+            except OSError:
+                pass
+    _CLI_OUTPUT_BOUNDARY_READY = bool(
+        redirect_ok and _CLI_STATUS_STDOUT_FD is not None and _CLI_STATUS_STDERR_FD is not None)
+    _CLI_OUTPUT_BOUNDARY_FAILED = not _CLI_OUTPUT_BOUNDARY_READY
+
+
+def _emit_status(result: dict, *, to_stderr: bool = False) -> bool:
+    """Write a bounded fixed CLI status through the saved caller channel."""
+    try:
+        payload = (json.dumps(result, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+    except Exception:
+        payload = b'{"status":"status_serialization_failed","failure_detail_suppressed":true}\n'
+    if len(payload) > 4096:
+        payload = b'{"status":"status_size_limit","failure_detail_suppressed":true}\n'
+    return _emit_payload(payload, to_stderr=to_stderr)
+
+
+def _emit_payload(payload: bytes, *, to_stderr: bool = False) -> bool:
+    """Deliver a bounded fixed payload and report whether every byte was written."""
+    if not isinstance(payload, bytes) or len(payload) > 4096:
+        return False
+    if _CLI_MODE:
+        descriptor = _CLI_STATUS_STDERR_FD if to_stderr else _CLI_STATUS_STDOUT_FD
+        if descriptor is None:
+            descriptor = _CLI_STATUS_STDOUT_FD if to_stderr else _CLI_STATUS_STDERR_FD
+        if descriptor is None:
+            return False
+        written = 0
+        try:
+            while written < len(payload):
+                try:
+                    count = os.write(descriptor, payload[written:])
+                except InterruptedError:
+                    continue
+                if count <= 0:
+                    return False
+                written += count
+        except OSError:
+            return False
+        return True
+    else:
+        stream = sys.stderr if to_stderr else sys.stdout
+        try:
+            message = payload.decode('utf-8')
+            count = stream.write(message)
+            if count is not None and count != len(message):
+                return False
+            stream.flush()
+            return True
+        except Exception:
+            return False
+
+
+if _CLI_MODE:
+    _start_cli_output_boundary()
+
+
+_DEPENDENCY_IMPORT_FAILED = False
+_STARTUP_OUTPUT_SANITIZATION_FAILED = _CLI_OUTPUT_BOUNDARY_FAILED
+try:
+    if _CLI_MODE and not _CLI_OUTPUT_BOUNDARY_READY:
+        raise OutputSanitizationUnavailable()
+    import torch
+    from torch.nn import functional as F
+    from safetensors.torch import load_file
+
+    import owned_student
+    from owned_cached_decode import DecodeSession
+except OutputSanitizationUnavailable:
+    _DEPENDENCY_IMPORT_FAILED = True
+    _STARTUP_OUTPUT_SANITIZATION_FAILED = True
+    torch = F = load_file = owned_student = DecodeSession = None
+except Exception:
+    # Keep module import and the CLI's sanitized failure boundary available if
+    # an optional ML dependency is absent or fails during its own import.
+    _DEPENDENCY_IMPORT_FAILED = True
+    torch = F = load_file = owned_student = DecodeSession = None
+_TorchModule = torch.nn.Module if not _DEPENDENCY_IMPORT_FAILED else object
 
 MAX_CONFIG_BYTES = 1 << 20
+MAX_FAILURE_REPORT_BYTES = 8192
+FAILURE_REPORT_NAME = 'failure-report.json'
+FAILURE_REPORT_DIRFD_SUPPORTED = bool(getattr(os, 'supports_dir_fd', None)) and all(
+    function in os.supports_dir_fd for function in (os.open, os.stat))
+FAILURE_REPORT_STAT_NOFOLLOW_SUPPORTED = (
+    os.stat in getattr(os, 'supports_follow_symlinks', set()))
 ORT_GRAPH_OPTIMIZATION_LEVELS = (
     'ORT_DISABLE_ALL', 'ORT_ENABLE_BASIC', 'ORT_ENABLE_EXTENDED', 'ORT_ENABLE_ALL')
+
+FAILURE_PHASES = frozenset((
+    'configured_length_prefill', 'full_source_prefill', 'autoregressive_decode'))
+FAILURE_COMPARISONS = frozenset((
+    'onnx_prefill_vs_full_prefix_logits', 'onnx_prefill_vs_incremental_logits',
+    'onnx_prefill_vs_incremental_cache', 'onnx_decode_vs_full_prefix_logits',
+    'onnx_decode_vs_incremental_logits', 'onnx_decode_vs_incremental_cache'))
+
+
+class SanitizedArgumentError(Exception):
+    pass
+
+
+class SanitizedHelpRequested(Exception):
+    def __init__(self, text: str):
+        self.text = text
+
+
+class SanitizedArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Do not let argparse echo raw argument values or filesystem paths.
+        raise SanitizedArgumentError()
+
+    def print_help(self, file=None):
+        # Do not let argparse write directly to the discarded process stream.
+        raise SanitizedHelpRequested(self.format_help())
+
+
+class ExporterDependenciesUnavailable(Exception):
+    pass
+
+
+class CachedParityFailure(AssertionError):
+    """A strict numerical failure with a stable, non-sensitive message."""
+
+    def __init__(self, report_written: bool, report_error_category: str,
+                 context: dict, summary: dict | None):
+        super().__init__('cached ONNX strict parity assertion failed')
+        self.failure_report_written = report_written
+        self.failure_report_error_category = report_error_category
+        self.failure_context = context
+        self.failure_summary = summary
+
+
+def _safe_failure_context(context: dict) -> dict:
+    """Keep only bounded, code-owned labels and integer coordinates."""
+    if not isinstance(context, dict):
+        return {'phase': 'unknown', 'comparison': 'unknown'}
+    phase = context.get('phase')
+    comparison = context.get('comparison')
+    safe = {
+        'phase': phase if isinstance(phase, str) and phase in FAILURE_PHASES else 'unknown',
+        'comparison': comparison if isinstance(comparison, str) and comparison in FAILURE_COMPARISONS else 'unknown',
+    }
+    for key, minimum, maximum in (
+            ('source_ordinal', 1, 4096), ('prefix_length', 1, 1 << 31),
+            ('decode_step', 1, 1 << 31), ('state_layer', 0, 4096)):
+        value = context.get(key)
+        if type(value) is int and minimum <= value <= maximum:
+            safe[key] = value
+    state_name = context.get('state_name')
+    if isinstance(state_name, str) and len(state_name) <= 16:
+        state_parts = state_name.split('_')
+        if (len(state_parts) == 2 and state_parts[0] in ('conv', 'key', 'value')
+                and state_parts[1].isdecimal()):
+            safe['state_name'] = state_name
+    state_kind = context.get('state_kind')
+    if (isinstance(state_kind, str)
+            and state_kind in ('depthwise-convolution-history', 'attention-key', 'attention-value')):
+        safe['state_kind'] = state_kind
+    return safe
+
+
+def _safe_array_summary(np, actual, desired, atol: float, rtol: float) -> dict:
+    """Describe a failed pair without retaining values or coordinates.
+
+    The original-dtype ``isclose`` pass matches assert_allclose's elementwise
+    predicate for same-shape arrays. Summary arithmetic is descriptive only.
+    """
+    actual_array = np.asanyarray(actual)
+    desired_array = np.asanyarray(desired)
+
+    def shape_of(array):
+        shape = tuple(int(dimension) for dimension in array.shape)
+        return list(shape) if len(shape) <= 8 else None
+
+    def dtype_of(array):
+        dtype = np.dtype(array.dtype)
+        if dtype.kind in 'biufc' and dtype.itemsize <= 16:
+            return dtype.name
+        return 'unsupported'
+
+    actual_shape = shape_of(actual_array)
+    desired_shape = shape_of(desired_array)
+    summary = {
+        'actual_shape': actual_shape,
+        'desired_shape': desired_shape,
+        'actual_shape_dimensions': int(actual_array.ndim),
+        'desired_shape_dimensions': int(desired_array.ndim),
+        'actual_dtype': dtype_of(actual_array),
+        'desired_dtype': dtype_of(desired_array),
+        'element_count': None,
+        'failed_element_count': None,
+        'failed_element_denominator': None,
+        'nonfinite_element_count': None,
+        'zero_reference_count': None,
+        'max_absolute_error': None,
+        'max_relative_error_nonzero_reference': None,
+        'aggregate_status': 'unavailable',
+        'aggregate_reason': None,
+    }
+    if actual_array.shape != desired_array.shape:
+        summary['aggregate_reason'] = 'shape_mismatch_element_counts_unavailable'
+        return summary
+    summary['element_count'] = int(actual_array.size)
+    summary['failed_element_denominator'] = int(actual_array.size)
+    if actual_array.dtype.kind not in 'biufc' or desired_array.dtype.kind not in 'biufc':
+        summary['aggregate_reason'] = 'unsupported_dtype'
+        return summary
+
+    try:
+        # Keep these exact operands in their source dtype. Do not use the
+        # descriptive float64 copies below to determine strict failures.
+        with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+            close = np.isclose(actual_array, desired_array, atol=atol,
+                               rtol=rtol, equal_nan=True)
+            finite = np.isfinite(actual_array) & np.isfinite(desired_array)
+        summary['failed_element_count'] = int(actual_array.size - np.count_nonzero(close))
+        summary['nonfinite_element_count'] = int(actual_array.size - np.count_nonzero(finite))
+        if desired_array.dtype.kind == 'c':
+            desired_complex = desired_array.astype(np.complex128, copy=False)
+            desired_real = desired_complex.real
+            desired_imag = desired_complex.imag
+            desired_zero = (desired_real == 0) & (desired_imag == 0)
+            with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+                desired_magnitude = np.hypot(desired_real, desired_imag)
+        else:
+            desired_real = desired_array.astype(np.float64, copy=False)
+            desired_imag = np.zeros_like(desired_real)
+            desired_zero = desired_real == 0
+            desired_magnitude = np.abs(desired_real)
+        summary['zero_reference_count'] = int(np.count_nonzero(finite & desired_zero))
+
+        if actual_array.dtype.kind in 'fc' and desired_array.dtype.kind in 'fc':
+            use_complex = actual_array.dtype.kind == 'c' or desired_array.dtype.kind == 'c'
+            summary_dtype = np.complex128 if use_complex else np.float64
+            with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+                actual_summary = actual_array.astype(summary_dtype, copy=False)
+                desired_summary = desired_array.astype(summary_dtype, copy=False)
+                differences = np.abs(actual_summary - desired_summary)
+                finite_differences = finite & np.isfinite(differences)
+                unrepresentable = bool(np.any(finite & ~np.isfinite(differences)))
+                if np.any(finite_differences) and not unrepresentable:
+                    summary['max_absolute_error'] = float(np.max(differences[finite_differences]))
+                nonzero_reference = finite & (desired_magnitude > 0) & np.isfinite(differences)
+                relative = differences[nonzero_reference] / desired_magnitude[nonzero_reference]
+                relative_unrepresentable = bool(np.any(~np.isfinite(relative)))
+                if relative.size and not unrepresentable and not relative_unrepresentable:
+                    summary['max_relative_error_nonzero_reference'] = float(np.max(relative))
+            if use_complex:
+                actual_complex = actual_array.astype(np.complex128, copy=False)
+                actual_real, actual_imag = actual_complex.real, actual_complex.imag
+                with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+                    scale = np.maximum(np.abs(desired_real), np.abs(desired_imag))
+                    relative_mask = finite & ~desired_zero
+                    scaled_desired_real = np.zeros_like(scale)
+                    scaled_desired_imag = np.zeros_like(scale)
+                    scaled_actual_real = np.zeros_like(scale)
+                    scaled_actual_imag = np.zeros_like(scale)
+                    np.divide(desired_real, scale, out=scaled_desired_real, where=relative_mask)
+                    np.divide(desired_imag, scale, out=scaled_desired_imag, where=relative_mask)
+                    np.divide(actual_real, scale, out=scaled_actual_real, where=relative_mask)
+                    np.divide(actual_imag, scale, out=scaled_actual_imag, where=relative_mask)
+                    desired_norm = np.hypot(scaled_desired_real, scaled_desired_imag)
+                    relative_numerator = np.hypot(
+                        scaled_actual_real - scaled_desired_real,
+                        scaled_actual_imag - scaled_desired_imag)
+                    relative = relative_numerator[relative_mask] / desired_norm[relative_mask]
+                relative_unrepresentable = bool(np.any(~np.isfinite(relative)))
+                if relative.size and not relative_unrepresentable:
+                    summary['max_relative_error_nonzero_reference'] = float(np.max(relative))
+                elif relative_unrepresentable:
+                    summary['max_relative_error_nonzero_reference'] = None
+            if unrepresentable:
+                summary['aggregate_reason'] = 'finite_difference_unrepresentable'
+            elif relative_unrepresentable:
+                summary['aggregate_reason'] = 'relative_error_unrepresentable'
+        else:
+            summary['aggregate_reason'] = 'integer_difference_not_summarized'
+        summary['aggregate_status'] = 'measured'
+    except Exception:
+        # Diagnostics are best-effort; the already-failed NumPy assertion is
+        # authoritative and must never be replaced by a reporting exception.
+        summary['aggregate_reason'] = 'safe_aggregation_unavailable'
+    return summary
+
+
+def _output_still_matches(output: Path, identity: tuple[int, int]) -> bool:
+    try:
+        current = os.stat(output, follow_symlinks=False)
+        return (stat.S_ISDIR(current.st_mode)
+                and (current.st_dev, current.st_ino) == identity)
+    except OSError:
+        return False
+
+
+def _write_failure_report(output: Path, report: dict,
+                          output_identity: tuple[int, int] | None = None) -> tuple[bool, str]:
+    """Exclusively create/write through a descriptor bound to the verified output inode."""
+    if (os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY')
+            or not FAILURE_REPORT_DIRFD_SUPPORTED or not FAILURE_REPORT_STAT_NOFOLLOW_SUPPORTED):
+        return False, 'private_output_controls_unavailable'
+    if (not isinstance(output_identity, tuple) or len(output_identity) != 2
+            or any(type(value) is not int or value < 0 for value in output_identity)):
+        return False, 'verified_output_identity_unavailable'
+    try:
+        directory_fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False, 'unsafe_private_directory'
+    try:
+        directory = os.fstat(directory_fd)
+        if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != os.geteuid()
+                or stat.S_IMODE(directory.st_mode) & 0o077
+                or (directory.st_dev, directory.st_ino) != output_identity):
+            os.close(directory_fd)
+            return False, 'unsafe_private_directory'
+        if not _output_still_matches(output, output_identity):
+            os.close(directory_fd)
+            return False, 'output_directory_changed'
+    except OSError:
+        os.close(directory_fd)
+        return False, 'unsafe_private_directory'
+    try:
+        data = (json.dumps(report, sort_keys=True, separators=(',', ':'),
+                           allow_nan=False) + '\n').encode('utf-8')
+    except (TypeError, ValueError, OverflowError):
+        os.close(directory_fd)
+        return False, 'serialization_failed'
+    if len(data) > MAX_FAILURE_REPORT_BYTES:
+        os.close(directory_fd)
+        return False, 'report_size_limit'
+
+    descriptor = None
+    created = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open(FAILURE_REPORT_NAME, flags, 0o600, dir_fd=directory_fd)
+        created = True
+        os.fchmod(descriptor, 0o600)
+        file_info = os.fstat(descriptor)
+        if (not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.geteuid()
+                or stat.S_IMODE(file_info.st_mode) & 0o077):
+            return False, 'unsafe_report_file'
+        report_identity = (file_info.st_dev, file_info.st_ino)
+        written = 0
+        while written < len(data):
+            count = os.write(descriptor, data[written:])
+            if count <= 0:
+                raise OSError('short report write')
+            written += count
+        os.fsync(descriptor)
+        if not _output_still_matches(output, output_identity):
+            return False, 'output_directory_changed'
+        if not _report_entry_still_matches(directory_fd, report_identity):
+            return False, 'report_replaced'
+        os.close(descriptor)
+        descriptor = None
+        os.fsync(directory_fd)
+        if not _output_still_matches(output, output_identity):
+            return False, 'output_directory_changed'
+        if not _report_entry_still_matches(directory_fd, report_identity):
+            return False, 'report_replaced'
+        return True, 'written'
+    except FileExistsError:
+        return False, 'report_already_exists'
+    except Exception:
+        return False, 'report_durability_uncertain' if created else 'report_write_failed'
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        os.close(directory_fd)
+
+
+def _report_entry_still_matches(directory_fd: int, identity: tuple[int, int]) -> bool:
+    try:
+        current = os.stat(FAILURE_REPORT_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        return (stat.S_ISREG(current.st_mode) and current.st_uid == os.geteuid()
+                and not (stat.S_IMODE(current.st_mode) & 0o077)
+                and (current.st_dev, current.st_ino) == identity)
+    except OSError:
+        return False
+
+
+def _assert_allclose_with_evidence(np, actual, desired, *, rtol: float, atol: float,
+                                   context: dict, output: Path,
+                                   report_enabled: bool,
+                                   output_identity: tuple[int, int] | None = None) -> None:
+    """Use the original NumPy assertion, adding safe evidence only on failure."""
+    failed = False
+    try:
+        # Keep the original call and defaults. In particular, do not cast the
+        # arrays, change tolerances, or alter assert_allclose's scalar rules.
+        np.testing.assert_allclose(actual, desired, rtol=rtol, atol=atol)
+    except AssertionError:
+        failed = True
+    if not failed:
+        return
+
+    try:
+        safe_context = _safe_failure_context(context)
+    except Exception:
+        safe_context = {'phase': 'unknown', 'comparison': 'unknown'}
+    try:
+        summary = _safe_array_summary(np, actual, desired, atol, rtol)
+    except Exception:
+        summary = {
+            'aggregate_status': 'unavailable',
+            'aggregate_reason': 'safe_aggregation_unavailable',
+            'failed_element_count': None,
+            'failed_element_denominator': None,
+            'max_absolute_error': None,
+            'max_relative_error_nonzero_reference': None,
+        }
+    report_written = False
+    report_error = 'disabled'
+    if report_enabled:
+        report = {
+            'schema_version': 'lfg.owned-cached-export-failure.v1',
+            'failure_kind': 'numpy_assert_allclose',
+            'result': 'strict_parity_failed',
+            'first_failure_only': True,
+            'later_checks_run': False,
+            'success_manifest_written': False,
+            'measurement_written': False,
+            'promotion_eligible': False,
+            'context': safe_context,
+            'tolerance': {'absolute': atol, 'relative': rtol, 'equal_nan': True},
+            'comparison': summary,
+        }
+        try:
+            report_written, report_error = _write_failure_report(output, report, output_identity)
+        except Exception:
+            # Reporting is secondary; an unexpected report-path failure must
+            # never replace the already-established strict numerical failure.
+            report_written, report_error = False, 'report_write_failed'
+    # Raise after leaving the handler so the original NumPy exception text and
+    # tensor values are not retained as displayed exception context.
+    raise CachedParityFailure(report_written, report_error, safe_context, summary)
 
 
 def digest(raw: bytes) -> str:
@@ -142,7 +633,7 @@ def private_output(directory: Path) -> None:
         raise ValueError('cannot verify output privacy') from None
 
 
-def create_private_output(directory: Path) -> None:
+def create_private_output(directory: Path) -> tuple[int, int]:
     """Create a new private output directory or refuse before exporting data.
 
     POSIX permission checks assume current-user and root processes are trusted.
@@ -179,10 +670,12 @@ def create_private_output(directory: Path) -> None:
             child = os.fstat(child_fd)
             if child.st_uid != effective_uid or stat.S_IMODE(child.st_mode) & 0o077:
                 raise ValueError('created output directory is not private')
+            identity = (child.st_dev, child.st_ino)
         finally:
             os.close(child_fd)
     finally:
         os.close(parent_fd)
+    return identity
 
 
 def matching_greedy_byte(actual, reference) -> int:
@@ -211,7 +704,7 @@ def cache_layout(architecture: dict) -> list[dict]:
     return layout
 
 
-class PrefillGraph(torch.nn.Module):
+class PrefillGraph(_TorchModule):
     def __init__(self, model: owned_student.OwnedByteStudent, layout: list[dict]):
         super().__init__()
         self.model = model
@@ -244,7 +737,7 @@ class PrefillGraph(torch.nn.Module):
         return (logits, *cache_values)
 
 
-class DecodeGraph(torch.nn.Module):
+class DecodeGraph(_TorchModule):
     def __init__(self, model: owned_student.OwnedByteStudent, layout: list[dict]):
         super().__init__()
         self.model = model
@@ -287,6 +780,8 @@ class DecodeGraph(torch.nn.Module):
 def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
            additional_sources: list[Path] | None = None, decode_steps: int = 32,
            warmup: int = 1, repeats: int = 3) -> dict:
+    if _DEPENDENCY_IMPORT_FAILED:
+        raise ExporterDependenciesUnavailable()
     import numpy as np
     import onnx
     import onnxruntime as ort
@@ -295,6 +790,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
     config = json.loads(config_raw)
     integer_fields = ('opset', 'cpu_threads', 'max_model_bytes', 'max_checkpoint_bytes', 'max_manifest_bytes')
     if (not isinstance(config, dict) or config.get('schema_version') != 'lfg.owned-byte-onnx-export.v1'
+            or ('failure_evidence' in config and type(config['failure_evidence']) is not bool)
             or any(type(config.get(key)) is not int or config[key] < 1 for key in integer_fields)
             or not isinstance(config.get('parity_lengths'), list) or not config['parity_lengths']
             or any(type(length) is not int or length < 1 for length in config['parity_lengths'])
@@ -304,6 +800,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             or type(decode_steps) is not int or decode_steps < 1
             or type(warmup) is not int or warmup < 0 or type(repeats) is not int or repeats < 1):
         raise ValueError('invalid cached export configuration')
+    failure_evidence_enabled = config.get('failure_evidence', False)
     # Validate recognized settings and instantiate the options before private
     # output creation. When omitted, ORT retains its own SessionOptions default.
     prefill_session_options, requested_ort_level = create_ort_session_options(
@@ -344,7 +841,7 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         traced_prefill = prefill(trace_tokens)
         prefill_state = list(traced_prefill[1:])
         traced_decode = decode(trace_tokens[:, -1], torch.tensor(trace_length, dtype=torch.long), *prefill_state)
-    create_private_output(output)
+    output_identity = create_private_output(output)
     prefill_path, decode_path = output / 'prefill.onnx', output / 'decode.onnx'
     state_names = [entry['name'] for entry in layout]
     prefill_output_names = ['logits', *state_names]
@@ -387,6 +884,25 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
     max_cache_diff = 0.0
     exact_greedy = True
     source_measurements = []
+
+    def assert_parity(actual, desired, *, phase, comparison, source_ordinal,
+                      checked_prefix, decode_step=None, state=None):
+        context = {
+            'phase': phase,
+            'comparison': comparison,
+            'source_ordinal': source_ordinal,
+            'prefix_length': checked_prefix,
+        }
+        if decode_step is not None:
+            context['decode_step'] = decode_step
+        if state is not None:
+            context.update({'state_name': state['name'], 'state_kind': state['kind'],
+                            'state_layer': state['layer']})
+        _assert_allclose_with_evidence(
+            np, actual, desired, rtol=config['relative_tolerance'],
+            atol=config['absolute_tolerance'], context=context, output=output,
+            report_enabled=failure_evidence_enabled, output_identity=output_identity)
+
     for source_index, raw in enumerate(source_raws):
         source_tokens = torch.tensor([list(raw)], dtype=torch.long)
         prefix_length = len(raw)
@@ -396,15 +912,19 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
                 parity_outputs = prefill_session.run(None, {'tokens': parity_tokens.numpy()})
                 with torch.inference_mode():
                     parity_expected = model(parity_tokens)[:, -1, :].detach().numpy()
-                np.testing.assert_allclose(parity_outputs[0], parity_expected,
-                                           rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+                assert_parity(parity_outputs[0], parity_expected,
+                              phase='configured_length_prefill',
+                              comparison='onnx_prefill_vs_full_prefix_logits',
+                              source_ordinal=source_index + 1, checked_prefix=parity_length)
                 parity_cache = DecodeSession(model, 1)
                 with torch.inference_mode():
                     parity_python_logits = None
                     for token_index in range(parity_length):
                         parity_python_logits = parity_cache.step(parity_tokens[:, token_index])
-                np.testing.assert_allclose(parity_outputs[0], parity_python_logits.detach().cpu().numpy(),
-                                           rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+                assert_parity(parity_outputs[0], parity_python_logits.detach().cpu().numpy(),
+                              phase='configured_length_prefill',
+                              comparison='onnx_prefill_vs_incremental_logits',
+                              source_ordinal=source_index + 1, checked_prefix=parity_length)
                 for entry, state_value in zip(layout, parity_outputs[1:]):
                     reference = parity_cache._states[entry['layer']]
                     kind = entry['kind']
@@ -412,8 +932,11 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
                     expected_state = reference[reference_key].detach().cpu().numpy()
                     if state_value.shape != expected_state.shape or not np.isfinite(state_value).all():
                         raise ValueError('invalid parity cache state')
-                    np.testing.assert_allclose(state_value, expected_state,
-                                               rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+                    assert_parity(state_value, expected_state,
+                                  phase='configured_length_prefill',
+                                  comparison='onnx_prefill_vs_incremental_cache',
+                                  source_ordinal=source_index + 1,
+                                  checked_prefix=parity_length, state=entry)
                     max_cache_diff = max(max_cache_diff,
                                          float(np.max(np.abs(state_value - expected_state))) if state_value.size else 0.0)
                 max_logit_diff = max(max_logit_diff, float(np.max(np.abs(parity_outputs[0] - parity_expected))))
@@ -424,12 +947,16 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
         actual = onnx_state[0]
         if actual.shape != expected.shape or not np.isfinite(actual).all():
             raise ValueError('invalid cache prefill output')
-        np.testing.assert_allclose(actual, expected, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+        assert_parity(actual, expected, phase='full_source_prefill',
+                      comparison='onnx_prefill_vs_full_prefix_logits',
+                      source_ordinal=source_index + 1, checked_prefix=prefix_length)
         max_logit_diff = max(max_logit_diff, float(np.max(np.abs(actual - expected))))
         python_cache = DecodeSession(model, 1)
         with torch.inference_mode():
             python_logits = torch.stack([python_cache.step(source_tokens[:, index]) for index in range(prefix_length)], dim=1)[:, -1, :].numpy()
-        np.testing.assert_allclose(actual, python_logits, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+        assert_parity(actual, python_logits, phase='full_source_prefill',
+                      comparison='onnx_prefill_vs_incremental_logits',
+                      source_ordinal=source_index + 1, checked_prefix=prefix_length)
         for entry, state_value in zip(layout, onnx_state[1:]):
             reference = python_cache._states[entry['layer']]
             kind = entry['kind']
@@ -437,7 +964,10 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             expected_state = reference[reference_key].detach().cpu().numpy()
             if state_value.shape != expected_state.shape or not np.isfinite(state_value).all():
                 raise ValueError('invalid cache state output')
-            np.testing.assert_allclose(state_value, expected_state, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+            assert_parity(state_value, expected_state, phase='full_source_prefill',
+                          comparison='onnx_prefill_vs_incremental_cache',
+                          source_ordinal=source_index + 1,
+                          checked_prefix=prefix_length, state=entry)
             max_cache_diff = max(max_cache_diff, float(np.max(np.abs(state_value - expected_state))) if state_value.size else 0.0)
         bytes_out = []
         reference_bytes = []
@@ -469,8 +999,14 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
                 cached_reference = python_cache.step(torch.tensor([next_byte], dtype=torch.long)).detach().cpu().numpy()
             if logits.shape != expected_next.shape or not np.isfinite(logits).all():
                 raise ValueError('invalid cache decode logits')
-            np.testing.assert_allclose(logits, expected_next, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
-            np.testing.assert_allclose(logits, cached_reference, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+            assert_parity(logits, expected_next, phase='autoregressive_decode',
+                          comparison='onnx_decode_vs_full_prefix_logits',
+                          source_ordinal=source_index + 1, checked_prefix=prefix_length,
+                          decode_step=step_index + 1)
+            assert_parity(logits, cached_reference, phase='autoregressive_decode',
+                          comparison='onnx_decode_vs_incremental_logits',
+                          source_ordinal=source_index + 1, checked_prefix=prefix_length,
+                          decode_step=step_index + 1)
             max_logit_diff = max(max_logit_diff, float(np.max(np.abs(logits - expected_next))))
             for entry, state_value in zip(layout, state_values):
                 reference = python_cache._states[entry['layer']]
@@ -479,7 +1015,10 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
                 expected_state = reference[reference_key].detach().cpu().numpy()
                 if state_value.shape != expected_state.shape or not np.isfinite(state_value).all():
                     raise ValueError('invalid cache decode state')
-                np.testing.assert_allclose(state_value, expected_state, rtol=config['relative_tolerance'], atol=config['absolute_tolerance'])
+                assert_parity(state_value, expected_state, phase='autoregressive_decode',
+                              comparison='onnx_decode_vs_incremental_cache',
+                              source_ordinal=source_index + 1, checked_prefix=prefix_length,
+                              decode_step=step_index + 1, state=entry)
                 max_cache_diff = max(max_cache_diff, float(np.max(np.abs(state_value - expected_state))) if state_value.size else 0.0)
             reference_logits = expected_next
         # Warmed, alternating repeats measure prefill and a decode batch without exposing tokens or text.
@@ -598,16 +1137,84 @@ def export(checkpoint: Path, config_path: Path, source: Path, output: Path,
             'decode_steps': decode_steps, 'greedy_bytes_exact': exact_greedy}
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('checkpoint', 'config', 'source', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
-    parser.add_argument('--additional-source', type=Path, action='append', default=[])
-    parser.add_argument('--decode-steps', type=int, default=32)
-    parser.add_argument('--warmup', type=int, default=1)
-    parser.add_argument('--repeats', type=int, default=3)
-    arguments = parser.parse_args()
-    result = export(arguments.checkpoint, arguments.config, arguments.source, arguments.output,
-                    arguments.additional_source, arguments.decode_steps, arguments.warmup, arguments.repeats)
+def main(argv=None, *, sanitize_process_output: bool = False) -> int:
+    # Fail before parsing so even early argparse exits cannot bypass the
+    # standalone process-lifetime output boundary.
+    if _STARTUP_OUTPUT_SANITIZATION_FAILED:
+        _emit_status({'status': 'output_sanitization_unavailable',
+                      'failure_detail_suppressed': True}, to_stderr=True)
+        return 6
+
+    parser = SanitizedArgumentParser(
+        prog='lfg-export-owned-cached-onnx',
+        description='Export and strictly validate owned cached ONNX graphs.')
+    parser.add_argument('--checkpoint', type=Path, required=True,
+                        help='Directory containing the owned checkpoint weights.')
+    parser.add_argument('--config', type=Path, required=True,
+                        help='Export configuration JSON file.')
+    parser.add_argument('--source', type=Path, required=True,
+                        help='Primary authorized source file.')
+    parser.add_argument('--output', type=Path, required=True,
+                        help='New private output directory.')
+    parser.add_argument('--additional-source', type=Path, action='append', default=[],
+                        help='Additional authorized source file; may be repeated.')
+    parser.add_argument('--decode-steps', type=int, default=32,
+                        help='Number of incremental decode steps to validate (default: 32).')
+    parser.add_argument('--warmup', type=int, default=1,
+                        help='Warmup runs for measurement (default: 1).')
+    parser.add_argument('--repeats', type=int, default=3,
+                        help='Measurement repeats (default: 3).')
+    try:
+        arguments = parser.parse_args(argv)
+    except SanitizedHelpRequested as help_request:
+        try:
+            help_bytes = help_request.text.encode('utf-8')
+        except UnicodeEncodeError:
+            return 7
+        return 0 if _emit_payload(help_bytes) else 7
+    except SanitizedArgumentError:
+        _emit_status({'status': 'invalid_arguments', 'failure_detail_suppressed': True},
+                     to_stderr=True)
+        return 2
+    try:
+        result = export(arguments.checkpoint, arguments.config, arguments.source, arguments.output,
+                        arguments.additional_source, arguments.decode_steps,
+                        arguments.warmup, arguments.repeats)
+    except CachedParityFailure as failure:
+        result = {
+            'status': 'strict_parity_failed',
+            'failure_report_written': failure.failure_report_written,
+            'failure_report_error_category': failure.failure_report_error_category,
+        }
+        _emit_status(result, to_stderr=True)
+        return 1
+    except ExporterDependenciesUnavailable:
+        result = {'status': 'dependency_unavailable', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 5
+    except ImportError:
+        result = {'status': 'dependency_unavailable', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 5
+    except OutputSanitizationUnavailable:
+        result = {'status': 'output_sanitization_unavailable', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 6
+    except ValueError:
+        result = {'status': 'invalid_or_unsafe_export', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 2
+    except OSError:
+        result = {'status': 'filesystem_or_runtime_failure', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 3
+    except Exception:
+        result = {'status': 'unexpected_export_failure', 'failure_detail_suppressed': True}
+        _emit_status(result, to_stderr=True)
+        return 4
     # Do not print private paths, inputs, model output, or artifact digests.
-    print(json.dumps(result, separators=(',', ':')))
+    return 0 if _emit_status(result) else 7
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sanitize_process_output=True))
