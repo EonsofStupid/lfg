@@ -338,58 +338,128 @@ class CachedExportFailureEvidenceTests(unittest.TestCase):
         return checkpoint, config_path, source
 
     def _write_noisy_sitecustomize(self, directory):
-        (directory / 'sitecustomize.py').write_text(
+        sitecustomize = directory / 'sitecustomize.py'
+        sitecustomize.write_text(
+            "import builtins\n"
+            "import importlib\n"
             "import os\n"
-            "import atexit\n"
-            "import ctypes\n"
-            "import torch\n"
-            "import onnxruntime as ort\n"
-            "_libc = ctypes.CDLL(None)\n"
-            "_libc.printf.argtypes = [ctypes.c_char_p]\n"
-            "_libc.printf.restype = ctypes.c_int\n"
-            "_libc.fprintf.argtypes = [ctypes.c_void_p, ctypes.c_char_p]\n"
-            "_libc.fprintf.restype = ctypes.c_int\n"
-            "_libc.fflush.argtypes = [ctypes.c_void_p]\n"
-            "_libc.fflush.restype = ctypes.c_int\n"
-            "_libc.setvbuf.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]\n"
-            "_libc.setvbuf.restype = ctypes.c_int\n"
-            "_native_stderr = ctypes.c_void_p.in_dll(_libc, 'stderr')\n"
-            "_native_stderr_buffer = ctypes.create_string_buffer(4096)\n"
-            "assert _libc.setvbuf(_native_stderr, _native_stderr_buffer, 0, len(_native_stderr_buffer)) == 0\n"
-            "def _flush_native_buffers_at_exit():\n"
-            "    _libc.fflush(None)\n"
-            "atexit.register(_flush_native_buffers_at_exit)\n"
-            "_real_export = torch.onnx.export\n"
-            "def _noisy_export(*args, **kwargs):\n"
-            "    print('PYTHON_STREAM_SENTINEL')\n"
-            "    print('TENSOR_VALUE_SENTINEL')\n"
-            "    os.write(2, b'FD_STREAM_SENTINEL ARRAY_VALUE_SENTINEL\\n')\n"
-            "    _libc.printf(b'C_STDOUT_BUFFERED_SENTINEL')\n"
-            "    _libc.fprintf(_native_stderr, b'C_STDERR_BUFFERED_SENTINEL')\n"
-            "    return _real_export(*args, **kwargs)\n"
-            "torch.onnx.export = _noisy_export\n"
-            "_real_session = ort.InferenceSession\n"
-            "_session_count = [0]\n"
-            "class _SessionProxy:\n"
-            "    def __init__(self, *args, **kwargs):\n"
-            "        self.kind = 'prefill' if _session_count[0] == 0 else 'decode'\n"
-            "        _session_count[0] += 1\n"
-            "        self.inner = _real_session(*args, **kwargs)\n"
-            "    def __getattr__(self, name):\n"
-            "        return getattr(self.inner, name)\n"
-            "    def run(self, *args, **kwargs):\n"
-            "        outputs = self.inner.run(*args, **kwargs)\n"
-            "        if os.environ.get('LFG_TEST_FAIL_PREFILL') == '1' and self.kind == 'prefill':\n"
-            "            outputs[0] = outputs[0] + 1.0\n"
-            "        return outputs\n"
-            "ort.InferenceSession = _SessionProxy\n",
+            "import sys\n"
+            "_original_import = builtins.__import__\n"
+            "_instrumented = {'torch': False, 'onnxruntime': False}\n"
+            "_failure_proxy_applied = [False]\n"
+            "def _record_receipt(event):\n"
+            "    if event not in ('boundary_verified', 'noise_wrapper_executed', 'failure_proxy_applied', 'native_atexit_flush_succeeded', 'native_atexit_flush_failed'):\n"
+            "        raise RuntimeError('invalid synthetic receipt event')\n"
+            "    receipt_path = os.environ.get('LFG_TEST_RECEIPT_PATH')\n"
+            "    if not receipt_path:\n"
+            "        raise RuntimeError('synthetic receipt path unavailable')\n"
+            "    descriptor = os.open(receipt_path, os.O_WRONLY | os.O_APPEND | getattr(os, 'O_NOFOLLOW', 0))\n"
+            "    try:\n"
+            "        data = (event + '\\n').encode('ascii')\n"
+            "        if os.fstat(descriptor).st_size + len(data) > 256:\n"
+            "            raise RuntimeError('synthetic receipt size limit')\n"
+            "        if os.write(descriptor, data) != len(data):\n"
+            "            raise RuntimeError('short synthetic receipt write')\n"
+            "    finally:\n"
+            "        os.close(descriptor)\n"
+            "def _require_cli_boundary():\n"
+            "    main_module = sys.modules.get('__main__')\n"
+            "    if main_module is None or main_module.__dict__.get('_CLI_OUTPUT_BOUNDARY_READY') is not True:\n"
+            "        raise RuntimeError('synthetic instrumentation ran before CLI output boundary')\n"
+            "def _install_native_noise():\n"
+            "    import atexit\n"
+            "    import ctypes\n"
+            "    libc = ctypes.CDLL(None)\n"
+            "    libc.printf.argtypes = [ctypes.c_char_p]\n"
+            "    libc.printf.restype = ctypes.c_int\n"
+            "    libc.fprintf.argtypes = [ctypes.c_void_p, ctypes.c_char_p]\n"
+            "    libc.fprintf.restype = ctypes.c_int\n"
+            "    libc.fflush.argtypes = [ctypes.c_void_p]\n"
+            "    libc.fflush.restype = ctypes.c_int\n"
+            "    libc.setvbuf.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]\n"
+            "    libc.setvbuf.restype = ctypes.c_int\n"
+            "    native_stderr = ctypes.c_void_p.in_dll(libc, 'stderr')\n"
+            "    native_stderr_buffer = ctypes.create_string_buffer(4096)\n"
+            "    if libc.setvbuf(native_stderr, native_stderr_buffer, 0, len(native_stderr_buffer)) != 0:\n"
+            "        raise RuntimeError('synthetic stderr buffering setup failed')\n"
+            "    def flush_native_buffers_at_exit():\n"
+            "        if libc.fflush(None) != 0:\n"
+            "            _record_receipt('native_atexit_flush_failed')\n"
+            "            return\n"
+            "        _record_receipt('native_atexit_flush_succeeded')\n"
+            "    atexit.register(flush_native_buffers_at_exit)\n"
+            "    return libc, native_stderr, native_stderr_buffer\n"
+            "def _patch_torch(torch, native_noise):\n"
+            "    _require_cli_boundary()\n"
+            "    sys.modules[__name__]._native_noise_state = native_noise\n"
+            "    _libc, _native_stderr, _native_stderr_buffer = native_noise\n"
+            "    torch_onnx = importlib.import_module('torch.onnx')\n"
+            "    real_export = torch_onnx.export\n"
+            "    def noisy_export(*args, **kwargs):\n"
+            "        print('PYTHON_STREAM_SENTINEL')\n"
+            "        print('TENSOR_VALUE_SENTINEL')\n"
+            "        fd_payload = b'FD_STREAM_SENTINEL ARRAY_VALUE_SENTINEL\\n'\n"
+            "        if os.write(2, fd_payload) != len(fd_payload):\n"
+            "            raise RuntimeError('synthetic fd sentinel write failed')\n"
+            "        stdout_native_count = _libc.printf(b'C_STDOUT_BUFFERED_SENTINEL')\n"
+            "        if stdout_native_count != len(b'C_STDOUT_BUFFERED_SENTINEL'):\n"
+            "            raise RuntimeError('synthetic native stdout enqueue failed')\n"
+            "        stderr_native_count = _libc.fprintf(_native_stderr, b'C_STDERR_BUFFERED_SENTINEL')\n"
+            "        if stderr_native_count != len(b'C_STDERR_BUFFERED_SENTINEL'):\n"
+            "            raise RuntimeError('synthetic native stderr enqueue failed')\n"
+            "        _record_receipt('noise_wrapper_executed')\n"
+            "        return real_export(*args, **kwargs)\n"
+            "    torch_onnx.export = noisy_export\n"
+            "    torch.onnx = torch_onnx\n"
+            "def _patch_onnxruntime(ort):\n"
+            "    _require_cli_boundary()\n"
+            "    real_session = ort.InferenceSession\n"
+            "    session_count = [0]\n"
+            "    class SessionProxy:\n"
+            "        def __init__(self, *args, **kwargs):\n"
+            "            self.kind = 'prefill' if session_count[0] == 0 else 'decode'\n"
+            "            session_count[0] += 1\n"
+            "            self.inner = real_session(*args, **kwargs)\n"
+            "        def __getattr__(self, name):\n"
+            "            return getattr(self.inner, name)\n"
+            "        def run(self, *args, **kwargs):\n"
+            "            outputs = self.inner.run(*args, **kwargs)\n"
+            "            if os.environ.get('LFG_TEST_FAIL_PREFILL') == '1' and self.kind == 'prefill':\n"
+            "                outputs[0] = outputs[0] + 1.0\n"
+            "                if not _failure_proxy_applied[0]:\n"
+            "                    _record_receipt('failure_proxy_applied')\n"
+            "                    _failure_proxy_applied[0] = True\n"
+            "            return outputs\n"
+            "    ort.InferenceSession = SessionProxy\n"
+            "def _import_with_deferred_instrumentation(name, globals=None, locals=None, fromlist=(), level=0):\n"
+            "    if name == 'torch' and not _instrumented['torch']:\n"
+            "        _require_cli_boundary()\n"
+            "        _instrumented['torch'] = True\n"
+            "        _record_receipt('boundary_verified')\n"
+            "        native_noise = _install_native_noise()\n"
+            "        module = _original_import(name, globals, locals, fromlist, level)\n"
+            "        _patch_torch(module, native_noise)\n"
+            "        return module\n"
+            "    module = _original_import(name, globals, locals, fromlist, level)\n"
+            "    if name == 'onnxruntime' and not _instrumented['onnxruntime']:\n"
+            "        _require_cli_boundary()\n"
+            "        _instrumented['onnxruntime'] = True\n"
+            "        _patch_onnxruntime(module)\n"
+            "    return module\n"
+            "builtins.__import__ = _import_with_deferred_instrumentation\n",
             encoding='utf-8')
+        hook_source = sitecustomize.read_text(encoding='utf-8')
+        compile(hook_source, str(sitecustomize), 'exec')
+        self.assertNotIn('\nimport torch\n', hook_source)
+        self.assertNotIn('\nimport onnxruntime', hook_source)
 
-    def _run_actual_cli(self, script, checkpoint, config, source, output, site_directory, fail=False):
+    def _run_actual_cli(self, script, checkpoint, config, source, output, site_directory,
+                        receipt_path, fail=False):
         environment = os.environ.copy()
         prior_pythonpath = environment.get('PYTHONPATH')
         environment['PYTHONPATH'] = str(site_directory) + (
             os.pathsep + prior_pythonpath if prior_pythonpath else '')
+        environment['LFG_TEST_RECEIPT_PATH'] = str(receipt_path)
         if fail:
             environment['LFG_TEST_FAIL_PREFILL'] = '1'
         else:
@@ -1007,10 +1077,13 @@ class CachedExportFailureEvidenceTests(unittest.TestCase):
                 output = root / 'output'
                 site_directory = root / 'site'
                 site_directory.mkdir(mode=0o700)
+                receipt_path = root / 'injection-receipt.txt'
+                receipt_fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(receipt_fd)
                 self._write_noisy_sitecustomize(site_directory)
                 result = self._run_actual_cli(
                     subject.__file__, checkpoint, config_path, source, output,
-                    site_directory, fail=fail)
+                    site_directory, receipt_path, fail=fail)
                 combined = result.stdout + result.stderr
                 for sentinel in ('PRIVATE_PATH_SENTINEL', 'TOKEN_SENTINEL',
                                  'PYTHON_STREAM_SENTINEL', 'FD_STREAM_SENTINEL',
@@ -1020,18 +1093,31 @@ class CachedExportFailureEvidenceTests(unittest.TestCase):
                                  'Traceback', str(root),
                                  str(Path(subject.__file__).resolve().parent)):
                     self.assertNotIn(sentinel, combined)
+                receipt_raw = receipt_path.read_bytes()
+                self.assertLessEqual(len(receipt_raw), 256)
+                receipt = receipt_raw.decode('ascii').splitlines()
+                self.assertEqual(receipt.count('boundary_verified'), 1)
+                self.assertEqual(receipt.count('noise_wrapper_executed'), 2)
+                self.assertEqual(receipt.count('native_atexit_flush_succeeded'), 1)
+                self.assertNotIn('native_atexit_flush_failed', receipt)
                 if fail:
+                    self.assertEqual(receipt.count('failure_proxy_applied'), 1)
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(result.stdout, '')
                     status = json.loads(result.stderr)
                     self.assertEqual(status['status'], 'strict_parity_failed')
                     self.assertTrue(status['failure_report_written'])
                     report = (output / 'failure-report.json').read_text(encoding='utf-8')
+                    report_data = json.loads(report)
+                    self.assertEqual(report_data['context']['phase'], 'configured_length_prefill')
+                    self.assertEqual(report_data['context']['comparison'],
+                                     'onnx_prefill_vs_full_prefix_logits')
                     self.assertNotIn('PRIVATE_PATH_SENTINEL', report)
                     self.assertNotIn('TOKEN_SENTINEL', report)
                     self.assertFalse((output / 'manifest.json').exists())
                     self.assertFalse((output / 'measurement.json').exists())
                 else:
+                    self.assertNotIn('failure_proxy_applied', receipt)
                     self.assertEqual(result.returncode, 0)
                     status = json.loads(result.stdout)
                     self.assertEqual(status['status'], 'verified')
@@ -1111,6 +1197,23 @@ class SanitizedExporterStartupTests(unittest.TestCase):
             for sentinel in ('PRIVATE_SCRIPT_PATH_SENTINEL',
                              'PRIVATE_DEPENDENCY_PATH_SENTINEL', str(root), 'Traceback'):
                 self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def test_pre_script_sitecustomize_output_is_explicitly_outside_cli_boundary(self):
+        import export_owned_cached_onnx as subject
+
+        with tempfile.TemporaryDirectory() as directory:
+            site_directory = Path(directory)
+            (site_directory / 'sitecustomize.py').write_text(
+                "import os\n"
+                "os.write(2, b'PRE_SCRIPT_HOOK_SENTINEL\\n')\n",
+                encoding='utf-8')
+            result = self._run_cli(subject.__file__, ['--help'], pythonpath=site_directory)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('usage: lfg-export-owned-cached-onnx', result.stdout)
+            # sitecustomize runs before script code; this line demonstrates the
+            # documented limit and is deliberately separate from in-boundary
+            # privacy assertions in the real-export subprocess test.
+            self.assertEqual(result.stderr, 'PRE_SCRIPT_HOOK_SENTINEL\n')
 
     @unittest.skipUnless(os.name == 'posix', 'closing a pipe reader is POSIX-specific')
     def test_help_returns_nonzero_when_caller_closes_status_reader(self):
