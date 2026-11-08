@@ -209,8 +209,11 @@ def parse_response(raw: str | bytes, selected: Iterable[dict[str, str]], taxonom
         abstain = value.get("abstain")
         if type(abstain) is not bool:
             return result("invalid")
-        extensions = value.get("extensions", {})
-        if not isinstance(extensions, dict) or len(_canonical_bytes(extensions)) > max_extension_bytes:
+        extensions_present = "extensions" in value
+        extensions = value["extensions"] if extensions_present else {}
+        if extensions_present and (
+                not isinstance(extensions, dict)
+                or len(_canonical_bytes(extensions)) > max_extension_bytes):
             return result("invalid")
         decisions = value.get("decisions")
         if not isinstance(decisions, list) or len(decisions) > len(columns):
@@ -229,9 +232,26 @@ def parse_response(raw: str | bytes, selected: Iterable[dict[str, str]], taxonom
             return result("invalid")
         if abstain:
             return result("abstain", private_extensions=extensions,
-                          extensions_present="extensions" in value)
+                          extensions_present=extensions_present)
         return result("answered", parsed, private_extensions=extensions,
-                      extensions_present="extensions" in value)
+                      extensions_present=extensions_present)
     except (UnicodeError, json.JSONDecodeError, ContractError, TypeError, ValueError,
             RecursionError, OverflowError):
         return result("invalid")
+
+
+def is_refusal_response(raw: str | bytes, *, max_response_bytes: int = MAX_RESPONSE_BYTES) -> bool:
+    """Recognize the legacy model refusal envelope without retaining its text."""
+    if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= MAX_RESPONSE_BYTES:
+        return False
+    try:
+        payload = raw.encode("utf-8") if isinstance(raw, str) else raw
+        if not isinstance(payload, bytes) or len(payload) > max_response_bytes:
+            return False
+        value = json.loads(payload.decode("utf-8", errors="strict"),
+                           object_pairs_hook=_pairs_no_duplicates,
+                           parse_constant=_reject_constant)
+        return isinstance(value, dict) and (bool(value.get("refusal")) or value.get("refused") is True)
+    except (UnicodeError, json.JSONDecodeError, ContractError, TypeError, ValueError,
+            RecursionError, OverflowError):
+        return False

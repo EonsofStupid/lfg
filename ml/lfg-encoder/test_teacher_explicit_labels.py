@@ -67,6 +67,33 @@ class ExplicitLabelContractTests(unittest.TestCase):
         self.assertEqual(parsed.private_extensions(), {"trace_id": "opaque-1"})
         self.assertEqual(parsed["decisions"], without_extensions["decisions"])
 
+    def test_absent_extensions_are_valid_at_zero_and_one_byte_budgets(self):
+        for limit in (0, 1):
+            for abstain in (False, True):
+                with self.subTest(limit=limit, abstain=abstain):
+                    raw = response([], abstain=True) if abstain else response([])
+                    parsed = contract.parse_response(raw, SELECTED, TAXONOMY,
+                                                     max_extension_bytes=limit)
+                    self.assertEqual(parsed["status"], "abstain" if abstain else "answered")
+                    self.assertFalse(parsed["extensions_present"])
+                    self.assertEqual(parsed.private_extensions(), {})
+            present_empty = response([], extensions={})
+            parsed = contract.parse_response(present_empty, SELECTED, TAXONOMY,
+                                             max_extension_bytes=limit)
+            self.assertEqual(parsed["status"], "invalid")
+            self.assertFalse(parsed["extensions_present"])
+
+    def test_present_empty_extensions_require_two_bytes_and_remain_distinct(self):
+        absent = contract.parse_response(response([]), SELECTED, TAXONOMY,
+                                         max_extension_bytes=2)
+        present = contract.parse_response(response([], extensions={}), SELECTED, TAXONOMY,
+                                          max_extension_bytes=2)
+        self.assertEqual(absent["status"], "answered")
+        self.assertFalse(absent["extensions_present"])
+        self.assertEqual(present["status"], "answered")
+        self.assertTrue(present["extensions_present"])
+        self.assertEqual(present.private_extensions(), {})
+
     def test_nested_extension_is_private_by_default_and_retrieval_is_detached(self):
         sentinel = "NESTED-PRIVATE-SENTINEL"
         extensions = {"metadata": {"items": ["safe-name", {"opaque": sentinel}]}}
@@ -243,6 +270,8 @@ class ExplicitLabelContractTests(unittest.TestCase):
         parsed = contract.parse_response(response([], extensions={"x": "long-value"}),
                                          SELECTED, TAXONOMY, max_extension_bytes=2)
         self.assertEqual(parsed["status"], "invalid")
+        self.assertEqual([decision["value"] for decision in parsed["decisions"]],
+                         ["unknown"] * len(SELECTED))
         with self.assertRaises(contract.ContractError):
             contract.parse_response(response(), SELECTED, TAXONOMY, outcome="teacher_says_so")
         with self.assertRaises(contract.ContractError):

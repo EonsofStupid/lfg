@@ -670,6 +670,16 @@ def _schema_request(config: dict[str, Any], label_schema: dict[str, Any], screen
     return (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _explicit_schema_request(config: dict[str, Any], label_schema: dict[str, Any], prompt: str) -> bytes:
+    """Build the same bounded local-runtime request around an operator contract."""
+    request = {"model": config["model_name"], "messages": [{"role": "user", "content": prompt}],
+        "format": label_schema, "stream": False, "keep_alive": config["keep_alive"],
+        "options": {"temperature": config["temperature"], "num_ctx": config["num_ctx"],
+            "num_predict": config["num_predict"], "seed": config["seed"], "top_k": config["top_k"],
+            "top_p": config["top_p"], "repeat_penalty": config["repeat_penalty"]}}
+    return (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def _stats(values: list[float | None]) -> dict[str, Any]:
     observed = [value for value in values if type(value) in (int, float) and math.isfinite(value)]
     if not observed:
@@ -1033,6 +1043,63 @@ def _prediction_http(config: dict[str, Any], request: bytes, labels: set[str]) -
     content = message.get("content") if isinstance(message, dict) else None
     outcome, prediction = parse_prediction(content, envelope.get("done"), envelope.get("done_reason"), labels)
     return outcome, prediction, elapsed
+
+
+def _prediction_http_explicit(config: dict[str, Any], request: bytes, selected: list[dict[str, str]],
+                              taxonomy_sha256: str, parser: Any,
+                              max_extension_bytes: int | None = None
+                              ) -> tuple[str, dict[tuple[str, str], str] | None, float, bool, dict[str, Any]]:
+    """Bounded explicit-label HTTP path; parser is the separately pinned pure contract."""
+    absent = (False, {})
+
+    def failure(state: str, elapsed_ms: float) -> tuple[str, None, float, bool, dict[str, Any]]:
+        return state, None, elapsed_ms, absent[0], absent[1]
+
+    started = time.monotonic()
+    status, raw = _http_call(config, request)
+    elapsed = (time.monotonic() - started) * 1000
+    if status != 200:
+        return failure("http_error", elapsed)
+    envelope = _json(raw, "model response")
+    if not isinstance(envelope, dict):
+        return failure("malformed", elapsed)
+    if envelope.get("model") != config["model_name"]:
+        return failure("identity_mismatch", elapsed)
+    if envelope.get("done") is not True:
+        return failure("incomplete", elapsed)
+    message = envelope.get("message")
+    if not isinstance(message, dict):
+        return failure("malformed", elapsed)
+    reason = envelope.get("done_reason")
+    if reason == "length":
+        return failure("truncated", elapsed)
+    if reason not in (None, "stop", "eos"):
+        return failure("incomplete", elapsed)
+    refusal = message.get("refusal")
+    if refusal is not None and refusal is not False and refusal != "":
+        return failure("refusal", elapsed)
+    content = message.get("content")
+    if not isinstance(content, str):
+        return failure("malformed", elapsed)
+    if parser.is_refusal_response(content, max_response_bytes=config["max_response_bytes"]):
+        return failure("refusal", elapsed)
+    parsed = parser.parse_response(content, selected, taxonomy_sha256,
+                                   max_response_bytes=min(config["max_response_bytes"],
+                                                           parser.MAX_RESPONSE_BYTES),
+                                   max_extension_bytes=(parser.MAX_EXTENSION_BYTES if max_extension_bytes is None
+                                                        else max_extension_bytes))
+    state = parsed["status"]
+    if state == "answered":
+        values = {}
+        for decision in parsed["decisions"]:
+            identity = (decision["field"], decision["label"])
+            values[identity] = decision["value"]
+        return "answered", values, elapsed, parsed["extensions_present"], parsed.private_extensions()
+    if state == "abstain":
+        return "abstain", None, elapsed, parsed["extensions_present"], parsed.private_extensions()
+    if state in {"truncated", "incomplete", "refusal"}:
+        return failure(state, elapsed)
+    return failure("malformed", elapsed)
 
 
 def _copy_verified_artifact(config: dict[str, Any], receipt: dict[str, Any]) -> dict[str, Any]:

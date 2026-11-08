@@ -788,6 +788,7 @@ class OutputLeaseTests(unittest.TestCase):
 class DurableProgressTests(unittest.TestCase):
     def _event(self, status="answered"):
         source = row()
+        source["targets"][1] = 1
         positives = ["intents:build.software"] if status == "answered" else None
         elapsed = 1.0 if status in {"answered", "abstain", "malformed", "invalid_schema", "refusal", "truncated"} else None
         with mock.patch.object(adapter, "_request", return_value=b"fixture"):
@@ -1080,7 +1081,8 @@ class DurableProgressTests(unittest.TestCase):
                 "proposal_config_identity_sha256": adapter._proposal_config_identity_sha(cfg),
                 "comparison_config_sha256": "6" * 64,
                 "adapter_code_sha256": adapter._sha(Path(adapter.__file__).read_bytes()),
-                "comparator_code_sha256": adapter._sha(Path(adapter.comparator.__file__).read_bytes())}
+                "comparator_code_sha256": adapter._sha(Path(adapter.comparator.__file__).read_bytes()),
+                "teacher_identity": adapter._teacher_wire_identity(cfg)}
             probe = {**original_probe, "runtime_boundary": {**stable_runtime, "server_pid": 22,
                 "network_namespace_inode": 222, "process_tree_rss_bytes": 120,
                 "process_tree_rss_scope": stable_runtime.get("process_tree_rss_scope",
@@ -1130,7 +1132,8 @@ class DurableProgressTests(unittest.TestCase):
                     "selected_row_ids_sha256": adapter._sha(json.dumps(selected_ids, separators=(",", ":")).encode()),
                     "selected_text_digests_sha256": adapter._sha(json.dumps([source["text_sha256"]], separators=(",", ":")).encode()),
                     "target_mask_sha256": adapter._sha(json.dumps([source["known_mask"]], separators=(",", ":")).encode()),
-                    "proposal_schema_sha256": adapter._sha(json.dumps(adapter.comparator.output_schema(labels), sort_keys=True, separators=(",", ":")).encode()),
+                    "proposal_schema_sha256": adapter._proposal_schema_digest(cfg),
+                    "teacher_identity": adapter._teacher_wire_identity(cfg),
                     "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
                     "progress_store_schema": adapter.PROGRESS_STORE_SCHEMA,
                     "progress_store_id_sha256": adapter._sha(adapter._canonical_json(checkpoint_binding).rstrip(b"\n")),
@@ -1429,6 +1432,432 @@ class DurableProgressTests(unittest.TestCase):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_explicit_prompt_slots_are_single_pass_and_inserted_text_stays_opaque(self):
+        source = row()
+        source["text"] = "body {identities} and {text} café"
+        columns = [{"field": "field {text} λ", "label": "label {identities} 雪"}]
+        config = {"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+            "teacher_prompt_contract": "{identities}::{text}::{identities}::{text}",
+            "selected_columns": columns, "taxonomy_sha256": "c" * 64,
+            "model_name": "fixture/model", "keep_alive": 0, "temperature": 0,
+            "num_ctx": 512, "num_predict": 64, "seed": 1, "top_k": 1,
+            "top_p": 1.0, "repeat_penalty": 1.0}
+        identities = adapter._canonical_json(columns).decode("utf-8").strip()
+        expected = f"{identities}::{source['text']}::{identities}::{source['text']}"
+        request = json.loads(adapter._request(config, [], source["text"], 8192))
+        self.assertEqual(request["messages"][0]["content"], expected)
+        self.assertIn('"field":"field {text} λ"', request["messages"][0]["content"])
+        self.assertIn("body {identities} and {text} café", request["messages"][0]["content"])
+        with self.assertRaisesRegex(adapter.ProposalError, "configured limit"):
+            compact_len = len(json.dumps(request, separators=(",", ":"),
+                ensure_ascii=False).encode("utf-8")) + 1
+            adapter._request(config, [], source["text"], compact_len - 1)
+
+    def test_explicit_tri_state_request_parser_event_and_checkpoint_binding(self):
+        source = row()
+        source["targets"][1] = 1
+        source["columns"].append({"field": "scope", "label": "repo-wide"})
+        source["targets"].append(None)
+        source["known_mask"].append(False)
+        source["weights"].append(0)
+        source["target_origins"].append("unknown")
+        source["target_reviewer_claims"].append(None)
+        for column in ({"field": "a:b", "label": "c"}, {"field": "a", "label": "b:c"}):
+            source["columns"].append(column)
+            source["targets"].append(None)
+            source["known_mask"].append(False)
+            source["weights"].append(0)
+            source["target_origins"].append("unknown")
+            source["target_reviewer_claims"].append(None)
+        taxonomy = "c" * 64
+        config = {"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+            "teacher_prompt_contract": "Return decisions for {identities}. Input: {text}",
+            "selected_columns": source["columns"], "taxonomy_sha256": taxonomy,
+            "model_name": "fixture/model", "keep_alive": 0, "temperature": 0,
+            "num_ctx": 512, "num_predict": 128, "seed": 1, "top_k": 1,
+            "top_p": 1.0, "repeat_penalty": 1.0, "max_response_bytes": 65536}
+        response = {"schema_version": adapter.explicit_labels.SCHEMA_VERSION,
+            "taxonomy_sha256": taxonomy,
+            "decisions": [{"field": "intents", "label": "build.software", "value": "positive"},
+                          {"field": "risks", "label": "sensitive-data", "value": "negative"}],
+            "abstain": False,
+            "extensions": {"private_sentinel_extension": "MUST_NOT_LEAK"}}
+        envelope = {"model": config["model_name"], "done": True, "done_reason": "stop",
+                    "message": {"content": json.dumps(response)}}
+        seen_request = []
+        def infer(body, _labels):
+            seen_request.append(json.loads(body))
+            return adapter.comparator._prediction_http_explicit(config, body, source["columns"],
+                                                                 taxonomy, adapter.explicit_labels)
+        with mock.patch.object(adapter, "_request", wraps=adapter._request):
+            with mock.patch.object(adapter.comparator, "_http_call", return_value=(200, json.dumps(envelope).encode())):
+                events, results, aborted, reason = adapter._worker_loop([source], source["columns"],
+                    config, infer, False, 65536)
+        self.assertFalse(aborted)
+        self.assertIsNone(reason)
+        request = seen_request[0]
+        self.assertEqual(request["format"], adapter.explicit_labels.build_response_schema(source["columns"], taxonomy))
+        self.assertIn(source["text"], request["messages"][0]["content"])
+        self.assertEqual(request["model"], config["model_name"])
+        identity = adapter._teacher_wire_identity(config)
+        result = results[0]
+        expected_states = {
+            adapter._identity_token("intents", "build.software"): "proposed_positive",
+            adapter._identity_token("risks", "sensitive-data"): "proposed_negative",
+            adapter._identity_token("scope", "repo-wide"): "unknown",
+            adapter._identity_token("a:b", "c"): "unknown",
+            adapter._identity_token("a", "b:c"): "unknown"}
+        self.assertEqual(f"{source['columns'][-2]['field']}:{source['columns'][-2]['label']}",
+                         f"{source['columns'][-1]['field']}:{source['columns'][-1]['label']}")
+        self.assertEqual(result["proposal_states"], expected_states)
+        self.assertEqual(result["conflict_labels"], [{"field": "risks", "label": "sensitive-data"}])
+        self.assertEqual(result["teacher_identity"], identity)
+        self.assertIn("MUST_NOT_LEAK", json.dumps(events))  # task-owned worker protocol only
+        self.assertNotIn("MUST_NOT_LEAK", json.dumps(results))
+        self.assertEqual(adapter._validate_progress_event(events[0], 0, source,
+                         source["columns"], False, identity), result)
+        with self.assertRaises(adapter.ProposalError):
+            adapter._validate_progress_event(events[0], 0, source, source["columns"], False,
+                {**identity, "prompt_sha256": "f" * 64})
+        with tempfile.TemporaryDirectory() as tmp:
+            progress_store = Path(tmp) / "task.teacher-progress"
+            checkpoint_binding = {"teacher_response_mode": identity["mode"],
+                "teacher_schema_sha256": identity["schema_sha256"],
+                "teacher_prompt_sha256": identity["prompt_sha256"],
+                "explicit_labels_module_sha256": identity["module_sha256"],
+                "model_name": "fixture/model", "model_manifest_sha256": "d" * 64,
+                "taxonomy_sha256": taxonomy, "selected_row_ids": [source["id"]]}
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True):
+                adapter._progress_store_create(progress_store, checkpoint_binding, 1_000_000, "a" * 64)
+                attempt = "b" * 32
+                adapter._progress_store_record_attempt(progress_store, attempt, [0], checkpoint_binding)
+                adapter._checkpoint_worker_event(progress_store, attempt, 0, 0, source, events[0],
+                    source["columns"], False, 1_000_000, identity,
+                    adapter.explicit_labels.MAX_EXTENSION_BYTES, checkpoint_binding)
+                ack = adapter._progress_ack(attempt, 0, events[0])
+                adapter._validate_progress_ack(ack, attempt, 0, events[0])
+                self.assertTrue((progress_store / "events.jsonl").is_file())
+                stored = json.loads((progress_store / "events.jsonl").read_text().splitlines()[0])
+                self.assertIn("private_extension_record", stored)
+                self.assertNotIn("MUST_NOT_LEAK", json.dumps(stored["event"]))
+                retrieved = adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                self.assertEqual(retrieved[0].private_extensions(),
+                                 {"private_sentinel_extension": "MUST_NOT_LEAK"})
+                empty_attempt = "c" * 32
+                empty_event = {**events[0], "private_extensions_present": True,
+                    "private_extensions_sha256": adapter._private_extension_sha256({}),
+                    "private_extensions": {}}
+                adapter._progress_store_record_attempt(progress_store, empty_attempt, [0], checkpoint_binding)
+                adapter._checkpoint_worker_event(progress_store, empty_attempt, 0, 0, source, empty_event,
+                    source["columns"], False, 1_000_000, identity,
+                    adapter.explicit_labels.MAX_EXTENSION_BYTES, checkpoint_binding)
+                absent_attempt = "e" * 32
+                absent_event = {**events[0], "private_extensions_present": False,
+                    "private_extensions_sha256": None, "private_extensions": {}}
+                adapter._progress_store_record_attempt(progress_store, absent_attempt, [0], checkpoint_binding)
+                adapter._checkpoint_worker_event(progress_store, absent_attempt, 0, 0, source, absent_event,
+                    source["columns"], False, 1_000_000, identity,
+                    adapter.explicit_labels.MAX_EXTENSION_BYTES, checkpoint_binding)
+                all_retrieved = adapter.read_private_teacher_extensions(
+                    progress_store, source["id"], checkpoint_binding)
+                self.assertTrue(all_retrieved[1].extensions_present())
+                self.assertEqual(all_retrieved[1].private_extensions(), {})
+                self.assertFalse(all_retrieved[2].extensions_present())
+                self.assertIsNone(all_retrieved[2].private_extensions())
+
+                original_log = (progress_store / "events.jsonl").read_bytes()
+                records = [json.loads(line) for line in original_log.splitlines()]
+                tampered = records[0]
+                private_record = tampered["private_extension_record"]
+                private_record["extensions_sha256"] = "0" * 64
+                private_base = {k: v for k, v in private_record.items() if k != "record_sha256"}
+                private_record["record_sha256"] = adapter._sha(adapter._canonical_json(private_base).rstrip(b"\n"))
+                outer_base = {k: v for k, v in tampered.items() if k != "record_sha256"}
+                tampered["record_sha256"] = adapter._sha(adapter._canonical_json(outer_base).rstrip(b"\n"))
+                records[0] = tampered
+                corrupted_log = b"".join(adapter._canonical_json(record) for record in records)
+                event_path = progress_store / "events.jsonl"
+                event_path.write_bytes(corrupted_log)
+                with self.assertRaises(adapter.ProposalError):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                event_path.write_bytes(original_log)
+
+                source_records = [json.loads(line) for line in original_log.splitlines()]
+                source_record = source_records[0]
+                source_record["event"]["result"]["source_identity"]["artifact_sha256"] = "f" * 64
+                source_base = {k: v for k, v in source_record.items() if k != "record_sha256"}
+                source_record["record_sha256"] = adapter._sha(adapter._canonical_json(source_base).rstrip(b"\n"))
+                source_records[0] = source_record
+                event_path.write_bytes(b"".join(adapter._canonical_json(record) for record in source_records))
+                with self.assertRaises(adapter.ProposalError):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                event_path.write_bytes(original_log)
+
+                state_records = [json.loads(line) for line in original_log.splitlines()]
+                state_record = state_records[0]
+                private_record = state_record["private_extension_record"]
+                private_record["extensions_present"] = False
+                private_base = {k: v for k, v in private_record.items() if k != "record_sha256"}
+                private_record["record_sha256"] = adapter._sha(adapter._canonical_json(private_base).rstrip(b"\n"))
+                state_base = {k: v for k, v in state_record.items() if k != "record_sha256"}
+                state_record["record_sha256"] = adapter._sha(adapter._canonical_json(state_base).rstrip(b"\n"))
+                state_records[0] = state_record
+                event_path.write_bytes(b"".join(adapter._canonical_json(record) for record in state_records))
+                with self.assertRaises(adapter.ProposalError):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                event_path.write_bytes(original_log)
+
+                with self.assertRaisesRegex(adapter.ProposalError, "duplicate"):
+                    event_path.write_bytes(original_log + original_log.splitlines(keepends=True)[0])
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                event_path.write_bytes(original_log)
+
+                ordinal_records = [json.loads(line) for line in original_log.splitlines()]
+                ordinal_record = ordinal_records[1]
+                private_record = ordinal_record["private_extension_record"]
+                private_record["worker_index"] = 1
+                private_base = {k: v for k, v in private_record.items() if k != "record_sha256"}
+                private_record["record_sha256"] = adapter._sha(adapter._canonical_json(private_base).rstrip(b"\n"))
+                outer_base = {k: v for k, v in ordinal_record.items() if k != "record_sha256"}
+                ordinal_record["record_sha256"] = adapter._sha(adapter._canonical_json(outer_base).rstrip(b"\n"))
+                ordinal_records[1] = ordinal_record
+                event_path.write_bytes(b"".join(adapter._canonical_json(record) for record in ordinal_records))
+                with self.assertRaisesRegex(adapter.ProposalError, "ordinal"):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                event_path.write_bytes(original_log)
+
+                attempt_path = progress_store / f"attempt-{attempt}.json"
+                original_attempt = attempt_path.read_bytes()
+                attempt_record = json.loads(original_attempt)
+                attempt_record["indices"] = []
+                attempt_base = {k: v for k, v in attempt_record.items() if k != "record_sha256"}
+                attempt_record["record_sha256"] = adapter._sha(adapter._canonical_json(attempt_base).rstrip(b"\n"))
+                attempt_path.write_bytes(adapter._canonical_json(attempt_record))
+                with self.assertRaises(adapter.ProposalError):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+                attempt_path.write_bytes(original_attempt)
+
+                truncated_log = original_log[:-1]
+                event_path.write_bytes(truncated_log)
+                with self.assertRaisesRegex(adapter.ProposalError, "truncated"):
+                    adapter.read_private_teacher_extensions(progress_store, source["id"], checkpoint_binding)
+
+    def test_explicit_extension_preflight_limits_and_realistic_row_capacity(self):
+        source = row()
+        config = {"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+            "teacher_prompt_contract": "{identities} {text}",
+            "selected_columns": source["columns"], "taxonomy_sha256": "c" * 64}
+        identity = adapter._teacher_wire_identity(config)
+        for limit in (*range(9), adapter.explicit_labels.MAX_EXTENSION_BYTES):
+            with self.subTest(limit=limit):
+                result = adapter._check_result_bounds([source], source["columns"],
+                    2_000_000_000, 2_000_000_000, identity, limit, "fixture:tag")
+                self.assertGreater(result["max_progress_record_bytes"], 0)
+                self.assertLessEqual(result["max_progress_record_bytes"],
+                                     adapter.PROGRESS_EVENT_MAX_BYTES)
+        zero_extension = adapter._check_result_bounds([source] * 598, source["columns"],
+            2_000_000_000, 2_000_000_000, identity, 0, "fixture:tag")
+        self.assertLess(zero_extension["progress_store_bytes"], adapter.PROGRESS_STORE_DEFAULT_BYTES)
+        long_model = adapter._check_result_bounds([source], source["columns"],
+            2_000_000_000, 2_000_000_000, identity, 0, "fixture:" + "x" * 400)
+        short_model = adapter._check_result_bounds([source], source["columns"],
+            2_000_000_000, 2_000_000_000, identity, 0, "fixture:tag")
+        self.assertGreater(long_model["progress_store_bytes"], short_model["progress_store_bytes"])
+
+        def infer(*_args):
+            return "answered", {("intents", "build.software"): "positive"}, 1.0, True, {"x": "x"}
+        with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+            events, *_ = adapter._worker_loop([source], source["columns"], config,
+                infer, False, 8192)
+        with mock.patch.object(adapter, "_progress_store_append") as append:
+            with self.assertRaisesRegex(adapter.ProposalError, "digest or size"):
+                adapter._checkpoint_worker_event(Path("unused"), "f" * 32, 0, 0,
+                    source, events[0], source["columns"], False, 1_000_000, identity,
+                    8, {"model_name": "fixture:tag", "model_manifest_sha256": "d" * 64,
+                        "taxonomy_sha256": "c" * 64})
+            append.assert_not_called()
+
+    def test_preflight_covers_serialized_explicit_events_records_and_acks(self):
+        source = row()
+        columns = [{"field": "inténts", "label": "build.雪"},
+                   {"field": "risks", "label": "sensitive-data"}]
+        source["columns"] = columns
+        source["targets"] = [1, 1]
+        source["known_mask"] = [True, True]
+        source["weights"] = [1, 1]
+        source["target_origins"] = ["reviewed", "reviewed"]
+        source["target_reviewer_claims"] = ["8" * 64, "9" * 64]
+        model_name = "fixture:tag"
+        config = {"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+            "teacher_prompt_contract": "{identities} {text}",
+            "selected_columns": columns, "taxonomy_sha256": "c" * 64}
+        identity = adapter._teacher_wire_identity(config)
+        checkpoint_binding = {"model_name": model_name, "model_manifest_sha256": "d" * 64,
+                              "taxonomy_sha256": "c" * 64}
+
+        def extension_for(limit):
+            if limit < 2:
+                return False, {}
+            if limit < 6:
+                return True, {}
+            if limit == 6:
+                return True, {"": 0}
+            return True, {"": "x" * (limit - 7)}
+
+        def verify_budget(limit, ext_present=None, ext_value=None, expect_exact=True):
+            present, extensions = extension_for(limit)
+            if ext_present is not None:
+                present, extensions = ext_present, ext_value
+            def infer(*_args):
+                decisions = {(column["field"], column["label"]): "negative" for column in columns}
+                return "answered", decisions, sys.float_info.max, present, extensions
+            with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+                events, results, aborted, _reason = adapter._worker_loop(
+                    [source], columns, config, infer, False, 8192)
+            self.assertFalse(aborted)
+            event = events[0]
+            adapter._validate_progress_event(event, 0, source, columns, False,
+                identity, limit)
+            line = (json.dumps(event, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":")) + "\n").encode("utf-8")
+            output = (json.dumps(results[0], sort_keys=True, ensure_ascii=False,
+                separators=(",", ":")) + "\n").encode("utf-8")
+            bound = adapter._check_result_bounds([source], columns, 2_000_000_000,
+                2_000_000_000, identity, limit, model_name)
+            if expect_exact:
+                self.assertEqual(bound["max_protocol_bytes"], len(line))
+                self.assertEqual(bound["max_output_bytes"], len(output))
+            else:
+                self.assertGreaterEqual(bound["max_protocol_bytes"], len(line))
+                self.assertGreaterEqual(bound["max_output_bytes"], len(output))
+            self.assertEqual(len(results[0]["conflict_labels"]), len(columns))
+
+            attempt_id = "a" * 32
+            private = adapter._private_extension_record(event, attempt_id, 0, 0,
+                source, identity, checkpoint_binding, limit)
+            public_event = {key: value for key, value in event.items()
+                            if key != "private_extensions"}
+            public_event["index"] = 0
+            record_base = {"schema_version": adapter.PROGRESS_EVENT_SCHEMA,
+                "attempt_id": attempt_id, "index": 0, "event": public_event,
+                "private_extension_record": private}
+            stored_record = {**record_base,
+                "record_sha256": adapter._sha(adapter._canonical_json(record_base).rstrip(b"\n"))}
+            record_bytes = len(adapter._canonical_json(stored_record))
+            if expect_exact:
+                self.assertEqual(bound["max_progress_record_bytes"], record_bytes)
+            else:
+                self.assertGreaterEqual(bound["max_progress_record_bytes"], record_bytes)
+            ack_bytes = len(adapter._canonical_json(adapter._progress_ack(attempt_id, 0, event)))
+            if expect_exact:
+                self.assertEqual(ack_bytes, bound["max_ack_bytes"])
+            else:
+                self.assertGreaterEqual(bound["max_ack_bytes"], ack_bytes)
+            self.assertLessEqual(ack_bytes, adapter.PROGRESS_ACK_MAX_BYTES)
+
+            tight = adapter._check_result_bounds([source], columns,
+                bound["max_output_bytes"], bound["max_protocol_bytes"], identity, limit, model_name)
+            self.assertEqual(tight["max_protocol_bytes"], bound["max_protocol_bytes"])
+            with self.assertRaisesRegex(adapter.ProposalError, "configured proposal or worker-protocol bounds"):
+                adapter._check_result_bounds([source], columns,
+                    bound["max_output_bytes"], bound["max_protocol_bytes"] - 1,
+                    identity, limit, model_name)
+            with self.assertRaisesRegex(adapter.ProposalError, "configured proposal or worker-protocol bounds"):
+                adapter._check_result_bounds([source], columns,
+                    bound["max_output_bytes"] - 1, bound["max_protocol_bytes"],
+                    identity, limit, model_name)
+            if expect_exact:
+                with mock.patch.object(adapter, "PROGRESS_ACK_MAX_BYTES", ack_bytes):
+                    adapter._check_result_bounds([source], columns, 2_000_000_000,
+                        2_000_000_000, identity, limit, model_name)
+                with mock.patch.object(adapter, "PROGRESS_ACK_MAX_BYTES", ack_bytes - 1):
+                    with self.assertRaisesRegex(adapter.ProposalError, "acknowledgment"):
+                        adapter._check_result_bounds([source], columns, 2_000_000_000,
+                            2_000_000_000, identity, limit, model_name)
+                with mock.patch.object(adapter, "PROGRESS_EVENT_MAX_BYTES", record_bytes):
+                    adapter._check_result_bounds([source], columns, 2_000_000_000,
+                        2_000_000_000, identity, limit, model_name)
+                with mock.patch.object(adapter, "PROGRESS_EVENT_MAX_BYTES", record_bytes - 1):
+                    with self.assertRaisesRegex(adapter.ProposalError, "checkpoint event"):
+                        adapter._check_result_bounds([source], columns, 2_000_000_000,
+                            2_000_000_000, identity, limit, model_name)
+
+        for limit in (*range(9), adapter.explicit_labels.MAX_EXTENSION_BYTES):
+            with self.subTest(limit=limit):
+                verify_budget(limit)
+        escaped_nested = {"control": "\x00\n\r\t\b\f\u0001", "nested": [
+            {"unicode": "café 雪 🧪"}]}
+        escaped_size = len(adapter.explicit_labels._canonical_bytes(escaped_nested))
+        verify_budget(max(escaped_size, 32), True, escaped_nested, expect_exact=False)
+
+    def test_explicit_tri_state_never_uses_missing_values_as_negative(self):
+        source = row()
+        config = {"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+            "teacher_prompt_contract": "Classify {identities} from {text}",
+            "selected_columns": source["columns"], "taxonomy_sha256": "c" * 64}
+        identity = adapter._teacher_wire_identity(config)
+        with mock.patch.object(adapter, "_request", return_value=b"synthetic"):
+            events, results, _aborted, _reason = adapter._worker_loop([source], source["columns"], config,
+                lambda *_: ("answered", {("intents", "build.software"): "positive"}), False, 8192)
+        states = results[0]["proposal_states"]
+        self.assertEqual(states[adapter._identity_token("risks", "sensitive-data")], "unknown")
+        self.assertEqual(results[0]["teacher_identity"], identity)
+        self.assertEqual(adapter._validate_progress_event(events[0], 0, source,
+                         source["columns"], False, identity), results[0])
+
+    def test_explicit_http_path_fails_closed_on_model_lifecycle_and_refusal(self):
+        selected = row()["columns"]
+        config = {"model_name": "fixture/model", "max_response_bytes": 4096}
+        valid_content = json.dumps({"schema_version": adapter.explicit_labels.SCHEMA_VERSION,
+            "taxonomy_sha256": "c" * 64, "decisions": [], "abstain": True})
+        envelopes = [
+            ("incomplete", {"model": "fixture/model", "done": False, "message": {"content": valid_content}}),
+            ("truncated", {"model": "fixture/model", "done": True, "done_reason": "length", "message": {"content": valid_content}}),
+            ("incomplete", {"model": "fixture/model", "done": True, "done_reason": "error", "message": {"content": valid_content}}),
+            ("identity_mismatch", {"model": "other/model", "done": True, "done_reason": "stop", "message": {"content": valid_content}}),
+            ("refusal", {"model": "fixture/model", "done": True, "done_reason": "stop", "message": {"content": '{"refusal":"MUST_NOT_LEAK"}'}}),
+        ]
+        request = b"{}"
+        for expected, envelope in envelopes:
+            with self.subTest(expected=expected), mock.patch.object(adapter.comparator, "_http_call",
+                    return_value=(200, json.dumps(envelope).encode("utf-8"))):
+                status, states, _elapsed, present, extensions = adapter.comparator._prediction_http_explicit(
+                    config, request, selected, "c" * 64, adapter.explicit_labels)
+            self.assertEqual(status, expected)
+            self.assertIsNone(states)
+            self.assertFalse(present)
+            self.assertEqual(extensions, {})
+            self.assertNotIn("MUST_NOT_LEAK", json.dumps({"status": status, "states": states}))
+
+    def test_explicit_http_accepts_absent_extensions_with_zero_and_one_byte_budgets(self):
+        selected = row()["columns"]
+        config = {"model_name": "fixture/model", "max_response_bytes": 4096}
+        request = b"{}"
+        for limit in (0, 1):
+            for abstain in (False, True):
+                body = {"schema_version": adapter.explicit_labels.SCHEMA_VERSION,
+                    "taxonomy_sha256": "c" * 64,
+                    "decisions": [] if abstain else [{"field": selected[0]["field"],
+                        "label": selected[0]["label"], "value": "positive"}],
+                    "abstain": abstain}
+                envelope = {"model": config["model_name"], "done": True,
+                    "done_reason": "stop", "message": {"content": json.dumps(body)}}
+                with self.subTest(limit=limit, abstain=abstain), mock.patch.object(
+                        adapter.comparator, "_http_call",
+                        return_value=(200, json.dumps(envelope).encode("utf-8"))):
+                    status, decisions, _elapsed, present, extensions = adapter.comparator._prediction_http_explicit(
+                        config, request, selected, "c" * 64, adapter.explicit_labels, limit)
+                self.assertEqual(status, "abstain" if abstain else "answered")
+                self.assertFalse(present)
+                self.assertEqual(extensions, {})
+                if abstain:
+                    self.assertIsNone(decisions)
+                else:
+                    self.assertEqual(decisions[(selected[0]["field"], selected[0]["label"])], "positive")
+
     def test_worker_streams_each_row_event_before_starting_next_inference(self):
         first = row("a" * 64)
         second = row("b" * 64)
@@ -1550,8 +1979,10 @@ class WorkerProtocolTests(unittest.TestCase):
     def test_isolated_python_bootstrap_imports_digest_pinned_sibling_module(self):
         adapter_path = Path(adapter.__file__).resolve()
         comparator_path = Path(adapter.comparator.__file__).resolve()
+        explicit_path = Path(adapter.explicit_labels.__file__).resolve()
         config = {"worker_code_sha256": adapter._sha(adapter_path.read_bytes()),
-                  "comparator_code_sha256": adapter._sha(comparator_path.read_bytes())}
+                  "comparator_code_sha256": adapter._sha(comparator_path.read_bytes()),
+                  "teacher_binding": {"explicit_labels_module_sha256": adapter._sha(explicit_path.read_bytes())}}
         raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "worker-config.json"
@@ -1566,14 +1997,17 @@ class WorkerProtocolTests(unittest.TestCase):
     def test_isolated_bootstrap_rejects_tampered_config_adapter_and_comparator(self):
         original_adapter = Path(adapter.__file__).read_bytes()
         original_comparator = Path(adapter.comparator.__file__).read_bytes()
-        for target in ("config", "adapter", "comparator"):
+        original_explicit = Path(adapter.explicit_labels.__file__).read_bytes()
+        for target in ("config", "adapter", "comparator", "explicit_labels"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                a_path, q_path, c_path = root / "train_teacher_proposals.py", root / "compare_local_12b.py", root / "config.json"
+                a_path, q_path, e_path, c_path = root / "train_teacher_proposals.py", root / "compare_local_12b.py", root / "teacher_explicit_labels.py", root / "config.json"
                 a_path.write_bytes(original_adapter)
                 q_path.write_bytes(original_comparator)
+                e_path.write_bytes(original_explicit)
                 config = {"worker_code_sha256": adapter._sha(original_adapter),
-                          "comparator_code_sha256": adapter._sha(original_comparator)}
+                          "comparator_code_sha256": adapter._sha(original_comparator),
+                          "teacher_binding": {"explicit_labels_module_sha256": adapter._sha(original_explicit)}}
                 config_raw = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
                 c_path.write_bytes(config_raw)
                 expected = adapter._sha(config_raw)
@@ -1581,8 +2015,10 @@ class WorkerProtocolTests(unittest.TestCase):
                     c_path.write_bytes(config_raw + b" ")
                 elif target == "adapter":
                     a_path.write_bytes(original_adapter + b"\n# changed")
-                else:
+                elif target == "comparator":
                     q_path.write_bytes(original_comparator + b"\n# changed")
+                else:
+                    e_path.write_bytes(original_explicit + b"\n# changed")
                 result = subprocess.run([sys.executable, "-I", "-c", adapter._isolated_worker_bootstrap(),
                                          str(a_path), str(c_path), expected],
                                         capture_output=True, text=True, timeout=20)
@@ -1765,6 +2201,32 @@ class WorkerProtocolTests(unittest.TestCase):
 
 
 class CoordinatorEntryTests(unittest.TestCase):
+    def test_explicit_configuration_requires_nonexhaustive_prompt_and_keeps_extensions_inert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            cfg = {"schema_version": adapter.SCHEMA, "revision": "explicit-v1",
+                "export_dir": "private-export", "export_manifest_sha256": "a" * 64,
+                "comparison_config": "comparison.json", "output_dir": "output",
+                "selection": {"row_ids": []}, "max_rows": 2,
+                "assume_exhaustive_labels": True, "max_output_bytes": 100_000,
+                "max_prompt_bytes": 8192, "max_protocol_bytes": 1_000_000,
+                "max_export_bytes": 100_000, "export_config_sha256": "b" * 64,
+                "export_train_sha256": "c" * 64, "taxonomy_sha256": "d" * 64,
+                "selected_columns": row()["columns"], "screening_policy_sha256": "3" * 64,
+                "screening_code_sha256": "4" * 64,
+                "teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+                "teacher_prompt_contract": "Classify {identities} from {text}",
+                "future_extension": {"must_remain_inert": True}}
+            with mock.patch.object(adapter, "_private_file", return_value=True):
+                path.write_text(json.dumps(cfg), encoding="utf-8")
+                with self.assertRaisesRegex(adapter.ProposalError, "non-exhaustive"):
+                    adapter.load_config(path)
+                cfg["assume_exhaustive_labels"] = False
+                path.write_text(json.dumps(cfg), encoding="utf-8")
+                loaded, _digest = adapter.load_config(path)
+            self.assertEqual(loaded["teacher_response_mode"], adapter.explicit_labels.SCHEMA_VERSION)
+            self.assertEqual(loaded["future_extension"], {"must_remain_inert": True})
+
     def cfg_and_comp(self, root: Path):
         masked._secure_private_path(root, is_directory=True)
         masked._verify_owner_private_access(root, is_directory=True)
@@ -1782,7 +2244,8 @@ class CoordinatorEntryTests(unittest.TestCase):
         (root / "comparison.json").write_text("{}", encoding="utf-8")
         return cfg, comp
 
-    def _full_fake_coordinator(self, scenario: str, bad_model_identity: bool = False):
+    def _full_fake_coordinator(self, scenario: str, bad_model_identity: bool = False,
+                               explicit: bool = False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "owner-private"
             root.mkdir()
@@ -1830,6 +2293,10 @@ class CoordinatorEntryTests(unittest.TestCase):
                 "max_protocol_bytes": 1_000_000, "max_progress_store_bytes": 100_000_000,
                 "max_manifest_bytes": 1_000_000, "assume_exhaustive_labels": False,
                 "comparison_config": str(comparison_path), "output_dir": str(output_parent / "run")}
+            if explicit:
+                cfg.update({"teacher_response_mode": adapter.explicit_labels.SCHEMA_VERSION,
+                    "teacher_prompt_contract": "Classify {identities} from {text}",
+                    "max_teacher_extension_bytes": 2048})
             comp = {"model_name": "fixture/model", "server_binary_sha256": "a" * 64,
                 "server_version": "fixture-server", "expected_manifest_sha256": "4" * 64,
                 "remote_acquisition_receipt": {"synthetic": True}, "runtime_port": 11434,
@@ -1850,6 +2317,7 @@ class CoordinatorEntryTests(unittest.TestCase):
                 "max_manifest_bytes": 1_000_000,
                 "num_ctx": 256, "num_predict": 64, "temperature": 0.0,
                 "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.0,
+                "keep_alive": 0, "seed": 1,
                 "system_prompt": "{labels} {text}", "prompt_revision": "fake-v1"}
             host = {"hostname": "fake-worker", "architecture": "x86_64", "netns_inode": 900,
                 "memory_available_bytes": 1_000_000, "home_disk_free_bytes": 1_000_000,
@@ -1904,6 +2372,14 @@ class CoordinatorEntryTests(unittest.TestCase):
                         expected_count = self.process.initial_event_count + len(self.process.delivered_events)
                         if durable_count != expected_count:
                             raise AssertionError("ACK preceded durable event persistence")
+                        if explicit:
+                            saved_event = json.loads(events_path.read_text().splitlines()[-1])
+                            if "private_extension_record" not in saved_event:
+                                raise AssertionError("ACK preceded private extension persistence")
+                            if "END_TO_END_PRIVATE_SENTINEL" not in json.dumps(saved_event["private_extension_record"]):
+                                raise AssertionError("private extension was not durably bound before ACK")
+                            if "private_extensions" in saved_event["event"]:
+                                raise AssertionError("private extension leaked into public event")
                         self.process.acks.append(item["index"])
                         ack_log.append((self.process.index, item["index"], durable_count))
                     return len(raw)
@@ -1943,9 +2419,26 @@ class CoordinatorEntryTests(unittest.TestCase):
             def make_answer(record):
                 def infer(_request, _labels):
                     inference_ids.append(record["id"])
+                    if explicit:
+                        response = {"schema_version": adapter.explicit_labels.SCHEMA_VERSION,
+                            "taxonomy_sha256": cfg["taxonomy_sha256"],
+                            "decisions": [{"field": columns[0]["field"],
+                                "label": columns[0]["label"], "value": "positive"}],
+                            "abstain": False,
+                            "extensions": {"nested": ["END_TO_END_PRIVATE_SENTINEL", {"ok": True}]}}
+                        envelope = {"model": comp["model_name"], "done": True,
+                            "done_reason": "stop", "message": {"content": json.dumps(response)}}
+                        with mock.patch.object(adapter.comparator, "_http_call",
+                                return_value=(200, json.dumps(envelope).encode())):
+                            return adapter.comparator._prediction_http_explicit(worker_config, _request, columns,
+                                cfg["taxonomy_sha256"], adapter.explicit_labels,
+                                cfg["max_teacher_extension_bytes"])
                     return "answered", ["intents:build.software"], 1.0
-                with mock.patch.object(adapter, "_request", return_value=b"synthetic-request"):
-                    event = adapter._worker_loop([record], columns, {}, infer, False, 8192)[0][0]
+                worker_config = ({**comp, **cfg} if explicit else {})
+                request_context = (contextlib.nullcontext() if explicit else
+                    mock.patch.object(adapter, "_request", return_value=b"synthetic-request"))
+                with request_context:
+                    event = adapter._worker_loop([record], columns, worker_config, infer, False, 8192)[0][0]
                 return event
 
             def read_worker_line(process, _lines, _timeout):
@@ -1977,7 +2470,8 @@ class CoordinatorEntryTests(unittest.TestCase):
                         "worker_config_sha256": process.worker_config_sha,
                         "runtime_boundary": process.runtime,
                         "model_identity": {"reported_manifest_sha256": manifest_sha},
-                        "warmup": {"status": "completed"}, "resources_before": {"available": 9}}
+                        "warmup": {"status": "completed"}, "resources_before": {"available": 9},
+                        "teacher_identity": adapter._teacher_wire_identity(cfg)}
                     return process.ready
                 if process.payload is None:
                     raise AssertionError("controller requested a worker result before sending a payload")
@@ -1996,13 +2490,22 @@ class CoordinatorEntryTests(unittest.TestCase):
                     process.initial_event_count = len(store_events.read_bytes().splitlines())
                 event_ordinal = ordinal - 2
                 records = process.payload["records"]
-                if scenario == "prefix" and process.index == 1:
-                    if event_ordinal == 0:
+                if scenario in {"prefix", "complete_unverified"} and process.index == 1:
+                    if scenario == "prefix" and event_ordinal == 0:
                         event = make_answer(records[0])
-                    else:
+                    elif scenario == "prefix":
                         if process.acks != [0]:
                             raise AssertionError("second row was requested before first row ACK")
                         raise TimeoutError("synthetic process interruption after first durable event")
+                    elif event_ordinal < len(records):
+                        if event_ordinal and process.acks != list(range(event_ordinal)):
+                            raise AssertionError("next row was requested before prior ACK")
+                        event = make_answer(records[event_ordinal])
+                        event["index"] = event_ordinal
+                    else:
+                        if process.acks != list(range(len(records))):
+                            raise AssertionError("terminal interruption preceded durable row ACKs")
+                        raise TimeoutError("synthetic process interruption after all durable row events")
                 elif scenario == "abort" and process.index == 1:
                     if not process.events:
                         infer_count = 0
@@ -2121,15 +2624,34 @@ class CoordinatorEntryTests(unittest.TestCase):
                     self.assertNotIn("PRIVATE_SENTINEL", json.dumps(captured_payloads))
                     return
 
-                if scenario == "prefix":
+                if scenario in {"prefix", "complete_unverified"}:
                     with self.assertRaises(TimeoutError):
                         perform_run(False)
                     store = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True)
                     first_events = [json.loads(line) for line in (store / "events.jsonl").read_text().splitlines()]
-                    self.assertEqual([event["index"] for event in first_events], [0])
+                    self.assertEqual([event["index"] for event in first_events],
+                                     ([0, 1] if scenario == "complete_unverified" else [0]))
                     self.assertEqual(list(store.glob("terminal-*.json")), [])
                     self.assertFalse(Path(cfg["output_dir"]).exists())
                     result = perform_run(True)
+                    if scenario == "complete_unverified":
+                        self.assertEqual(result["status_counts"], {"answered": 2})
+                        final = Path(result["output_directory"])
+                        saved = json.loads((final / "manifest.json").read_text())
+                        self.assertEqual(saved["status"], "partial_aborted_ambiguous")
+                        self.assertFalse(saved["provenance"]["terminal_worker_result_verified"])
+                        self.assertEqual(saved["provenance"]["teacher_identity"],
+                                         adapter._teacher_wire_identity(cfg))
+                        self.assertEqual(saved["provenance"]["proposal_schema_sha256"],
+                                         adapter._proposal_schema_digest(cfg))
+                        if explicit:
+                            store = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True)
+                            binding_value = json.loads((store / "checkpoint.json").read_text())["binding"]
+                            retained = adapter.read_private_teacher_extensions(store, rows[0]["id"], binding_value)
+                            self.assertTrue(retained[0].extensions_present())
+                            self.assertEqual(retained[0].private_extensions(),
+                                {"nested": ["END_TO_END_PRIVATE_SENTINEL", {"ok": True}]})
+                        return
                     self.assertEqual(result["status_counts"], {"answered": 2})
                     self.assertEqual(captured_payloads,
                         [(0, [], True), (1, [rows[0]["id"], rows[1]["id"]], False),
@@ -2141,8 +2663,12 @@ class CoordinatorEntryTests(unittest.TestCase):
                     self.assertTrue(saved["provenance"]["terminal_worker_result_verified"])
                     self.assertEqual([item["row_id"] for item in proposals], [item["id"] for item in rows])
                     self.assertEqual(saved["counts"]["statuses"], {"answered": 2})
-                    self.assertEqual(proposals[0]["proposal_states"]["intents:build.software"], "proposed_positive")
-                    self.assertEqual(proposals[0]["proposal_states"]["risks:sensitive-data"], "unknown")
+                    first_key = (adapter._identity_token("intents", "build.software") if explicit
+                                 else "intents:build.software")
+                    second_key = (adapter._identity_token("risks", "sensitive-data") if explicit
+                                  else "risks:sensitive-data")
+                    self.assertEqual(proposals[0]["proposal_states"][first_key], "proposed_positive")
+                    self.assertEqual(proposals[0]["proposal_states"][second_key], "unknown")
                     self.assertEqual([item[1] for item in ack_log], [0, 0])
                     self.assertEqual([item[2] for item in ack_log], [1, 2])
                     attempts = [json.loads(path.read_text()) for path in store.glob("attempt-*.json")]
@@ -2155,6 +2681,14 @@ class CoordinatorEntryTests(unittest.TestCase):
                                           for process in (processes[0], processes[2])}), 2)
                     self.assertNotIn("PRIVATE_SENTINEL", (final / "manifest.json").read_text()
                         + (final / "proposals.jsonl").read_text())
+                    if explicit:
+                        self.assertNotIn("END_TO_END_PRIVATE_SENTINEL",
+                            (final / "manifest.json").read_text() + (final / "proposals.jsonl").read_text())
+                        store = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True)
+                        binding_value = json.loads((store / "checkpoint.json").read_text())["binding"]
+                        retained = adapter.read_private_teacher_extensions(store, rows[0]["id"], binding_value)
+                        self.assertEqual(retained[0].private_extensions(),
+                            {"nested": ["END_TO_END_PRIVATE_SENTINEL", {"ok": True}]})
                 else:
                     partial_result = perform_run(False)
                     partial = Path(partial_result["output_directory"])
@@ -2187,6 +2721,12 @@ class CoordinatorEntryTests(unittest.TestCase):
     def test_full_unleased_prefix_interruption_resume_uses_actual_transient_worker(self):
         self._full_fake_coordinator("prefix")
 
+    def test_explicit_full_controller_parser_checkpoint_ack_and_private_retrieval(self):
+        self._full_fake_coordinator("prefix", explicit=True)
+
+    def test_explicit_terminal_unverified_recovery_retains_provenance_and_extensions(self):
+        self._full_fake_coordinator("complete_unverified", explicit=True)
+
     def test_full_unleased_abort_resumes_to_linked_immutable_revision(self):
         self._full_fake_coordinator("abort")
 
@@ -2199,6 +2739,7 @@ class CoordinatorEntryTests(unittest.TestCase):
         probe = {"zero_row_probe": True, "host_before": {"hostname": "host"}}
         with tempfile.TemporaryDirectory() as tmp:
             cfg, comp = self.cfg_and_comp(Path(tmp))
+            comp["model_name"] = "fixture/model"
             calls = []
             def worker(*args, **kwargs):
                 calls.append((args, kwargs))
