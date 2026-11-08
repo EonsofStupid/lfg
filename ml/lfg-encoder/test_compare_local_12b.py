@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.server
+import io
 import json
 import os
 import shlex
@@ -18,6 +19,104 @@ TEST_MODEL = "fixture/model:development-tag"
 
 
 class ComparisonAdapterTests(unittest.TestCase):
+    def test_protocol_reader_has_fixed_queue_bound_and_kills_flooding_child(self):
+        stopped = threading.Event()
+        class FloodingProcess:
+            stdout = io.BytesIO((b'{"phase":"x"}\n') * 8)
+            def poll(self):
+                return None
+            def kill(self):
+                stopped.set()
+        lines = comparison._queue_protocol(FloodingProcess())
+        self.assertEqual(lines.maxsize, 4)
+        self.assertTrue(stopped.wait(3))
+        self.assertLessEqual(lines.qsize(), 4)
+
+    def test_windows_report_directory_resets_extra_explicit_ace_and_verifies_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.partial-fixture"
+            sid = "S-1-5-21-1-2-3-1001"
+            acl = (f"{path}\n  DOMAIN\\user:(OI)(CI)(F)\n  BUILTIN\\Administrators:(OI)(CI)(F)\n"
+                   "  NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n")
+            calls = []
+            def run(argv, **kwargs):
+                calls.append(argv)
+                if argv[:2] == ["whoami", "/user"]:
+                    return mock.Mock(stdout=f'"DOMAIN\\user","{sid}"\n')
+                if argv[:2] == ["icacls", str(path)] and "/reset" in argv:
+                    return mock.Mock(stdout="")
+                if argv[:2] == ["icacls", str(path)] and "/inheritance:r" in argv:
+                    return mock.Mock(stdout="")
+                if argv[:2] == ["icacls", str(path)]:
+                    return mock.Mock(stdout=acl)
+                if argv[0] == "powershell.exe":
+                    return mock.Mock(stdout=sid + "\n")
+                raise AssertionError(argv)
+            with mock.patch.object(comparison.os, "name", "nt"), \
+                 mock.patch.object(comparison.subprocess, "run", side_effect=run):
+                result = comparison._private_report_directory(path)
+            self.assertEqual(result, path)
+            self.assertTrue(any("/reset" in call for call in calls))
+            self.assertFalse(any("LogonSessionId" in str(call) for call in calls))
+
+    def test_windows_report_directory_fails_closed_on_owner_or_acl_verification_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.partial-fixture"
+            sid = "S-1-5-21-1-2-3-1001"
+            acl = (f"{path}\n  DOMAIN\\user:(OI)(CI)(F)\n  BUILTIN\\Administrators:(OI)(CI)(F)\n"
+                   "  NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n  NT AUTHORITY\\LogonSessionId_1_2:(RX)\n")
+            def run(argv, **kwargs):
+                if argv[:2] == ["whoami", "/user"]:
+                    return mock.Mock(stdout=f'"DOMAIN\\user","{sid}"\n')
+                if argv[0] == "icacls":
+                    return mock.Mock(stdout=acl)
+                if argv[0] == "powershell.exe":
+                    return mock.Mock(stdout="S-1-5-21-foreign\n")
+                raise AssertionError(argv)
+            with mock.patch.object(comparison.os, "name", "nt"), \
+                 mock.patch.object(comparison.subprocess, "run", side_effect=run):
+                with self.assertRaisesRegex(ValueError, "ACL is not restricted"):
+                    comparison._private_report_directory(path)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX report directory mode check")
+    def test_posix_report_directory_requires_owner_only_and_rejects_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private = root / "report.private"
+            private.mkdir(mode=0o700)
+            private.chmod(0o700)
+            self.assertTrue(comparison._verify_private_report_directory(private))
+
+            exposed = root / "report.exposed"
+            exposed.mkdir(mode=0o700)
+            exposed.chmod(0o750)
+            self.assertFalse(comparison._verify_private_report_directory(exposed))
+
+            link = root / "report.link"
+            link.symlink_to(private, target_is_directory=True)
+            self.assertFalse(comparison._verify_private_report_directory(link))
+            self.assertFalse(comparison._verify_private_report_directory(root / "missing"))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ACL check")
+    def test_windows_report_directory_has_only_verified_owner_system_and_admin_grants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logon_sid = comparison.subprocess.run(["whoami", "/logonid"], check=True,
+                capture_output=True, text=True, timeout=5, shell=False).stdout.strip()
+            self.assertTrue(logon_sid.startswith("S-1-5-5-"))
+            # Give the temporary parent an inheritable explicit logon-session
+            # RX grant to reproduce the extra ACE seen on the failed task path.
+            comparison.subprocess.run(["icacls", tmp, "/grant", f"*{logon_sid}:(OI)(CI)(RX)"],
+                check=True, capture_output=True, text=True, timeout=10, shell=False)
+            path = Path(tmp) / "report.partial-native"
+            comparison._private_report_directory(path)
+            self.assertTrue(comparison._verify_private_report_directory(path))
+            # The verifier in the helper is deliberately strict and is run again
+            # here to ensure the resulting directory remains inspectable.
+            acl = comparison.subprocess.run(["icacls", str(path)], check=True,
+                capture_output=True, text=True, timeout=10, shell=False).stdout
+            self.assertNotIn("LogonSessionId", acl)
+            self.assertNotIn("(I)", acl)
+
     def test_remote_snapshot_fails_closed_when_models_are_loaded(self):
         config = {"server_binary_path": "/opt/ollama", "remote_home": "/home/lfg",
                   "remote_system_service": "ollama", "remote_systemctl_path": "/usr/bin/systemctl",

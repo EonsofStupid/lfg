@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -273,6 +274,7 @@ class PublicationTests(unittest.TestCase):
                     "promotion_eligible": False}
         with mock.patch.object(adapter, "_private_dir", return_value=True), \
              mock.patch.object(adapter, "_outside_git", return_value=True), \
+             mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
              mock.patch.object(adapter.comparator, "_private_report_directory",
                                side_effect=lambda path: path.mkdir(mode=0o700) or path):
             return parent, final, adapter._atomic_private_publish(final, [{"status": "answered"}], manifest)
@@ -284,6 +286,317 @@ class PublicationTests(unittest.TestCase):
                 self.assertEqual(published, final)
                 self.assertEqual(json.loads((final / "manifest.json").read_text())["status"], status)
                 self.assertFalse(list(parent.glob("*.partial-*")))
+
+    def test_completed_and_tampered_destinations_are_validated_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent, final, (_published, _digest) = self._publish(Path(tmp))
+            manifest = {"schema_version": adapter.REPORT_SCHEMA, "status": "complete",
+                        "promotion_eligible": False}
+            with mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True):
+                before = {p.name: p.read_bytes() for p in final.iterdir()}
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._atomic_private_publish(final, [{"status": "different"}], manifest)
+                self.assertEqual({p.name: p.read_bytes() for p in final.iterdir()}, before)
+                (final / "proposals.jsonl").write_bytes(b"tampered\n")
+                tampered = {p.name: p.read_bytes() for p in final.iterdir()}
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._atomic_private_publish(final, [{"status": "answered"}], manifest)
+                self.assertEqual({p.name: p.read_bytes() for p in final.iterdir()}, tampered)
+
+    def test_complete_manifest_claim_count_outcome_and_binding_tampering_fails_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "private-output"
+            parent.mkdir()
+            final = parent / "run-1"
+            manifest = {"schema_version": adapter.REPORT_SCHEMA, "status": "complete",
+                "promotion_eligible": False,
+                "claims": {"labels_independently_verified": False,
+                           "teacher_suggestions_are_unreviewed": True},
+                "counts": {"answered_rows": 1, "selected_rows": 1},
+                "abort": {"aborted": False, "reason": None},
+                "uncertainty": {"teacher_labels_are_claims": True},
+                "provenance": {"progress_store_events_sha256": "e" * 64,
+                               "terminal_worker_result_verified": True,
+                               "selected_row_ids_sha256": "f" * 64}}
+            rows = [{"row_id": "synthetic-row", "status": "answered"}]
+            mocks = (mock.patch.object(adapter, "_private_dir", return_value=True),
+                     mock.patch.object(adapter, "_private_file", return_value=True),
+                     mock.patch.object(adapter, "_outside_git", return_value=True),
+                     mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True),
+                     mock.patch.object(adapter.comparator, "_private_report_directory",
+                                       side_effect=lambda path: path.mkdir(mode=0o700) or path))
+            with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4]:
+                adapter._atomic_private_publish(final, rows, manifest)
+                saved = json.loads((final / "manifest.json").read_text(encoding="utf-8"))
+                mutations = {
+                    "claim": lambda value: value["claims"].__setitem__("labels_independently_verified", True),
+                    "count": lambda value: value["counts"].__setitem__("answered_rows", 999),
+                    "status": lambda value: value.__setitem__("status", "partial_aborted_ambiguous"),
+                    "abort": lambda value: value["abort"].__setitem__("reason", "changed"),
+                    "uncertainty": lambda value: value["uncertainty"].__setitem__("teacher_labels_are_claims", False),
+                    "terminal_binding": lambda value: value["provenance"].__setitem__("progress_store_events_sha256", "0" * 64),
+                    "row_binding": lambda value: value["provenance"].__setitem__("selected_row_ids_sha256", "0" * 64),
+                }
+                path = final / "manifest.json"
+                for label, mutate in mutations.items():
+                    with self.subTest(field=label):
+                        candidate = json.loads(json.dumps(saved))
+                        mutate(candidate)
+                        path.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                        changed = {p.name: p.read_bytes() for p in final.iterdir()}
+                        with self.assertRaises(adapter.ProposalError):
+                            adapter._atomic_private_publish(final, rows, manifest)
+                        self.assertEqual({p.name: p.read_bytes() for p in final.iterdir()}, changed)
+                path.write_text(json.dumps(saved, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def test_pending_manifest_tampering_fails_closed_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "private-output"
+            parent.mkdir()
+            final = parent / "run-1"
+            rows = [{"row_id": "synthetic-row", "status": "answered"}]
+            payload = b'{"row_id":"synthetic-row","status":"answered"}\n'
+            manifest = {"schema_version": adapter.REPORT_SCHEMA, "status": "complete",
+                "promotion_eligible": False,
+                "claims": {"labels_independently_verified": False},
+                "counts": {"answered_rows": 1},
+                "abort": {"aborted": False, "reason": None},
+                "uncertainty": {"teacher_labels_are_claims": True},
+                "provenance": {"progress_store_events_sha256": "e" * 64,
+                               "selected_row_ids_sha256": "f" * 64,
+                               "terminal_worker_result_verified": True}}
+            publication_id = adapter._sha(adapter._canonical_json({
+                "proposal_sha256": adapter._sha(payload), "progress_events_sha256": "e" * 64,
+                "status": "complete"}).rstrip(b"\n"))
+            manifest = {**manifest, "publication_id": publication_id,
+                "proposals_sha256": adapter._sha(payload), "proposals_bytes": len(payload),
+                "rows_written": len(rows)}
+            partial = parent / f".{final.name}.partial-{publication_id}"
+            partial.mkdir(mode=0o700)
+            marker = {"schema_version": adapter.REPORT_SCHEMA, "status": "incomplete",
+                      "promotion_eligible": False, "publication_id": publication_id}
+            (partial / "manifest.json").write_bytes(adapter._canonical_json(marker))
+            (partial / "proposals.jsonl").write_bytes(payload)
+            pending = partial / f".manifest-complete-{publication_id}-interrupted.tmp"
+            expected_pending = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            with mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True):
+                expected_input = {k: v for k, v in manifest.items()
+                    if k not in {"publication_id", "proposals_sha256", "proposals_bytes", "rows_written"}}
+                mutations = {
+                    "claim": lambda value: value["claims"].__setitem__("labels_independently_verified", True),
+                    "count": lambda value: value["counts"].__setitem__("answered_rows", 999),
+                    "status": lambda value: value.__setitem__("status", "partial_aborted_ambiguous"),
+                    "abort": lambda value: value["abort"].__setitem__("reason", "changed"),
+                    "uncertainty": lambda value: value["uncertainty"].__setitem__("teacher_labels_are_claims", False),
+                    "terminal_binding": lambda value: value["provenance"].__setitem__("progress_store_events_sha256", "0" * 64),
+                    "row_binding": lambda value: value["provenance"].__setitem__("selected_row_ids_sha256", "0" * 64),
+                }
+                for label, mutate in mutations.items():
+                    with self.subTest(field=label):
+                        candidate = json.loads(expected_pending)
+                        mutate(candidate)
+                        pending.write_text(json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                        before = {p.name: p.read_bytes() for p in partial.iterdir()}
+                        with self.assertRaises(adapter.ProposalError):
+                            adapter._atomic_private_publish(final, rows, expected_input)
+                        self.assertEqual({p.name: p.read_bytes() for p in partial.iterdir()}, before)
+
+    def test_revision_reservation_publishes_linked_report_without_changing_prior_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            parent = root / "private-output"
+            parent.mkdir(mode=0o700)
+            masked._secure_private_path(parent, is_directory=True)
+            base_output = parent / "run-1"
+            source = row("a" * 64)
+            with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+                event = adapter._worker_loop([source], source["columns"], {},
+                    lambda *_: ("timeout", None, None), False, 8192)[0][0]
+            binding = {"schema_version": adapter.PROGRESS_STORE_SCHEMA,
+                       "proposal_config_identity_sha256": "1" * 64,
+                       "selected_row_ids": [source["id"]]}
+            progress_store = parent / ".run-1.teacher-progress"
+            first_rows = [event["result"]]
+            first_manifest = {"schema_version": adapter.REPORT_SCHEMA,
+                "status": "partial_aborted_ambiguous", "promotion_eligible": False,
+                "claims": {"teacher_suggestions_are_unreviewed": True,
+                    "heldout_accessed": False, "labels_independently_verified": False},
+                "counts": {"selected_rows": 1, "statuses": {"timeout": 1}},
+                "provenance": {"progress_store_events_sha256": "e" * 64,
+                    "progress_store_id_sha256": adapter._sha(adapter._canonical_json(binding).rstrip(b"\n")),
+                    "export_manifest_sha256": "1" * 64,
+                    "model_manifest_sha256": "4" * 64,
+                    "terminal_worker_result_verified": False}}
+
+            real_private_report_directory = adapter.comparator._private_report_directory
+            def private_report_dir(path):
+                return real_private_report_directory(path)
+
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory", side_effect=private_report_dir):
+                adapter._progress_store_create(progress_store, binding, 1_000_000, "2" * 64)
+                attempt = "a" * 32
+                adapter._progress_store_record_attempt(progress_store, attempt, [0], binding)
+                adapter._checkpoint_worker_event(progress_store, attempt, 0, 0, source, event,
+                    source["columns"], False, 1_000_000)
+                events_sha = adapter._sha((progress_store / "events.jsonl").read_bytes())
+                first_manifest["provenance"]["progress_store_events_sha256"] = events_sha
+                adapter._progress_store_write_publication_receipt(progress_store, binding,
+                    first_rows, first_manifest, 1_000_000)
+                adapter._atomic_private_publish(base_output, first_rows, first_manifest)
+                old_manifest = (base_output / "manifest.json").read_bytes()
+                old_rows = (base_output / "proposals.jsonl").read_bytes()
+                original_store = {item.name: item.read_bytes() for item in progress_store.iterdir()}
+                for field, mutate in (
+                    ("claims", lambda value: value["claims"].__setitem__("heldout_accessed", True)),
+                    ("counts", lambda value: value["counts"].__setitem__("selected_rows", 99)),
+                    ("provenance", lambda value: value["provenance"].__setitem__("model_manifest_sha256", "f" * 64)),
+                    ("source", lambda value: value["provenance"].__setitem__("export_manifest_sha256", "f" * 64)),
+                ):
+                    candidate = json.loads(old_manifest)
+                    mutate(candidate)
+                    (base_output / "manifest.json").write_text(
+                        json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    with self.subTest(parent_field=field), self.assertRaises(adapter.ProposalError):
+                        adapter._progress_revision_reserve(progress_store, base_output,
+                            binding, 1_000_000)
+                    self.assertEqual({item.name: item.read_bytes() for item in progress_store.iterdir()},
+                                     original_store)
+                    self.assertEqual(list(progress_store.glob("revision-*.json")), [])
+                    (base_output / "manifest.json").write_bytes(old_manifest)
+                changed_rows = [{**first_rows[0], "status": "answered"}]
+                changed_payload = (json.dumps(changed_rows[0], sort_keys=True, ensure_ascii=False,
+                    separators=(",", ":")) + "\n").encode("utf-8")
+                (base_output / "proposals.jsonl").write_bytes(changed_payload)
+                unrelated = json.loads(old_manifest)
+                unrelated["proposals_sha256"] = adapter._sha(changed_payload)
+                unrelated["proposals_bytes"] = len(changed_payload)
+                unrelated["rows_written"] = 1
+                unrelated["publication_id"] = adapter._sha(adapter._canonical_json({
+                    "proposal_sha256": adapter._sha(changed_payload),
+                    "progress_events_sha256": events_sha,
+                    "status": unrelated["status"]}).rstrip(b"\n"))
+                (base_output / "manifest.json").write_text(
+                    json.dumps(unrelated, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._progress_revision_reserve(progress_store, base_output, binding, 1_000_000)
+                self.assertEqual({item.name: item.read_bytes() for item in progress_store.iterdir()},
+                                 original_store)
+                (base_output / "manifest.json").write_bytes(old_manifest)
+                (base_output / "proposals.jsonl").write_bytes(old_rows)
+                revision_script = ("import json, os, sys; from pathlib import Path; "
+                    "sys.path.insert(0, sys.argv[1]); import train_teacher_proposals as a; "
+                    "real = a._write_new; "
+                    "a._write_new = lambda path, raw: os._exit(73) if Path(path).name == "
+                    "'revision-reservation.json' else real(path, raw); "
+                    "a._progress_revision_reserve(Path(sys.argv[2]), Path(sys.argv[3]), "
+                    "json.loads(sys.argv[4]), 1000000)")
+                child = subprocess.run([sys.executable, "-c", revision_script,
+                    str(Path(adapter.__file__).parent), str(progress_store), str(base_output),
+                    json.dumps(binding)], cwd=str(Path(adapter.__file__).parent),
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual(child.returncode, 73, child.stderr)
+                revision = adapter._progress_revision_state(progress_store, base_output, binding)
+                self.assertIsNotNone(revision)
+                self.assertFalse(revision["published"])
+                self.assertFalse((revision["target"] / "revision-reservation.json").exists())
+                reservation = revision["target"] / "revision-reservation.json"
+                foreign = revision["target"] / "foreign-entry"
+                foreign.write_bytes(b"preserve")
+                with self.assertRaisesRegex(adapter.ProposalError, "foreign data"):
+                    adapter._progress_revision_state(progress_store, base_output, binding)
+                foreign.unlink()
+                revision = adapter._progress_revision_reserve(progress_store, base_output,
+                    binding, 1_000_000)
+                saved_reservation = reservation.read_bytes()
+                reservation.write_bytes(b"tampered")
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._progress_revision_state(progress_store, base_output, binding)
+                reservation.write_bytes(saved_reservation)
+                self.assertIsNotNone(revision)
+                self.assertFalse(revision["published"])
+                self.assertTrue(revision["target"].is_dir())
+                self.assertTrue((revision["target"] / "revision-reservation.json").is_file())
+                revised_rows = [{"row_id": "synthetic-row", "status": "answered"}]
+                revised_manifest = {"schema_version": adapter.REPORT_SCHEMA,
+                    "status": "complete", "promotion_eligible": False,
+                    "provenance": {"progress_store_events_sha256": "f" * 64,
+                        "terminal_worker_result_verified": True,
+                        "publication_revision": revision["reference"]}}
+                published, _digest = adapter._atomic_private_publish(revision["target"],
+                    revised_rows, revised_manifest)
+                saved = json.loads((published / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["provenance"]["publication_revision"], revision["reference"])
+                self.assertEqual((base_output / "manifest.json").read_bytes(), old_manifest)
+                self.assertEqual((base_output / "proposals.jsonl").read_bytes(), old_rows)
+                once = {p.name: p.read_bytes() for p in published.iterdir()}
+                again, _same_digest = adapter._atomic_private_publish(revision["target"],
+                    revised_rows, revised_manifest)
+                self.assertEqual(again, published)
+                self.assertEqual({p.name: p.read_bytes() for p in published.iterdir()}, once)
+                state = adapter._progress_revision_state(progress_store, base_output, binding)
+                self.assertTrue(state["published"])
+                self.assertEqual(state["target"], published)
+
+    def test_terminal_partial_parent_is_authenticated_against_its_historical_event_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            parent = root / "private-output"
+            parent.mkdir(mode=0o700)
+            masked._secure_private_path(parent, is_directory=True)
+            base_output = parent / "run-1"
+            source = row("c" * 64)
+            with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+                timeout_event = adapter._worker_loop([source], source["columns"], {},
+                    lambda *_: ("timeout", None, None), False, 8192)[0][0]
+                answered_event = adapter._worker_loop([source], source["columns"], {},
+                    lambda *_: ("answered", ["intents:build.software"], 1.0), False, 8192)[0][0]
+            binding = {"schema_version": adapter.PROGRESS_STORE_SCHEMA,
+                "selected_row_ids": [source["id"]], "proposal_config_identity_sha256": "1" * 64}
+            store = parent / ".run-1.teacher-progress"
+            adapter._progress_store_create(store, binding, 1_000_000, "2" * 64)
+            attempt = "c" * 32
+            adapter._progress_store_record_attempt(store, attempt, [0], binding)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, timeout_event,
+                source["columns"], False, 1_000_000)
+            events_sha = adapter._sha((store / "events.jsonl").read_bytes())
+            terminal_report = {"schema_version": adapter.REPORT_SCHEMA,
+                "status": "partial_aborted_ambiguous", "promotion_eligible": False,
+                "provenance": {"progress_store_events_sha256": events_sha,
+                    "progress_store_id_sha256": adapter._sha(adapter._canonical_json(binding).rstrip(b"\n")),
+                    "terminal_worker_result_verified": True}}
+            adapter._progress_store_write_terminal(store, attempt, binding, events_sha,
+                terminal_report, 1_000_000)
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory",
+                                   side_effect=lambda path: path.mkdir(mode=0o700) or path):
+                adapter._atomic_private_publish(base_output, [timeout_event["result"]], terminal_report)
+                # Append a later retry event; the parent remains bound to the original terminal prefix.
+                retry = "d" * 32
+                adapter._progress_store_record_attempt(store, retry, [0], binding)
+                adapter._checkpoint_worker_event(store, retry, 0, 0, source, answered_event,
+                    source["columns"], False, 1_000_000)
+                revision = adapter._progress_revision_reserve(store, base_output, binding, 1_000_000)
+            self.assertEqual(revision["reference"]["parent_output_name"], base_output.name)
+            self.assertEqual(revision["reference"]["parent_manifest_sha256"],
+                adapter._sha((base_output / "manifest.json").read_bytes()))
+            self.assertNotEqual(adapter._sha((store / "events.jsonl").read_bytes()), events_sha)
 
     def test_publication_interruption_never_leaves_complete_marker_in_partial_directory(self):
         real_write = adapter._write_new
@@ -301,6 +614,7 @@ class PublicationTests(unittest.TestCase):
                         raise OSError("injected interruption")
                 with mock.patch.object(adapter, "_private_dir", return_value=True), \
                      mock.patch.object(adapter, "_outside_git", return_value=True), \
+                     mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
                      mock.patch.object(adapter.comparator, "_private_report_directory",
                                        side_effect=lambda path: path.mkdir(mode=0o700) or path), \
                      mock.patch.object(adapter, "_write_new", side_effect=interrupted_write):
@@ -308,14 +622,752 @@ class PublicationTests(unittest.TestCase):
                         adapter._atomic_private_publish(final, [{"status": "answered"}],
                             {"schema_version": adapter.REPORT_SCHEMA, "status": "complete"})
                 dirs = list(parent.iterdir())
-                self.assertEqual(len(dirs), 0 if fail_at == 1 else 1)
-                if not dirs:
-                    self.assertFalse(final.exists())
-                    continue
+                self.assertEqual(len(dirs), 1)
                 marker = dirs[0] / "manifest.json"
                 if marker.exists():
                     self.assertEqual(json.loads(marker.read_text())["status"], "incomplete")
                 self.assertFalse((dirs[0] / ".manifest-complete.tmp").exists())
+
+    def test_publication_recovers_after_directory_rename_before_manifest_replace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "private-output"
+            parent.mkdir()
+            final = parent / "run-1"
+            manifest = {"schema_version": adapter.REPORT_SCHEMA, "status": "complete",
+                        "promotion_eligible": False}
+            real_replace = adapter.os.replace
+            def interrupted_replace(src, dst):
+                if Path(dst).name == "manifest.json" and Path(src).name.startswith(".manifest-complete-"):
+                    raise OSError("simulated interruption after rename")
+                real_replace(src, dst)
+            with mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory",
+                                   side_effect=lambda path: path.mkdir(mode=0o700) or path), \
+                 mock.patch.object(adapter.os, "replace", side_effect=interrupted_replace):
+                with self.assertRaises(OSError):
+                    adapter._atomic_private_publish(final, [{"status": "answered"}], manifest)
+            self.assertEqual(json.loads((final / "manifest.json").read_text())["status"], "incomplete")
+            self.assertFalse((final / ".manifest-complete.tmp").exists())
+            with mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True):
+                path, _digest = adapter._atomic_private_publish(final, [{"status": "answered"}], manifest)
+            self.assertEqual(path, final)
+            self.assertEqual(json.loads((final / "manifest.json").read_text())["status"], "complete")
+            self.assertFalse((final / ".manifest-complete.tmp").exists())
+
+    def test_subprocess_death_at_publication_boundaries_recovers_only_matching_bytes(self):
+        script = r'''import os,sys
+from pathlib import Path
+import train_teacher_proposals as a
+parent=Path(sys.argv[1]); final=parent/'run'; stage=sys.argv[2]
+manifest={'schema_version':a.REPORT_SCHEMA,'status':'complete','promotion_eligible':False,
+          'created_at_epoch_seconds':1,
+          'provenance':{'progress_store_events_sha256':'e'*64,'export_manifest_sha256':'f'*64}}
+rows=[{'status':'answered'}]
+if stage in ('marker','proposal_temp','during_marker','during_proposal_temp'):
+ real=a._write_new
+ def write(path,raw):
+  is_marker=path.name.startswith('.manifest-incomplete-')
+  is_proposal=path.name.startswith('.proposals-')
+  if ((stage=='during_marker' and is_marker) or (stage=='during_proposal_temp' and is_proposal)):
+   real(path,raw[:max(1,len(raw)//2)]); os._exit(71)
+  real(path,raw)
+  if ((stage=='marker' and is_marker) or (stage=='proposal_temp' and is_proposal)): os._exit(71)
+ a._write_new=write
+elif stage=='rename':
+ real=os.rename
+ def rename(src,dst):
+  real(src,dst)
+  if Path(dst)==final: os._exit(71)
+ os.rename=rename
+elif stage=='replace':
+ real=os.replace
+ def replace(src,dst):
+  real(src,dst)
+  if Path(dst)==final/'manifest.json' and Path(src).name.startswith('.manifest-complete-'):
+   os._exit(71)
+ os.replace=replace
+a._atomic_private_publish(final,rows,manifest)
+raise SystemExit(72)
+'''
+        for stage in ("during_marker", "marker", "during_proposal_temp", "proposal_temp", "rename", "replace"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                parent = Path(tmp)
+                masked._secure_private_path(parent, is_directory=True)
+                masked._verify_owner_private_access(parent, is_directory=True)
+                result = subprocess.run([sys.executable, "-c", script, str(parent), stage],
+                    cwd=str(Path(adapter.__file__).parent), capture_output=True, text=True, timeout=40)
+                self.assertEqual(result.returncode, 71, result.stderr)
+                final = parent / "run"
+                resume_manifest = {"schema_version": adapter.REPORT_SCHEMA, "status": "complete",
+                    "promotion_eligible": False, "created_at_epoch_seconds": 1,
+                    "provenance": {"progress_store_events_sha256": "e" * 64,
+                                   "export_manifest_sha256": "f" * 64}}
+                path, digest = adapter._atomic_private_publish(final,
+                    [{"status": "answered"}],
+                    resume_manifest)
+                self.assertEqual(path, final)
+                saved = json.loads((final / "manifest.json").read_text())
+                self.assertEqual(saved["publication_id"], adapter._sha(adapter._canonical_json({
+                    "proposal_sha256": adapter._sha(b'{"status":"answered"}\n'),
+                    "progress_events_sha256": "e" * 64, "status": "complete"}).rstrip(b"\n")))
+                if stage in ("rename", "replace"):
+                    self.assertEqual(saved["created_at_epoch_seconds"], 1)
+                    self.assertNotIn("pre_data_zero_row_probe", saved)
+                self.assertEqual((final / "proposals.jsonl").read_bytes(), b'{"status":"answered"}\n')
+                retained_once = {p.name: p.read_bytes() for p in final.iterdir()}
+                path, second_digest = adapter._atomic_private_publish(final,
+                    [{"status": "answered"}], resume_manifest)
+                self.assertEqual(path, final)
+                self.assertEqual(second_digest, digest)
+                self.assertEqual({p.name: p.read_bytes() for p in final.iterdir()}, retained_once)
+
+
+class OutputLeaseTests(unittest.TestCase):
+    def test_kernel_lease_rejects_concurrent_owner_and_releases_after_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final = Path(tmp) / "out"
+            with mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True):
+                with adapter._output_lease(final):
+                    with self.assertRaisesRegex(adapter.ProposalError, "another teacher run"):
+                        with adapter._output_lease(final):
+                            pass
+                with adapter._output_lease(final):
+                    self.assertTrue((Path(tmp) / ".out.teacher-progress.lock").exists())
+
+    def test_native_child_process_cannot_take_held_output_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            final = Path(tmp) / "out"
+            script = ("import sys\nfrom pathlib import Path\nfrom unittest import mock\n"
+                      "import train_teacher_proposals as a\n"
+                      "mock.patch.object(a, '_private_file', return_value=True).start()\n"
+                      "mock.patch.object(a, '_private_dir', return_value=True).start()\n"
+                      "try:\n    with a._output_lease(Path(sys.argv[1])): raise SystemExit(3)\n"
+                      "except a.ProposalError as e:\n    raise SystemExit(0 if 'another teacher run' in str(e) else 4)\n")
+            with mock.patch.object(adapter, "_private_file", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True):
+                with adapter._output_lease(final):
+                    for _ in range(2):
+                        result = subprocess.run([sys.executable, "-c", script, str(final)],
+                            cwd=str(Path(adapter.__file__).parent), capture_output=True, text=True, timeout=15)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_fresh_native_private_parent_secures_lease_before_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            masked._secure_private_path(parent, is_directory=True)
+            masked._verify_owner_private_access(parent, is_directory=True)
+            final = parent / "out"
+            with adapter._output_lease(final):
+                lock_path = parent / ".out.teacher-progress.lock"
+                self.assertTrue(adapter._private_file(lock_path))
+                self.assertEqual(lock_path.stat().st_size, 1)
+
+    def test_native_owner_process_crash_releases_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            masked._secure_private_path(parent, is_directory=True)
+            masked._verify_owner_private_access(parent, is_directory=True)
+            final = parent / "out"
+            script = ("import os,sys\nfrom pathlib import Path\n"
+                      "import train_teacher_proposals as a\n"
+                      "with a._output_lease(Path(sys.argv[1])): os._exit(0)\n")
+            result = subprocess.run([sys.executable, "-c", script, str(final)],
+                cwd=str(Path(adapter.__file__).parent), capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with adapter._output_lease(final):
+                self.assertTrue(adapter._private_file(parent / ".out.teacher-progress.lock"))
+
+
+class DurableProgressTests(unittest.TestCase):
+    def _event(self, status="answered"):
+        source = row()
+        positives = ["intents:build.software"] if status == "answered" else None
+        elapsed = 1.0 if status in {"answered", "abstain", "malformed", "invalid_schema", "refusal", "truncated"} else None
+        with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+            events, _results, _aborted, _reason = adapter._worker_loop(
+                [source], source["columns"], {}, lambda _request, _labels: (status, positives, elapsed),
+                False, 8192)
+        return source, events[0]
+
+    def _store(self, root: Path, source: dict, attempt="a" * 32):
+        masked._secure_private_path(root, is_directory=True)
+        masked._verify_owner_private_access(root, is_directory=True)
+        store = root / ".output.teacher-progress"
+        binding = {"schema_version": adapter.PROGRESS_STORE_SCHEMA,
+                   "selected_row_ids": [source["id"]],
+                   "selected_row_order_sha256": adapter._sha(adapter._canonical_json([source["id"]])),
+                   "selected_source_identities_sha256": "1" * 64,
+                   "proposal_config_sha256": "2" * 64,
+                   "model_manifest_sha256": "3" * 64,
+                   "prompt_contract_sha256": "4" * 64,
+                   "server_binary_sha256": "5" * 64,
+                   "request_policy_sha256": "6" * 64}
+        cfg = {"output_dir": str(root / "output"),
+               "max_protocol_bytes": 1_000_000, "max_progress_store_bytes": 100_000_000,
+               "selected_columns": source["columns"],
+               "assume_exhaustive_labels": False}
+        adapter._progress_store_create(store, binding)
+        adapter._progress_store_record_attempt(store, attempt, [0], binding)
+        return store, binding, cfg, attempt
+
+    def test_validated_row_event_is_durable_and_resume_reuses_single_ordered_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, event = self._event()
+            store, binding, cfg, attempt = self._store(root, source)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                source["columns"], False, 1_000_000)
+            records, latest = adapter._progress_store_read(store, binding, [source], cfg)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(latest, {0: event["result"]})
+            self.assertEqual(adapter._progress_pending_indices([source], latest), [])
+
+    def test_ambiguous_and_not_attempted_events_remain_retryable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, event = self._event("timeout")
+            latest = {0: event["result"]}
+            self.assertEqual(adapter._progress_pending_indices([source], latest), [0])
+            source, event = self._event("not_attempted_after_abort")
+            self.assertEqual(adapter._progress_pending_indices([source], {0: event["result"]}), [0])
+
+    def test_capacity_can_only_increase_and_does_not_change_proposal_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, _event = self._event()
+            store, _binding, _cfg, _attempt = self._store(Path(tmp), source)
+            self.assertEqual(adapter._progress_capacity_records(store, 100_000_000), 100_000_000)
+            self.assertEqual(adapter._progress_capacity_records(store, 120_000_000), 120_000_000)
+            with self.assertRaisesRegex(adapter.ProposalError, "cannot be decreased"):
+                adapter._progress_capacity_records(store, 110_000_000)
+            self.assertEqual(adapter._proposal_config_identity_sha({"x": 1, "max_progress_store_bytes": 5}),
+                             adapter._proposal_config_identity_sha({"x": 1, "max_progress_store_bytes": 50}))
+
+    def test_mismatched_resume_does_not_mutate_requested_capacity_increase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, _event = self._event()
+            store, binding, cfg, _attempt = self._store(Path(tmp), source)
+            before = {p.name: p.read_bytes() for p in store.iterdir()}
+            cfg["max_progress_store_bytes"] = 200_000_000
+            mismatch = {**binding, "proposal_config_sha256": "9" * 64}
+            with self.assertRaisesRegex(adapter.ProposalError, "identity or selected row order"):
+                adapter._progress_store_read(store, mismatch, [source], cfg)
+            after = {p.name: p.read_bytes() for p in store.iterdir()}
+            self.assertEqual(after, before)
+
+    def test_worker_event_protocol_bound_includes_checkpoint_envelope(self):
+        source = row()
+        low, high = 0, adapter.PROGRESS_EVENT_MAX_BYTES
+        found = None
+        while low <= high:
+            size = (low + high) // 2
+            candidate = row()
+            candidate["source_identity"]["artifact_path"] = "x" * size
+            try:
+                adapter._check_result_bounds([candidate], candidate["columns"],
+                    2 * adapter.PROGRESS_EVENT_MAX_BYTES,
+                    adapter.PROGRESS_EVENT_MAX_BYTES)
+                low = size + 1
+            except adapter.ProposalError as exc:
+                if "serialized checkpoint event exceeds stored-record limit" in str(exc):
+                    found = candidate
+                    high = size - 1
+                else:
+                    high = size - 1
+        self.assertIsNotNone(found, "expected a worker-line-valid but envelope-oversized source")
+        with self.assertRaisesRegex(adapter.ProposalError, "stored-record limit"):
+            adapter._check_result_bounds([found], found["columns"],
+                2 * adapter.PROGRESS_EVENT_MAX_BYTES, adapter.PROGRESS_EVENT_MAX_BYTES)
+
+    def test_progress_ack_is_bound_to_attempt_index_and_exact_durable_event(self):
+        event = {"phase": "progress", "index": 2, "result": {"status": "answered"}}
+        ack = adapter._progress_ack("a" * 32, 2, event)
+        adapter._validate_progress_ack(ack, "a" * 32, 2, event)
+        for bad in ({**ack, "index": 3}, {**ack, "attempt_id": "b" * 32},
+                    {**ack, "event_sha256": "0" * 64}):
+            with self.subTest(bad=bad), self.assertRaises(adapter.ProposalError):
+                adapter._validate_progress_ack(bad, "a" * 32, 2, event)
+
+    def test_two_row_worker_waits_for_controller_fsync_and_valid_ack(self):
+        rows = [row(), row("1" * 64)]
+        attempt = "a" * 32
+        for stop_at in ("before_append", "during_append", "after_append_before_ack", "bad_ack", "valid_ack"):
+            with self.subTest(stop_at=stop_at), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                masked._secure_private_path(root, is_directory=True)
+                masked._verify_owner_private_access(root, is_directory=True)
+                store = root / ".output.teacher-progress"
+                binding = {"schema_version": adapter.PROGRESS_STORE_SCHEMA,
+                    "selected_row_ids": [item["id"] for item in rows],
+                    "selected_row_order_sha256": adapter._sha(adapter._canonical_json([item["id"] for item in rows])),
+                    "selected_source_identities_sha256": "1" * 64,
+                    "proposal_config_sha256": "2" * 64, "model_manifest_sha256": "3" * 64,
+                    "prompt_contract_sha256": "4" * 64, "server_binary_sha256": "5" * 64,
+                    "request_policy_sha256": "6" * 64}
+                adapter._progress_store_create(store, binding)
+                adapter._progress_store_record_attempt(store, attempt, [0, 1], binding)
+                inferred = []
+                def infer(*_args):
+                    inferred.append(len(inferred))
+                    return "answered", ["intents:build.software"], 1.0
+                def controller_ack(event):
+                    index = event["index"]
+                    if stop_at == "before_append":
+                        raise OSError("controller died before append")
+                    if stop_at == "during_append":
+                        real_write = os.write
+                        def partial_write(fd, raw):
+                            real_write(fd, raw[:max(1, len(raw) // 2)])
+                            raise OSError("controller died during append")
+                        with mock.patch.object(adapter.os, "write", side_effect=partial_write):
+                            adapter._checkpoint_worker_event(store, attempt, index, index,
+                                rows[index], event, rows[index]["columns"], False, 100_000_000)
+                        return
+                    adapter._checkpoint_worker_event(store, attempt, index, index,
+                        rows[index], event, rows[index]["columns"], False, 100_000_000)
+                    if stop_at == "after_append_before_ack":
+                        raise BrokenPipeError("controller died before ACK")
+                    ack = adapter._progress_ack(attempt, index, event)
+                    if stop_at == "bad_ack" and index == 0:
+                        ack = {**ack, "index": 1}
+                    adapter._validate_progress_ack(ack, attempt, index, event)
+                with mock.patch.object(adapter, "_request", return_value=b"synthetic"):
+                    if stop_at in {"before_append", "during_append", "after_append_before_ack", "bad_ack"}:
+                        with self.assertRaises((OSError, BrokenPipeError, adapter.ProposalError)):
+                            adapter._worker_loop(rows, rows[0]["columns"], {}, infer, False, 8192,
+                                                 progress_emit=controller_ack)
+                        self.assertEqual(len(inferred), 1)
+                    else:
+                        _progress, _outputs, aborted, _reason = adapter._worker_loop(
+                            rows, rows[0]["columns"], {}, infer, False, 8192,
+                            progress_emit=controller_ack)
+                        self.assertFalse(aborted)
+                        self.assertEqual(len(inferred), 2)
+                raw_events = (store / "events.jsonl").read_bytes()
+                if stop_at == "before_append":
+                    self.assertEqual(raw_events, b"")
+                elif stop_at == "during_append":
+                    self.assertTrue(raw_events)
+                    self.assertFalse(raw_events.endswith(b"\n"))
+                else:
+                    self.assertTrue(raw_events.endswith(b"\n"))
+                    self.assertEqual(len(raw_events.splitlines()), 1 if stop_at != "valid_ack" else 2)
+                    records = [json.loads(line) for line in raw_events.splitlines()]
+                    first_record = records[0]
+                    self.assertEqual(first_record["index"], 0)
+                    latest = {record["index"]: record["event"]["result"] for record in records}
+                    self.assertEqual(adapter._progress_pending_indices(rows, latest),
+                                     [1] if stop_at != "valid_ack" else [])
+                if stop_at in {"before_append", "during_append"}:
+                    # A request may have reached the teacher; absent/truncated
+                    # persistence is never represented as an exactly-once result.
+                    self.assertEqual(adapter._progress_pending_indices(rows, {}), [0, 1])
+
+    def test_resume_replaces_retryable_prior_event_without_duplicate_output_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, uncertain = self._event("timeout")
+            store, binding, cfg, first_attempt = self._store(root, source)
+            adapter._progress_store_append(store, first_attempt, 0, uncertain, 1_000_000)
+            _source, answered = self._event("answered")
+            second_attempt = "b" * 32
+            adapter._progress_store_record_attempt(store, second_attempt, [0], binding)
+            adapter._checkpoint_worker_event(store, second_attempt, 0, 0, source, answered,
+                source["columns"], False, 1_000_000)
+            _records, latest = adapter._progress_store_read(store, binding, [source], cfg)
+            output_rows = [latest[index] for index in range(len([source]))]
+            self.assertEqual(len(output_rows), 1)
+            self.assertEqual(output_rows[0]["status"], "answered")
+            self.assertEqual(adapter._progress_pending_indices([source], latest), [])
+
+    def test_checkpoint_rejects_duplicate_attempt_index_corruption_and_truncation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, event = self._event()
+            store, binding, cfg, attempt = self._store(root, source)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                source["columns"], False, 1_000_000)
+            adapter._progress_store_append(store, attempt, 0, event, 1_000_000)
+            with self.assertRaisesRegex(adapter.ProposalError, "duplicate attempt indices"):
+                adapter._progress_store_read(store, binding, [source], cfg)
+        for truncate in (True, False):
+            with self.subTest(truncate=truncate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, event = self._event()
+                store, binding, cfg, attempt = self._store(root, source)
+                adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                    source["columns"], False, 1_000_000)
+                path = store / "events.jsonl"
+                raw = path.read_bytes()
+                path.write_bytes(raw[:-1] if truncate else raw.replace(b"record_sha256", b"record_sha25", 1))
+                with self.assertRaises(adapter.ProposalError):
+                    adapter._progress_store_read(store, binding, [source], cfg)
+
+    def test_checkpoint_rejects_changed_selected_order_and_changed_source_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, _event = self._event()
+            store, binding, cfg, _attempt = self._store(root, source)
+            changed_binding = {**binding, "selected_row_order_sha256": "0" * 64}
+            with self.assertRaisesRegex(adapter.ProposalError, "identity or selected row order"):
+                adapter._progress_store_read(store, changed_binding, [source], cfg)
+            for field in ("selected_source_identities_sha256", "proposal_config_sha256",
+                          "model_manifest_sha256", "prompt_contract_sha256",
+                          "server_binary_sha256", "request_policy_sha256"):
+                with self.subTest(field=field):
+                    changed_binding = {**binding, field: "f" * 64}
+                    with self.assertRaisesRegex(adapter.ProposalError, "identity or selected row order"):
+                        adapter._progress_store_read(store, changed_binding, [source], cfg)
+
+    def test_terminal_record_tracks_durable_event_snapshot_for_publication_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, event = self._event()
+            store, binding, cfg, attempt = self._store(root, source)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                source["columns"], False, 1_000_000)
+            events_sha = adapter._sha((store / "events.jsonl").read_bytes())
+            report = {"schema_version": adapter.REPORT_SCHEMA,
+                      "provenance": {"progress_store_events_sha256": events_sha,
+                                     "terminal_worker_result_verified": True}}
+            adapter._progress_store_write_terminal(store, attempt, binding, events_sha, report)
+            terminal = adapter._progress_store_matching_terminal(store, binding, events_sha)
+            self.assertEqual(terminal["output_manifest"], report)
+            (store / f"terminal-{attempt}.json").write_bytes(b'{"truncated":')
+            with self.assertRaises(adapter.ProposalError):
+                adapter._progress_store_read(store, binding, [source], cfg)
+
+    def test_publication_recovery_reuses_matching_terminal_without_duplicate_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            source, event = self._event()
+            cfg = {"output_dir": str(root / "output"), "taxonomy_sha256": "d" * 64,
+                   "selected_columns": source["columns"], "assume_exhaustive_labels": False,
+                   "max_protocol_bytes": 1_000_000, "max_output_bytes": 1_000_000,
+                   "max_progress_store_bytes": 100_000_000}
+            comp = {"model_name": "fixture/model", "server_binary_sha256": "a" * 64,
+                    "server_version": "fixture-server", "system_prompt": "{labels}\n{text}",
+                    "prompt_revision": "fixture-v1", "timeout_seconds": 1,
+                    "max_request_bytes": 1000, "max_response_bytes": 1000,
+                    "num_ctx": 256, "num_predict": 64, "temperature": 0.0,
+                    "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.0,
+                    "resource_memory_max_bytes": 1000, "resource_cpu_quota_percent": 50,
+                    "remote_scope_tasks_max": 10, "min_memory_available_bytes": 1,
+                    "min_disk_free_bytes": 1, "min_gpu_free_bytes": 0,
+                    "max_manifest_bytes": 1000}
+            source_binding = {"manifest_sha256": "1" * 64, "config_sha256": "2" * 64,
+                              "train_sha256": "3" * 64, "train_bytes": 10}
+            stable_runtime = {"boundary": "same_uid_private_network_namespace_without_nonloopback_routes",
+                "server_binary_sha256": "a" * 64, "server_version": "fixture-server"}
+            original_probe = {"zero_row_probe": True, "rows_sent": 0, "train_payload_opened": False,
+                "worker_ready": True, "outside_listener_denied": True, "cleanup_verified": True,
+                "persistent_service_unchanged": True,
+                "runtime_boundary": {**stable_runtime, "server_pid": 11, "network_namespace_inode": 111,
+                    "process_tree_rss_bytes": 100, "process_tree_rss_scope":
+                    "server and observed descendants; summed RSS can double-count shared pages"},
+                "model_identity": {"reported_manifest_sha256": "4" * 64},
+                "artifact": {"model_layer_bytes": 100}, "receipt_sha256": "9" * 64,
+                "model_layer_bytes": 100, "host_before": {"hostname": "worker", "architecture": "x86_64"},
+                "proposal_config_sha256": "5" * 64,
+                "proposal_config_identity_sha256": adapter._proposal_config_identity_sha(cfg),
+                "comparison_config_sha256": "6" * 64,
+                "adapter_code_sha256": adapter._sha(Path(adapter.__file__).read_bytes()),
+                "comparator_code_sha256": adapter._sha(Path(adapter.comparator.__file__).read_bytes())}
+            probe = {**original_probe, "runtime_boundary": {**stable_runtime, "server_pid": 22,
+                "network_namespace_inode": 222, "process_tree_rss_bytes": 120,
+                "process_tree_rss_scope": stable_runtime.get("process_tree_rss_scope",
+                    "server and observed descendants; summed RSS can double-count shared pages")},
+                "host_before": {"hostname": "worker", "architecture": "x86_64"},
+                "resources_before": {"available": 9}, "resources_after": {"available": 8}}
+            checkpoint_binding = adapter._progress_binding(cfg, "5" * 64, comp, "6" * 64,
+                [source], source_binding, adapter._sha(Path(adapter.__file__).read_bytes()),
+                adapter._sha(Path(adapter.comparator.__file__).read_bytes()), probe)
+            store = adapter._progress_store_path(Path(cfg["output_dir"]))
+            adapter._progress_store_create(store, checkpoint_binding,
+                cfg["max_progress_store_bytes"], proposal_config_sha256="5" * 64)
+            attempt = "a" * 32
+            adapter._progress_store_record_attempt(store, attempt, [0], checkpoint_binding)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                source["columns"], False, 1_000_000)
+            events_sha = adapter._sha((store / "events.jsonl").read_bytes())
+            adapter_sha = adapter._sha(Path(adapter.__file__).read_bytes())
+            comparator_sha = adapter._sha(Path(adapter.comparator.__file__).read_bytes())
+            selected_ids = [source["id"]]
+            labels = [f"{column['field']}:{column['label']}" for column in source["columns"]]
+            states = event["result"]["proposal_states"]
+            coverage = dict(sorted(Counter(f"{label}:{state}" for label, state in states.items()).items()))
+            source_lineage = {"source_artifacts": [], "source_artifacts_sha256": {},
+                "source_artifact_inventory_sha256": adapter._sha(b"{}"),
+                "screening_policy_sha256": None, "screening_code_sha256": None,
+                "taxonomy_sha256": None, "taxonomy_loader_sha256": None,
+                "export_config_sha256": None, "workspace_plan_sha256": None,
+                "review_ledger_sha256": None, "partial_sidecar_sha256": None,
+                "label_guide_sha256": None, "target_policy": None,
+                "selected_columns": source["columns"], "counts": None, "promotion_eligible": False}
+            report = {"schema_version": adapter.REPORT_SCHEMA, "created_at_epoch_seconds": 1,
+                "status": "complete", "promotion_eligible": False,
+                "claims": {"teacher_suggestions_are_unreviewed": True, "heldout_accessed": False,
+                    "labels_independently_verified": False, "screening_independently_verified": False,
+                    "promotion_eligible": False},
+                "provenance": {"proposal_config_sha256": "5" * 64,
+                    "proposal_config_origin_sha256": "5" * 64,
+                    "proposal_config_identity_sha256": adapter._proposal_config_identity_sha(cfg),
+                    "publication_revision": None,
+                    "comparison_config_sha256": "6" * 64, "adapter_code_sha256": adapter_sha,
+                    "comparator_code_sha256": comparator_sha, "worker_config_sha256": "7" * 64,
+                    "payload_sha256": "8" * 64, "export_manifest_sha256": "1" * 64,
+                    "export_config_sha256": "2" * 64, "train_file_sha256": "3" * 64,
+                    "train_file_bytes": 10, "taxonomy_sha256": "d" * 64,
+                    "source_lineage": source_lineage, "selected_row_count": 1,
+                    "selected_row_ids_sha256": adapter._sha(json.dumps(selected_ids, separators=(",", ":")).encode()),
+                    "selected_text_digests_sha256": adapter._sha(json.dumps([source["text_sha256"]], separators=(",", ":")).encode()),
+                    "target_mask_sha256": adapter._sha(json.dumps([source["known_mask"]], separators=(",", ":")).encode()),
+                    "proposal_schema_sha256": adapter._sha(json.dumps(adapter.comparator.output_schema(labels), sort_keys=True, separators=(",", ":")).encode()),
+                    "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
+                    "progress_store_schema": adapter.PROGRESS_STORE_SCHEMA,
+                    "progress_store_id_sha256": adapter._sha(adapter._canonical_json(checkpoint_binding).rstrip(b"\n")),
+                    "progress_store_events_sha256": events_sha, "progress_resumed": False,
+                    "terminal_worker_result_verified": True, "model_name": comp["model_name"],
+                    "model_manifest_sha256": checkpoint_binding["model_manifest_sha256"],
+                    "model_layer_bytes": probe["model_layer_bytes"], "receipt_sha256": probe["receipt_sha256"],
+                    "server_binary_sha256": comp["server_binary_sha256"], "server_version": comp["server_version"],
+                    "runtime_boundary": {**stable_runtime, "server_pid": 11,
+                        "network_namespace_inode": 111, "process_tree_rss_bytes": 130,
+                        "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"},
+                    "request_policy": {k: comp[k] for k in ("timeout_seconds", "max_request_bytes", "max_response_bytes",
+                        "num_ctx", "num_predict", "temperature", "top_k", "top_p", "repeat_penalty")},
+                    "resource_policy": {k: comp[k] for k in ("resource_memory_max_bytes", "resource_cpu_quota_percent",
+                        "remote_scope_tasks_max", "min_memory_available_bytes", "min_disk_free_bytes", "min_gpu_free_bytes")}},
+                "counts": {"selected_rows": 1, "statuses": {"answered": 1}, "answered_rows": 1,
+                    "abstentions": 0, "failures": 0, "not_attempted_after_abort": 0,
+                    "per_label_and_state": coverage},
+                "pre_data_zero_row_probe": original_probe,
+                "abort": {"aborted": False, "reason": None},
+                "resources": {"before": {}, "after": {}},
+                "uncertainty": {"source_and_review_claims_independently_verified": False,
+                    "teacher_labels_are_claims": True, "omitted_labels_are_negative": False,
+                    "selection_claim": "configured train-only subset; no heldout data opened"}}
+            adapter._progress_store_write_terminal(store, attempt, checkpoint_binding,
+                                                   events_sha, report)
+            cfg["max_progress_store_bytes"] = 110_000_000
+            probe = {**probe, "proposal_config_sha256": "7" * 64,
+                     "runtime_boundary": {**stable_runtime, "server_pid": 44,
+                         "network_namespace_inode": 444, "process_tree_rss_bytes": 140,
+                         "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"}}
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_reverify_export"), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory",
+                                   side_effect=lambda path: path.mkdir(mode=0o700) or path):
+                result = adapter._resume_published_progress(cfg, "7" * 64, comp, "6" * 64,
+                    {"selected_columns": source["columns"]}, [source], source_binding, probe)
+                published = Path(result["output_directory"])
+                before_repeat = (published / "manifest.json").read_bytes()
+                saved_report = json.loads(before_repeat)
+                original_probe_saved = saved_report["pre_data_zero_row_probe"]
+                probe = {**probe, "runtime_boundary": {**stable_runtime, "server_pid": 55,
+                    "network_namespace_inode": 555, "process_tree_rss_bytes": 150,
+                    "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"}}
+                repeated = adapter._resume_published_progress(cfg, "7" * 64, comp, "6" * 64,
+                    {"selected_columns": source["columns"]}, [source], source_binding, probe)
+            self.assertEqual(result["rows_completed"], 1)
+            self.assertEqual(repeated["manifest_sha256"], result["manifest_sha256"])
+            self.assertEqual((published / "manifest.json").read_bytes(), before_repeat)
+            proposals = (published / "proposals.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(proposals), 1)
+            saved = json.loads((published / "manifest.json").read_text())
+            self.assertEqual(saved["counts"], report["counts"])
+            self.assertNotIn("publication_recovered", saved["provenance"])
+            self.assertEqual(saved["pre_data_zero_row_probe"], original_probe_saved)
+            self.assertEqual(saved["created_at_epoch_seconds"], 1)
+            self.assertEqual(saved["provenance"]["proposal_config_sha256"], "5" * 64)
+            capacity_records = [json.loads(line) for line in (store / "capacity.jsonl").read_text().splitlines()]
+            self.assertEqual([item["capacity_bytes"] for item in capacity_records], [100_000_000, 110_000_000])
+            self.assertEqual([item["config_sha256"] for item in capacity_records], ["5" * 64, "7" * 64])
+            self.assertEqual(len(list(store.glob("recovery-probe-*.json"))), 2)
+
+    def test_rows_without_terminal_result_publish_only_as_ambiguous_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            source, event = self._event()
+            cfg = {"output_dir": str(root / "output"), "taxonomy_sha256": "d" * 64,
+                   "selected_columns": source["columns"], "assume_exhaustive_labels": False,
+                   "max_protocol_bytes": 1_000_000, "max_output_bytes": 1_000_000,
+                   "max_progress_store_bytes": 100_000_000}
+            comp = {"model_name": "fixture/model", "server_binary_sha256": "a" * 64,
+                    "server_version": "fixture-server", "system_prompt": "{labels}\n{text}",
+                    "prompt_revision": "fixture-v1", "timeout_seconds": 1,
+                    "max_request_bytes": 1000, "max_response_bytes": 1000,
+                    "num_ctx": 256, "num_predict": 64, "temperature": 0.0,
+                    "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.0,
+                    "resource_memory_max_bytes": 1000, "resource_cpu_quota_percent": 50,
+                    "remote_scope_tasks_max": 10, "min_memory_available_bytes": 1,
+                    "min_disk_free_bytes": 1, "min_gpu_free_bytes": 0,
+                    "max_manifest_bytes": 1000}
+            source_binding = {"manifest_sha256": "1" * 64, "config_sha256": "2" * 64,
+                              "train_sha256": "3" * 64, "train_bytes": 10}
+            probe = {"zero_row_probe": True,
+                     "proposal_config_identity_sha256": adapter._proposal_config_identity_sha(cfg),
+                     "model_identity": {"reported_manifest_sha256": "4" * 64},
+                     "runtime_boundary": {"boundary": "same_uid_private_network_namespace_without_nonloopback_routes",
+                         "server_binary_sha256": "a" * 64, "server_version": "fixture-server",
+                         "server_pid": 22, "network_namespace_inode": 222,
+                         "process_tree_rss_bytes": 120,
+                         "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"},
+                     "resources_before": {}, "resources_after": {}}
+            checkpoint_binding = adapter._progress_binding(cfg, "5" * 64, comp, "6" * 64,
+                [source], source_binding, adapter._sha(Path(adapter.__file__).read_bytes()),
+                adapter._sha(Path(adapter.comparator.__file__).read_bytes()), probe)
+            store = adapter._progress_store_path(Path(cfg["output_dir"]))
+            adapter._progress_store_create(store, checkpoint_binding)
+            attempt = "a" * 32
+            adapter._progress_store_record_attempt(store, attempt, [0], checkpoint_binding)
+            adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                source["columns"], False, 1_000_000)
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_reverify_export"), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory",
+                                   side_effect=lambda path: path.mkdir(mode=0o700) or path):
+                result = adapter._resume_published_progress(cfg, "5" * 64, comp, "6" * 64,
+                    {"selected_columns": source["columns"]}, [source], source_binding, probe)
+                saved_before = {p.name: p.read_bytes() for p in Path(result["output_directory"]).iterdir()}
+                changed_probe = {**probe, "resources_before": {"observed": "later"},
+                                 "resources_after": {"observed": "later"}}
+                repeated = adapter._resume_published_progress(cfg, "5" * 64, comp, "6" * 64,
+                    {"selected_columns": source["columns"]}, [source], source_binding, changed_probe)
+            published = Path(result["output_directory"])
+            saved_manifest = json.loads((published / "manifest.json").read_text())
+            self.assertEqual(saved_manifest["status"], "partial_aborted_ambiguous")
+            self.assertFalse(saved_manifest["provenance"]["terminal_worker_result_verified"])
+            self.assertNotIn("pre_data_zero_row_probe", saved_manifest)
+            self.assertNotIn("resources", saved_manifest)
+            self.assertEqual(repeated["manifest_sha256"], result["manifest_sha256"])
+            self.assertEqual({p.name: p.read_bytes() for p in published.iterdir()}, saved_before)
+
+    def test_two_row_controller_recovers_empty_and_prefix_only_events_without_losing_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            rows = [row("a" * 64), row("b" * 64)]
+            cfg = {"output_dir": str(root / "output"), "taxonomy_sha256": "d" * 64,
+                "selected_columns": rows[0]["columns"], "assume_exhaustive_labels": False,
+                "max_protocol_bytes": 1_000_000, "max_output_bytes": 1_000_000,
+                "max_progress_store_bytes": 100_000_000}
+            comp = {"model_name": "fixture/model", "server_binary_sha256": "a" * 64,
+                "server_version": "fixture-server", "system_prompt": "{labels}\\n{text}",
+                "prompt_revision": "fixture-v1", "timeout_seconds": 1,
+                "max_request_bytes": 1000, "max_response_bytes": 1000,
+                "num_ctx": 256, "num_predict": 64, "temperature": 0.0,
+                "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.0,
+                "resource_memory_max_bytes": 1000, "resource_cpu_quota_percent": 50,
+                "remote_scope_tasks_max": 10, "min_memory_available_bytes": 1,
+                "min_disk_free_bytes": 1, "min_gpu_free_bytes": 0,
+                "max_manifest_bytes": 1000}
+            source_binding = {"manifest_sha256": "1" * 64, "config_sha256": "2" * 64,
+                "train_sha256": "3" * 64, "train_bytes": 10}
+            stable = {"boundary": "same_uid_private_network_namespace_without_nonloopback_routes",
+                "server_binary_sha256": "a" * 64, "server_version": "fixture-server"}
+            def probe(pid, netns):
+                return {"zero_row_probe": True,
+                    "proposal_config_identity_sha256": adapter._proposal_config_identity_sha(cfg),
+                    "model_identity": {"reported_manifest_sha256": "4" * 64},
+                    "runtime_boundary": {**stable, "server_pid": pid,
+                        "network_namespace_inode": netns, "process_tree_rss_bytes": 100,
+                        "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"},
+                    "resources_before": {}, "resources_after": {}}
+            original_probe = probe(20, 220)
+            checkpoint_binding = adapter._progress_binding(cfg, "5" * 64, comp, "6" * 64,
+                rows, source_binding, adapter._sha(Path(adapter.__file__).read_bytes()),
+                adapter._sha(Path(adapter.comparator.__file__).read_bytes()), original_probe)
+            store = adapter._progress_store_path(Path(cfg["output_dir"]))
+            adapter._progress_store_create(store, checkpoint_binding,
+                cfg["max_progress_store_bytes"], "5" * 64)
+            inferred = []
+            def make_answer(source):
+                inferred.append(source["id"])
+                with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+                    events, _rows, _aborted, _reason = adapter._worker_loop([source],
+                        source["columns"], {},
+                        lambda *_: ("answered", ["intents:build.software"], 1.0),
+                        False, 8192)
+                return events[0]
+
+            first_attempt = "a" * 32
+            with mock.patch.object(adapter, "_outside_git", return_value=True), \
+                 mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_reverify_export"), \
+                 mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
+                 mock.patch.object(adapter.comparator, "_private_report_directory",
+                                   side_effect=lambda path: path.mkdir(mode=0o700) or path):
+                # Interruption before the first event must leave both rows pending.
+                self.assertIsNone(adapter._resume_published_progress(cfg, "5" * 64, comp, "6" * 64,
+                    {"selected_columns": rows[0]["columns"]}, rows, source_binding, probe(21, 221)))
+                self.assertEqual(adapter._progress_pending_indices(rows, {}), [0, 1])
+                first_event = make_answer(rows[0])
+                adapter._progress_store_record_attempt(store, first_attempt, [0], checkpoint_binding)
+                adapter._checkpoint_worker_event(store, first_attempt, 0, 0, rows[0], first_event,
+                    rows[0]["columns"], False, cfg["max_progress_store_bytes"])
+                # A durable prefix with only row zero also resumes without indexing row one.
+                self.assertIsNone(adapter._resume_published_progress(cfg, "5" * 64, comp, "6" * 64,
+                    {"selected_columns": rows[0]["columns"]}, rows, source_binding, probe(22, 222)))
+                _records, latest = adapter._progress_store_read(store, checkpoint_binding, rows, cfg)
+                self.assertEqual(adapter._progress_pending_indices(rows, latest), [1])
+                inferred.clear()
+                second_event = make_answer(rows[1])
+                second_attempt = "b" * 32
+                adapter._progress_store_record_attempt(store, second_attempt, [1], checkpoint_binding)
+                adapter._checkpoint_worker_event(store, second_attempt, 0, 1, rows[1], second_event,
+                    rows[1]["columns"], False, cfg["max_progress_store_bytes"])
+                result = adapter._resume_published_progress(cfg, "5" * 64, comp, "6" * 64,
+                    {"selected_columns": rows[0]["columns"]}, rows, source_binding, probe(23, 223))
+            self.assertEqual(inferred, [rows[1]["id"]])
+            self.assertEqual(result["rows_completed"], 2)
+            self.assertEqual(result["status_counts"], {"answered": 2})
+            published = Path(result["output_directory"])
+            saved_rows = [json.loads(line) for line in (published / "proposals.jsonl").read_text().splitlines()]
+            self.assertEqual([item["row_id"] for item in saved_rows], [source["id"] for source in rows])
+            saved = json.loads((published / "manifest.json").read_text())
+            self.assertEqual(saved["counts"]["statuses"], {"answered": 2})
+            self.assertFalse(saved["provenance"]["terminal_worker_result_verified"])
+            attempts = [json.loads(path.read_text()) for path in sorted(store.glob("attempt-*.json"))]
+            self.assertEqual([item["indices"] for item in attempts], [[0], [1]])
+            events = [json.loads(line) for line in (store / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([item["index"] for item in events], [0, 1])
+
+    def test_checkpoint_write_failure_retains_partial_evidence_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, event = self._event()
+            store, binding, cfg, attempt = self._store(root, source)
+            real_write = adapter.os.write
+            calls = 0
+            def partial_then_fail(fd, data):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return real_write(fd, data[:12])
+                raise OSError("injected checkpoint interruption")
+            with mock.patch.object(adapter.os, "write", side_effect=partial_then_fail):
+                with self.assertRaises(OSError):
+                    adapter._checkpoint_worker_event(store, attempt, 0, 0, source, event,
+                        source["columns"], False, 1_000_000)
+            self.assertTrue((store / "events.jsonl").exists())
+            with self.assertRaises(adapter.ProposalError):
+                adapter._progress_store_read(store, binding, [source], cfg)
 
     def test_rename_and_final_replace_interruptions_leave_incomplete_manifest(self):
         for point in ("rename", "replace"):
@@ -323,10 +1375,18 @@ class PublicationTests(unittest.TestCase):
                 parent = Path(tmp) / "private-output"
                 parent.mkdir()
                 final = parent / "run-1"
-                patcher = mock.patch.object(adapter.os, "rename", side_effect=OSError("interrupt")) if point == "rename" else \
-                          mock.patch.object(adapter.os, "replace", side_effect=OSError("interrupt"))
+                if point == "rename":
+                    patcher = mock.patch.object(adapter.os, "rename", side_effect=OSError("interrupt"))
+                else:
+                    real_replace = adapter.os.replace
+                    def interrupt_manifest_replace(src, dst):
+                        if Path(dst).name == "manifest.json" and Path(src).name.startswith(".manifest-complete-"):
+                            raise OSError("interrupt")
+                        real_replace(src, dst)
+                    patcher = mock.patch.object(adapter.os, "replace", side_effect=interrupt_manifest_replace)
                 with mock.patch.object(adapter, "_private_dir", return_value=True), \
                      mock.patch.object(adapter, "_outside_git", return_value=True), \
+                     mock.patch.object(adapter.comparator, "_verify_private_report_directory", return_value=True), \
                      mock.patch.object(adapter.comparator, "_private_report_directory",
                                        side_effect=lambda path: path.mkdir(mode=0o700) or path), patcher:
                     with self.assertRaises(OSError):
@@ -337,10 +1397,64 @@ class PublicationTests(unittest.TestCase):
                 marker = dirs[0] / "manifest.json"
                 self.assertTrue(marker.exists())
                 self.assertEqual(json.loads(marker.read_text())["status"], "incomplete")
-                self.assertFalse((dirs[0] / ".manifest-complete.tmp").exists())
+                self.assertTrue(list(dirs[0].glob(".manifest-complete-*.tmp")))
+
+    def test_worst_legal_answered_output_is_preflighted_and_actual_publish_bound_is_enforced(self):
+        source = row()
+        labels = [f"{column['field']}:{column['label']}" for column in source["columns"]]
+        with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+            _events, result_rows, _aborted, _reason = adapter._worker_loop(
+                [source], source["columns"], {},
+                lambda *_: ("answered", labels, 1.0), True, 8192)
+        actual_payload = (json.dumps(result_rows[0], sort_keys=True, ensure_ascii=False,
+            separators=(",", ":")) + "\n").encode("utf-8")
+        bound = adapter._check_result_bounds([source], source["columns"], 1_000_000, 1_000_000)
+        self.assertGreaterEqual(bound["max_output_bytes"], len(actual_payload))
+        with self.assertRaises(adapter.ProposalError):
+            adapter._check_result_bounds([source], source["columns"],
+                len(actual_payload) - 1, 1_000_000)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "private-output"
+            parent.mkdir()
+            final = parent / "run-1"
+            with mock.patch.object(adapter, "_private_dir", return_value=True), \
+                 mock.patch.object(adapter, "_outside_git", return_value=True):
+                with self.assertRaisesRegex(adapter.ProposalError, "encoded proposals exceed"):
+                    adapter._atomic_private_publish(final, result_rows,
+                        {"schema_version": adapter.REPORT_SCHEMA, "status": "complete"},
+                        len(actual_payload) - 1)
+            self.assertFalse(final.exists())
+            self.assertEqual(list(parent.iterdir()), [])
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_worker_streams_each_row_event_before_starting_next_inference(self):
+        first = row("a" * 64)
+        second = row("b" * 64)
+        streamed = []
+        calls = 0
+        def infer(_request, _labels):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.assertEqual(len(streamed), 1)
+            return "answered", ["intents:build.software"], float(calls)
+        with mock.patch.object(adapter, "_request", return_value=b"fixture"):
+            progress, _results, _aborted, _reason = adapter._worker_loop(
+                [first, second], first["columns"], {}, infer, False, 8192,
+                progress_emit=streamed.append)
+        self.assertEqual(streamed, progress)
+        self.assertEqual([event["index"] for event in streamed], [0, 1])
+
+    def test_post_worker_source_and_publication_phases_are_fixed_diagnostics(self):
+        for phase in ("source_recheck", "publication"):
+            with self.subTest(phase=phase):
+                adapter._diagnostic_phase(phase)
+                record = adapter._diagnostic_record(adapter.ProposalError("private sentinel"))
+                self.assertEqual(record["phase"], phase)
+                self.assertNotIn("sentinel", json.dumps(record))
+
     def test_controller_acknowledges_only_after_outside_denial_then_waits_for_verified_ready(self):
         order = []
         runtime = {"boundary": "same_uid_private_network_namespace_without_nonloopback_routes",
@@ -479,7 +1593,7 @@ class WorkerProtocolTests(unittest.TestCase):
         safe_row = adapter._payload_row(row())
         self.assertNotIn("partial_review_provenance", safe_row)
         payload = {"schema_version": adapter.PAYLOAD_SCHEMA, "binding": binding(),
-                   "records": [safe_row], "zero_row_probe": False}
+                   "records": [safe_row], "zero_row_probe": False, "attempt_id": "a" * 32}
         records, columns = adapter._validate_worker_payload(payload, worker_expectation())
         self.assertEqual(len(records), 1)
         self.assertEqual(columns, row()["columns"])
@@ -553,8 +1667,10 @@ class WorkerProtocolTests(unittest.TestCase):
 
     def test_generated_worker_entry_runs_real_loop_and_emits_bounded_protocol(self):
         source_row = row()
+        source_row_two = row("1" * 64)
         payload = {"schema_version": adapter.PAYLOAD_SCHEMA, "binding": binding(),
-                   "records": [adapter._payload_row(source_row)], "zero_row_probe": False}
+                   "records": [adapter._payload_row(source_row), adapter._payload_row(source_row_two)], "zero_row_probe": False,
+                   "attempt_id": "a" * 32}
         raw_payload = (json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                   separators=(",", ":")) + "\n").encode()
         expected = worker_expectation()
@@ -600,8 +1716,11 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assert_phase(last, "control_ready")
                     return (json.dumps({"phase": "warmup_ack", "control_nonce": last["control_nonce"],
                         "network_namespace_inode": last["network_namespace_inode"], "port": last["port"]}) + "\n").encode()
-                self.assert_phase(last, "ready_for_data")
-                return raw_payload
+                if self.reads == 2:
+                    self.assert_phase(last, "ready_for_data")
+                    return raw_payload
+                self.assert_phase(last, "progress")
+                return (json.dumps(adapter._progress_ack("a" * 32, last["index"], last)) + "\n").encode()
             @staticmethod
             def assert_phase(event, phase):
                 if event.get("phase") != phase:
@@ -636,9 +1755,10 @@ class WorkerProtocolTests(unittest.TestCase):
             adapter._worker(Path("/private/worker-config.json"), "f" * 64)
             success_lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual([line["phase"] for line in success_lines],
-                         ["control_ready", "ready_for_data", "progress", "result"])
+                         ["control_ready", "ready_for_data", "progress", "progress", "result"])
+        self.assertEqual([line["index"] for line in success_lines if line["phase"] == "progress"], [0, 1])
         self.assertEqual(success_lines[2]["result"]["proposal_states"]["intents:build.software"], "proposed_positive")
-        self.assertTrue(success_lines[3]["cleanup_verified"])
+        self.assertTrue(success_lines[4]["cleanup_verified"])
         self.assertEqual(success_lines[1]["model_layer_bytes"], artifact["model_layer_bytes"])
         self.assertEqual(lifecycle, ["warmup", "verify_loaded_model"])
         self.assertNotIn("PRIVATE_SENTINEL", stdout.getvalue())
@@ -646,11 +1766,14 @@ class WorkerProtocolTests(unittest.TestCase):
 
 class CoordinatorEntryTests(unittest.TestCase):
     def cfg_and_comp(self, root: Path):
+        masked._secure_private_path(root, is_directory=True)
+        masked._verify_owner_private_access(root, is_directory=True)
         cfg = {"schema_version": adapter.SCHEMA, "revision": "test-v1",
                "export_dir": str(root / "private-export"), "export_manifest_sha256": "a" * 64,
                "comparison_config": str(root / "comparison.json"), "output_dir": str(root / "output"),
                "selection": {"row_ids": []}, "max_rows": 2, "assume_exhaustive_labels": False,
                "max_output_bytes": 100_000, "max_prompt_bytes": 8192, "max_protocol_bytes": 1_000_000,
+               "max_progress_store_bytes": 100_000_000,
                "max_export_bytes": 100_000, "export_config_sha256": "b" * 64,
                "export_train_sha256": "c" * 64, "taxonomy_sha256": "d" * 64,
                "selected_columns": row()["columns"], "screening_policy_sha256": "3" * 64,
@@ -658,6 +1781,417 @@ class CoordinatorEntryTests(unittest.TestCase):
         comp = {"max_manifest_bytes": 100_000}
         (root / "comparison.json").write_text("{}", encoding="utf-8")
         return cfg, comp
+
+    def _full_fake_coordinator(self, scenario: str, bad_model_identity: bool = False):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "owner-private"
+            root.mkdir()
+            masked._secure_private_path(root, is_directory=True)
+            masked._verify_owner_private_access(root, is_directory=True)
+            export = root / "export"
+            export.mkdir()
+            masked._secure_private_path(export, is_directory=True)
+            columns = row()["columns"]
+            rows = [row("a" * 64), row("b" * 64)]
+            train_raw = b"".join((json.dumps(item, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":")) + "\n").encode("utf-8") for item in rows)
+            export_config_raw = b'{"schema_version":"synthetic-export-config"}\n'
+            export_manifest = {"schema_version": masked.EXPORT_SCHEMA,
+                "config_sha256": adapter._sha(export_config_raw),
+                "taxonomy_sha256": "c" * 64, "screening_policy_sha256": "3" * 64,
+                "screening_code_sha256": "4" * 64, "selected_columns": columns,
+                "output_files": {"train.jsonl": {"sha256": adapter._sha(train_raw),
+                    "bytes": len(train_raw)}}}
+            manifest_raw = (json.dumps(export_manifest, sort_keys=True) + "\n").encode()
+            for name, raw in (("config.json", export_config_raw), ("manifest.json", manifest_raw),
+                              ("train.jsonl", train_raw)):
+                path = export / name
+                path.write_bytes(raw)
+                masked._secure_private_path(path, is_directory=False)
+                masked._verify_owner_private_access(path, is_directory=False)
+
+            output_parent = root / "output-parent"
+            output_parent.mkdir()
+            masked._secure_private_path(output_parent, is_directory=True)
+            masked._verify_owner_private_access(output_parent, is_directory=True)
+            comparison_path = root / "comparison.json"
+            comparison_path.write_text("{}\n", encoding="utf-8")
+            masked._secure_private_path(comparison_path, is_directory=False)
+            masked._verify_owner_private_access(comparison_path, is_directory=False)
+            cfg_sha, comp_sha, receipt_sha = "5" * 64, "6" * 64, "9" * 64
+            cfg = {"schema_version": adapter.SCHEMA, "revision": "fake-coordinator-v1",
+                "export_dir": str(export), "export_manifest_sha256": adapter._sha(manifest_raw),
+                "export_config_sha256": adapter._sha(export_config_raw),
+                "export_train_sha256": adapter._sha(train_raw), "max_export_bytes": len(train_raw),
+                "taxonomy_sha256": "c" * 64, "screening_policy_sha256": "3" * 64,
+                "screening_code_sha256": "4" * 64, "selected_columns": columns,
+                "selection": {"row_ids": [item["id"] for item in rows], "max_rows": 2},
+                "max_rows": 2, "max_prompt_bytes": 8192, "max_output_bytes": 1_000_000,
+                "max_protocol_bytes": 1_000_000, "max_progress_store_bytes": 100_000_000,
+                "max_manifest_bytes": 1_000_000, "assume_exhaustive_labels": False,
+                "comparison_config": str(comparison_path), "output_dir": str(output_parent / "run")}
+            comp = {"model_name": "fixture/model", "server_binary_sha256": "a" * 64,
+                "server_version": "fixture-server", "expected_manifest_sha256": "4" * 64,
+                "remote_acquisition_receipt": {"synthetic": True}, "runtime_port": 11434,
+                "remote_host": "worker.invalid", "remote_user": "teacher", "ssh_port": 22,
+                "remote_home": "/home/teacher", "remote_workdir": "/home/teacher/tasks",
+                "remote_uid": 1000, "remote_sudo_path": "/usr/bin/sudo",
+                "remote_systemd_run_path": "/usr/bin/systemd-run", "remote_true_path": "/usr/bin/true",
+                "remote_unshare_path": "/usr/bin/unshare", "remote_bash_path": "/usr/bin/bash",
+                "remote_ip_path": "/usr/sbin/ip", "remote_setpriv_path": "/usr/bin/setpriv",
+                "remote_python_path": "/usr/bin/python3", "remote_systemctl_path": "/usr/bin/systemctl",
+                "remote_expected_hostname": "fake-worker", "remote_expected_architecture": "x86_64",
+                "resource_memory_max_bytes": 10_000, "resource_cpu_quota_percent": 50,
+                "remote_scope_tasks_max": 10, "min_memory_available_bytes": 1,
+                "min_disk_free_bytes": 1, "min_gpu_free_bytes": 0,
+                "worker_start_timeout_seconds": 1, "worker_ready_wait_margin_seconds": 1,
+                "timeout_seconds": 1, "batch_overhead_margin_seconds": 1,
+                "max_request_bytes": 1000, "max_response_bytes": 1000, "max_payload_bytes": 1_000_000,
+                "max_manifest_bytes": 1_000_000,
+                "num_ctx": 256, "num_predict": 64, "temperature": 0.0,
+                "top_k": 1, "top_p": 1.0, "repeat_penalty": 1.0,
+                "system_prompt": "{labels} {text}", "prompt_revision": "fake-v1"}
+            host = {"hostname": "fake-worker", "architecture": "x86_64", "netns_inode": 900,
+                "memory_available_bytes": 1_000_000, "home_disk_free_bytes": 1_000_000,
+                "loaded_model_count": 0, "ollama_service_pid": 12, "ollama_version": "fixture-server"}
+            inference_ids: list[str] = []
+            ack_log: list[tuple[int, int, int]] = []
+            captured_payloads: list[tuple[int, list[str], bool]] = []
+            processes = []
+            cleanup_calls = []
+            real_run = subprocess.run
+
+            class FakeMasked:
+                @staticmethod
+                def _read_bounded(path, limit, what):
+                    return masked._read_bounded(path, limit, what)
+                @staticmethod
+                def _secure_private_path(path, is_directory):
+                    return masked._secure_private_path(path, is_directory)
+                @staticmethod
+                def _verify_owner_private_access(path, is_directory):
+                    return masked._verify_owner_private_access(path, is_directory)
+                @staticmethod
+                def load_export(snapshot, train_only=False):
+                    loaded_manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+                    loaded_rows = [json.loads(line) for line in
+                        (snapshot / "train.jsonl").read_text(encoding="utf-8").splitlines()]
+                    return loaded_manifest, {"train": loaded_rows}
+
+            class FakeInput:
+                def __init__(self, process):
+                    self.process = process
+                    self.writes = []
+                    self.closed = False
+                def write(self, value):
+                    raw = bytes(value)
+                    self.writes.append(raw)
+                    try:
+                        item = json.loads(raw)
+                    except (UnicodeError, json.JSONDecodeError):
+                        return len(raw)
+                    if item.get("schema_version") == adapter.PAYLOAD_SCHEMA:
+                        self.process.payload = item
+                        self.process.payload_raw = raw
+                        captured_payloads.append((self.process.index,
+                            [record["id"] for record in item["records"]], item["zero_row_probe"]))
+                    elif item.get("phase") == "ack":
+                        event = self.process.expected_events[item["index"]]
+                        adapter._validate_progress_ack(item, self.process.payload["attempt_id"],
+                                                       item["index"], event)
+                        events_path = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True) / "events.jsonl"
+                        durable_count = len(events_path.read_bytes().splitlines())
+                        expected_count = self.process.initial_event_count + len(self.process.delivered_events)
+                        if durable_count != expected_count:
+                            raise AssertionError("ACK preceded durable event persistence")
+                        self.process.acks.append(item["index"])
+                        ack_log.append((self.process.index, item["index"], durable_count))
+                    return len(raw)
+                def flush(self):
+                    return None
+                def close(self):
+                    self.closed = True
+
+            class FakeProcess:
+                def __init__(self, index):
+                    self.index = index
+                    self.stdin = FakeInput(self)
+                    self.returncode = None
+                    self.read_count = 0
+                    self.payload = None
+                    self.payload_raw = None
+                    self.ready = None
+                    self.events = []
+                    self.expected_events = {}
+                    self.delivered_events = []
+                    self.acks = []
+                    self.initial_event_count = None
+                    self.worker_config_sha = None
+                    self.aborted = False
+                    self.abort_reason = None
+                    self.outputs = []
+                    processes.append(self)
+                def poll(self):
+                    return self.returncode
+                def kill(self):
+                    self.returncode = -9
+                def wait(self, timeout=None):
+                    if self.returncode is None:
+                        self.returncode = 0
+                    return self.returncode
+
+            def make_answer(record):
+                def infer(_request, _labels):
+                    inference_ids.append(record["id"])
+                    return "answered", ["intents:build.software"], 1.0
+                with mock.patch.object(adapter, "_request", return_value=b"synthetic-request"):
+                    event = adapter._worker_loop([record], columns, {}, infer, False, 8192)[0][0]
+                return event
+
+            def read_worker_line(process, _lines, _timeout):
+                ordinal = process.read_count
+                process.read_count += 1
+                if ordinal == 0:
+                    pid, netns = 500 + process.index, 2000 + process.index
+                    runtime = {"boundary": "same_uid_private_network_namespace_without_nonloopback_routes",
+                        "network_namespace_inode": netns, "server_pid": pid,
+                        "server_binary_sha256": comp["server_binary_sha256"],
+                        "server_version": comp["server_version"], "process_tree_rss_bytes": 100,
+                        "process_tree_rss_scope": "server and observed descendants; summed RSS can double-count shared pages"}
+                    process.runtime = runtime
+                    return {"phase": "control_ready", "control_nonce": f"{process.index + 1:032x}",
+                        "network_namespace_inode": netns, "server_pid": pid, "port": comp["runtime_port"],
+                        "receipt_sha256": receipt_sha, "server_binary_sha256": comp["server_binary_sha256"],
+                        "server_version": comp["server_version"],
+                        "worker_code_sha256": adapter._sha(Path(adapter.__file__).read_bytes()),
+                        "worker_config_sha256": process.worker_config_sha, "runtime_boundary": runtime}
+                if ordinal == 1:
+                    manifest_sha = "f" * 64 if bad_model_identity and process.index == 1 else "4" * 64
+                    layer_bytes = 101 if bad_model_identity and process.index == 1 else 100
+                    process.ready = {"phase": "ready_for_data", "network_namespace_inode": process.runtime["network_namespace_inode"],
+                        "server_pid": process.runtime["server_pid"], "port": comp["runtime_port"],
+                        "model_manifest_sha256": manifest_sha, "model_layer_bytes": layer_bytes,
+                        "artifact_layer_bytes": layer_bytes, "receipt_sha256": receipt_sha,
+                        "server_binary_sha256": comp["server_binary_sha256"], "server_version": comp["server_version"],
+                        "worker_code_sha256": adapter._sha(Path(adapter.__file__).read_bytes()),
+                        "worker_config_sha256": process.worker_config_sha,
+                        "runtime_boundary": process.runtime,
+                        "model_identity": {"reported_manifest_sha256": manifest_sha},
+                        "warmup": {"status": "completed"}, "resources_before": {"available": 9}}
+                    return process.ready
+                if process.payload is None:
+                    raise AssertionError("controller requested a worker result before sending a payload")
+                if process.payload["zero_row_probe"]:
+                    return {"phase": "result", "schema_version": adapter.WORKER_RESULT_SCHEMA,
+                        "payload_sha256": adapter._sha(process.payload_raw), "rows_received": 0,
+                        "statuses": [], "progress_sha256": adapter._sha(b""), "aborted": False,
+                        "abort_reason": None, "resources_after": {"available": 8},
+                        "warmup": {"status": "completed"}, "artifact": {"model_layer_bytes": 100},
+                        "model_identity": {"reported_manifest_sha256": "4" * 64},
+                        "model_layer_bytes": 100, "receipt_sha256": receipt_sha,
+                        "runtime_boundary": process.runtime, "worker_config_sha256": process.worker_config_sha,
+                        "cleanup_verified": True}
+                if process.initial_event_count is None:
+                    store_events = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True) / "events.jsonl"
+                    process.initial_event_count = len(store_events.read_bytes().splitlines())
+                event_ordinal = ordinal - 2
+                records = process.payload["records"]
+                if scenario == "prefix" and process.index == 1:
+                    if event_ordinal == 0:
+                        event = make_answer(records[0])
+                    else:
+                        if process.acks != [0]:
+                            raise AssertionError("second row was requested before first row ACK")
+                        raise TimeoutError("synthetic process interruption after first durable event")
+                elif scenario == "abort" and process.index == 1:
+                    if not process.events:
+                        infer_count = 0
+                        def timeout_first(_request, _labels):
+                            nonlocal infer_count
+                            infer_count += 1
+                            inference_ids.append(records[infer_count - 1]["id"])
+                            if infer_count == 1:
+                                raise TimeoutError("synthetic teacher timeout")
+                            return "answered", ["intents:build.software"], 1.0
+                        with mock.patch.object(adapter, "_request", return_value=b"synthetic-request"):
+                            events, outputs, aborted, reason = adapter._worker_loop(records, columns, {},
+                                timeout_first, False, 8192)
+                        process.events = events
+                        process.outputs = outputs
+                        process.aborted = aborted
+                        process.abort_reason = reason
+                        process.expected_events = {item["index"]: item for item in events}
+                    if event_ordinal < len(process.events):
+                        if event_ordinal and process.acks != list(range(event_ordinal)):
+                            raise AssertionError("abort continuation event arrived before prior ACK")
+                        event = process.events[event_ordinal]
+                    else:
+                        return make_result(process)
+                else:
+                    if event_ordinal < len(records):
+                        if event_ordinal and process.acks != list(range(event_ordinal)):
+                            raise AssertionError("next synthetic inference began before prior ACK")
+                        event = make_answer(records[event_ordinal])
+                        event["index"] = event_ordinal
+                    else:
+                        return make_result(process)
+                process.expected_events[event["index"]] = event
+                process.delivered_events.append(event)
+                return event
+
+            def make_result(process):
+                events_raw = b"".join((json.dumps(event, sort_keys=True, ensure_ascii=False,
+                    separators=(",", ":")) + "\n").encode("utf-8") for event in process.delivered_events)
+                statuses = [event["status"] for event in process.delivered_events]
+                return {"phase": "result", "schema_version": adapter.WORKER_RESULT_SCHEMA,
+                    "payload_sha256": adapter._sha(process.payload_raw),
+                    "rows_received": len(process.payload["records"]), "statuses": statuses,
+                    "progress_sha256": adapter._sha(events_raw), "aborted": process.aborted,
+                    "abort_reason": process.abort_reason, "resources_after": {"available": 8},
+                    "warmup": {"status": "completed"}, "artifact": {"model_layer_bytes": process.ready["artifact_layer_bytes"]},
+                    "model_identity": process.ready["model_identity"],
+                    "model_layer_bytes": process.ready["model_layer_bytes"],
+                    "receipt_sha256": receipt_sha, "runtime_boundary": process.runtime,
+                    "worker_config_sha256": process.worker_config_sha, "cleanup_verified": True}
+
+            def queue_protocol(_process):
+                lines = adapter.queue.Queue()
+                lines.put(None)
+                return lines
+
+            def fake_subprocess_run(argv, *args, **kwargs):
+                if isinstance(argv, (list, tuple)) and argv and argv[0] == "scp":
+                    local = Path(argv[-2])
+                    if local.name == "worker-config.json":
+                        for process in processes:
+                            if process.worker_config_sha is None:
+                                process.worker_config_sha = adapter._sha(local.read_bytes())
+                        # The scp happens before its associated Popen; retain for the next worker.
+                        transport.pending_worker_config_sha = adapter._sha(local.read_bytes())
+                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+                return real_run(argv, *args, **kwargs)
+
+            class FakeTransport:
+                pending_worker_config_sha = None
+                def popen(self, *_args, **_kwargs):
+                    process = FakeProcess(len(processes))
+                    process.worker_config_sha = self.pending_worker_config_sha
+                    self.pending_worker_config_sha = None
+                    return process
+
+            transport = FakeTransport()
+            class FakeMaskedExport(FakeMasked):
+                pass
+
+            def perform_run(resume):
+                return adapter._run_unleased(comparison_path, resume=resume)
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(adapter, "_masked", return_value=FakeMaskedExport()))
+                stack.enter_context(mock.patch.object(adapter, "load_config", return_value=(cfg, cfg_sha)))
+                stack.enter_context(mock.patch.object(adapter.comparator, "load_config", return_value=(comp, comp_sha)))
+                stack.enter_context(mock.patch.object(adapter.comparator, "verify_acquisition",
+                    return_value=({"synthetic": True}, receipt_sha)))
+                stack.enter_context(mock.patch.object(adapter, "_remote_identity_snapshot", return_value=host))
+                stack.enter_context(mock.patch.object(adapter.comparator, "_remote_snapshot", return_value=host))
+                stack.enter_context(mock.patch.object(adapter.comparator, "_remote_port_closed", return_value=True))
+                stack.enter_context(mock.patch.object(adapter.comparator, "_remote_install",
+                    return_value={"receipt_sha256": receipt_sha}))
+                stack.enter_context(mock.patch.object(adapter.comparator, "_ssh_run",
+                    return_value=SimpleNamespace(returncode=0)))
+                stack.enter_context(mock.patch.object(adapter, "_remote_create_workdir"))
+                stack.enter_context(mock.patch.object(adapter, "_remote_verify_files"))
+                stack.enter_context(mock.patch.object(adapter, "_remote_cleanup_worker",
+                    side_effect=lambda *_: cleanup_calls.append("cleaned")))
+                fake_subprocess = SimpleNamespace(run=fake_subprocess_run, Popen=transport.popen,
+                    PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+                    TimeoutExpired=subprocess.TimeoutExpired, SubprocessError=subprocess.SubprocessError)
+                stack.enter_context(mock.patch.object(adapter, "subprocess", fake_subprocess))
+                stack.enter_context(mock.patch.object(adapter.comparator, "_queue_protocol", side_effect=queue_protocol))
+                stack.enter_context(mock.patch.object(adapter, "_read_worker_line", side_effect=read_worker_line))
+                stack.enter_context(mock.patch.object(adapter, "_reverify_export", wraps=adapter._reverify_export))
+
+                if bad_model_identity:
+                    with self.assertRaises(adapter.ProposalError):
+                        perform_run(False)
+                    self.assertEqual(len(processes), 2)
+                    self.assertEqual(captured_payloads, [(0, [], True)])
+                    self.assertFalse(Path(cfg["output_dir"]).exists())
+                    self.assertFalse(adapter._progress_store_path(Path(cfg["output_dir"])).exists())
+                    self.assertNotIn("PRIVATE_SENTINEL", json.dumps(captured_payloads))
+                    return
+
+                if scenario == "prefix":
+                    with self.assertRaises(TimeoutError):
+                        perform_run(False)
+                    store = adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True)
+                    first_events = [json.loads(line) for line in (store / "events.jsonl").read_text().splitlines()]
+                    self.assertEqual([event["index"] for event in first_events], [0])
+                    self.assertEqual(list(store.glob("terminal-*.json")), [])
+                    self.assertFalse(Path(cfg["output_dir"]).exists())
+                    result = perform_run(True)
+                    self.assertEqual(result["status_counts"], {"answered": 2})
+                    self.assertEqual(captured_payloads,
+                        [(0, [], True), (1, [rows[0]["id"], rows[1]["id"]], False),
+                         (2, [], True), (3, [rows[1]["id"]], False)])
+                    final = Path(result["output_directory"])
+                    saved = json.loads((final / "manifest.json").read_text())
+                    proposals = [json.loads(line) for line in (final / "proposals.jsonl").read_text().splitlines()]
+                    self.assertEqual(saved["status"], "complete")
+                    self.assertTrue(saved["provenance"]["terminal_worker_result_verified"])
+                    self.assertEqual([item["row_id"] for item in proposals], [item["id"] for item in rows])
+                    self.assertEqual(saved["counts"]["statuses"], {"answered": 2})
+                    self.assertEqual(proposals[0]["proposal_states"]["intents:build.software"], "proposed_positive")
+                    self.assertEqual(proposals[0]["proposal_states"]["risks:sensitive-data"], "unknown")
+                    self.assertEqual([item[1] for item in ack_log], [0, 0])
+                    self.assertEqual([item[2] for item in ack_log], [1, 2])
+                    attempts = [json.loads(path.read_text()) for path in store.glob("attempt-*.json")]
+                    self.assertEqual(sorted(item["indices"] for item in attempts), [[0, 1], [1]])
+                    event_records = [json.loads(line) for line in (store / "events.jsonl").read_text().splitlines()]
+                    self.assertEqual([item["index"] for item in event_records], [0, 1])
+                    self.assertEqual(len(list(store.glob("terminal-*.json"))), 1)
+                    self.assertEqual(len(cleanup_calls), 4)
+                    self.assertEqual(len({(process.runtime["server_pid"], process.runtime["network_namespace_inode"])
+                                          for process in (processes[0], processes[2])}), 2)
+                    self.assertNotIn("PRIVATE_SENTINEL", (final / "manifest.json").read_text()
+                        + (final / "proposals.jsonl").read_text())
+                else:
+                    partial_result = perform_run(False)
+                    partial = Path(partial_result["output_directory"])
+                    old_manifest = (partial / "manifest.json").read_bytes()
+                    old_proposals = (partial / "proposals.jsonl").read_bytes()
+                    self.assertEqual(json.loads(old_manifest)["status"], "partial_aborted_ambiguous")
+                    self.assertTrue(json.loads(old_manifest)["provenance"]["terminal_worker_result_verified"])
+                    revision_result = perform_run(True)
+                    revision = Path(revision_result["output_directory"])
+                    linked = json.loads((revision / "manifest.json").read_text())
+                    self.assertNotEqual(revision, partial)
+                    self.assertEqual(linked["status"], "complete")
+                    self.assertTrue(linked["provenance"]["terminal_worker_result_verified"])
+                    self.assertEqual(linked["provenance"]["publication_revision"]["parent_manifest_sha256"],
+                                     adapter._sha(old_manifest))
+                    self.assertEqual((partial / "manifest.json").read_bytes(), old_manifest)
+                    self.assertEqual((partial / "proposals.jsonl").read_bytes(), old_proposals)
+                    self.assertEqual(captured_payloads,
+                        [(0, [], True), (1, [rows[0]["id"], rows[1]["id"]], False),
+                         (2, [], True), (3, [rows[0]["id"], rows[1]["id"]], False)])
+                    revision_attempts = [json.loads(path.read_text()) for path in
+                        adapter._progress_store_path(Path(cfg["output_dir"]), allow_final=True).glob("attempt-*.json")]
+                    self.assertEqual(sorted(item["indices"] for item in revision_attempts), [[0, 1], [0, 1]])
+                    self.assertEqual([event["row_id"] for event in
+                        [json.loads(line) for line in (revision / "proposals.jsonl").read_text().splitlines()]],
+                        [item["id"] for item in rows])
+                    self.assertNotIn("PRIVATE_SENTINEL", (revision / "manifest.json").read_text()
+                        + (revision / "proposals.jsonl").read_text())
+
+    def test_full_unleased_prefix_interruption_resume_uses_actual_transient_worker(self):
+        self._full_fake_coordinator("prefix")
+
+    def test_full_unleased_abort_resumes_to_linked_immutable_revision(self):
+        self._full_fake_coordinator("abort")
+
+    def test_full_unleased_model_identity_mismatch_sends_no_train_payload(self):
+        self._full_fake_coordinator("prefix", bad_model_identity=True)
 
     def test_actual_run_requires_zero_probe_then_enters_actual_worker(self):
         r = row()
