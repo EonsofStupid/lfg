@@ -16,6 +16,7 @@ import shlex
 import shutil
 import socket
 import statistics
+import stat
 import subprocess
 import sys
 import threading
@@ -1341,6 +1342,8 @@ def _private_report_directory(path: Path) -> Path:
         raise ValueError("report output must be outside every Git worktree")
     if path.exists() or path.is_symlink():
         raise ValueError("report directory must be new")
+    # This helper is used only for a newly named, task-owned report directory.
+    # Establish the final ACL before creating any private report bytes.
     path.mkdir(mode=0o700, parents=False, exist_ok=False)
     if os.name == "posix":
         if path.stat().st_uid != os.geteuid() or path.stat().st_mode & 0o077:
@@ -1352,6 +1355,11 @@ def _private_report_directory(path: Path) -> Path:
         if len(who_row) != 2 or not re.fullmatch(r"S-1-[0-9-]+", who_row[1]):
             raise ValueError("current Windows user SID could not be verified")
         user_name, sid = who_row[0], who_row[1]
+        # Reset inherited and explicit grants from the temp parent before
+        # installing the exact intended principals. /inheritance:r alone only
+        # drops inherited ACEs; it leaves an explicit LogonSessionId ACE behind.
+        subprocess.run(["icacls", str(path), "/reset"],
+                       check=True, capture_output=True, text=True, timeout=10, shell=False)
         subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r",
                         f"*{sid}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
                        check=True, capture_output=True, text=True, timeout=10, shell=False)
@@ -1366,10 +1374,56 @@ def _private_report_directory(path: Path) -> Path:
                 entries.append(match.groups())
         allowed = {user_name.casefold(), "builtin\\administrators", "nt authority\\system"}
         principals = {name.strip().casefold() for name, _ in entries}
+        # The descriptor owner is separate from its access list. Require it to
+        # remain the current user, even if the ACL text happens to look right.
+        path_literal = str(path).replace("'", "''")
+        owner_command = (f"(New-Object System.Security.Principal.NTAccount((Get-Acl -LiteralPath '{path_literal}').Owner))."
+                         "Translate([System.Security.Principal.SecurityIdentifier]).Value")
+        owner = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", owner_command],
+                               check=True, capture_output=True, text=True, timeout=10, shell=False).stdout.strip()
         if (principals != allowed or any("F" not in rights for _, rights in entries)
-                or "(I)" in acl):
+                or "(I)" in acl or owner.casefold() != sid.casefold()):
             raise ValueError("report directory ACL is not restricted to owner, SYSTEM, and Administrators")
     return path
+
+
+def _verify_private_report_directory(path: Path) -> bool:
+    """Verify the report-specific owner/SYSTEM/Administrators policy without changing it."""
+    try:
+        if path.is_symlink() or not path.is_dir() or any((p / ".git").exists() for p in (path, *path.parents)):
+            return False
+        if os.name == "posix":
+            info = path.stat(follow_symlinks=False)
+            return info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700
+        if os.name != "nt":
+            return False
+        who = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], check=True,
+                             capture_output=True, text=True, timeout=10, shell=False).stdout
+        row = next(csv.reader([who.strip()]), [])
+        if len(row) != 2 or not re.fullmatch(r"S-1-[0-9-]+", row[1]):
+            return False
+        user_name, sid = row
+        acl = subprocess.run(["icacls", str(path)], check=True, capture_output=True,
+                             text=True, timeout=10, shell=False).stdout
+        lines = acl.splitlines()
+        first = lines[0].partition(str(path))[2].strip() if lines else ""
+        entries = []
+        for line in [first] + [item.strip() for item in lines[1:]]:
+            match = re.fullmatch(r"(.+?):((?:\([^)]+\))+)" , line)
+            if match:
+                entries.append(match.groups())
+        allowed = {user_name.casefold(), "builtin\\administrators", "nt authority\\system"}
+        if ({name.strip().casefold() for name, _rights in entries} != allowed
+                or any("F" not in rights for _name, rights in entries) or "(I)" in acl):
+            return False
+        literal = str(path).replace("'", "''")
+        command = (f"(New-Object System.Security.Principal.NTAccount((Get-Acl -LiteralPath '{literal}').Owner))."
+                   "Translate([System.Security.Principal.SecurityIdentifier]).Value")
+        owner = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                               check=True, capture_output=True, text=True, timeout=10, shell=False).stdout.strip()
+        return owner.casefold() == sid.casefold()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def _ssh_run(config: dict[str, Any], script: str, timeout: float = 30) -> subprocess.CompletedProcess:
@@ -1453,7 +1507,17 @@ def _remote_install(config: dict[str, Any], remote_config_path: str) -> dict[str
 
 
 def _queue_protocol(process: subprocess.Popen) -> queue.Queue:
-    lines: queue.Queue = queue.Queue()
+    # Four bounded 1 MiB lines cap reader buffering even if a child floods stdout.
+    lines: queue.Queue = queue.Queue(maxsize=4)
+
+    def enqueue(value: str | None) -> bool:
+        try:
+            lines.put(value, timeout=1)
+            return True
+        except queue.Full:
+            if process.poll() is None:
+                process.kill()
+            return False
 
     def reader() -> None:
         assert process.stdout is not None
@@ -1462,14 +1526,15 @@ def _queue_protocol(process: subprocess.Popen) -> queue.Queue:
             if not line:
                 break
             if len(line) > 1_048_576:
-                lines.put("__oversized_protocol_line__")
+                enqueue("__oversized_protocol_line__")
                 break
             try:
-                lines.put(line.decode("utf-8").rstrip("\r\n"))
+                if not enqueue(line.decode("utf-8").rstrip("\r\n")):
+                    return
             except UnicodeDecodeError:
-                lines.put("__invalid_utf8_protocol_line__")
+                enqueue("__invalid_utf8_protocol_line__")
                 break
-        lines.put(None)
+        enqueue(None)
 
     threading.Thread(target=reader, daemon=True).start()
     return lines

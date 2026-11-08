@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import http.client
 import json
@@ -29,13 +30,29 @@ masked_supervision = None
 
 SCHEMA = "lfg.train-teacher-proposals-config.v1"
 REPORT_SCHEMA = "lfg.train-teacher-proposals.v1"
-PAYLOAD_SCHEMA = "lfg.train-teacher-worker-payload.v1"
+PAYLOAD_SCHEMA = "lfg.train-teacher-worker-payload.v2"
 WORKER_RESULT_SCHEMA = "lfg.train-teacher-worker-result.v1"
+PROGRESS_ACK_SCHEMA = "lfg.teacher-progress-ack.v1"
+PROGRESS_ACK_MAX_BYTES = 1024
 HEX = re.compile(r"^[0-9a-f]{64}$")
 CONFIG_LIMIT = 65_536
 WORKER_CONFIG_LIMIT = comparator.MAX_CONFIG_BYTES
 MASKED_ROW_SCHEMA = "lfg.masked-supervision-row.v1"
 MAX_TRAIN_PAYLOAD_ROWS = 100_000
+PROGRESS_STORE_SCHEMA = "lfg.teacher-progress-store.v1"
+PROGRESS_EVENT_SCHEMA = "lfg.teacher-progress-event.v1"
+PROGRESS_TERMINAL_SCHEMA = "lfg.teacher-progress-terminal.v1"
+PROGRESS_REVISION_SCHEMA = "lfg.teacher-progress-revision.v1"
+PROGRESS_PROBE_RECEIPT_SCHEMA = "lfg.teacher-progress-probe-receipt.v1"
+PROGRESS_PUBLICATION_SCHEMA = "lfg.teacher-progress-publication.v1"
+PROGRESS_ATTEMPT_SCHEMA = "lfg.teacher-progress-attempt.v1"
+PROGRESS_STORE_HARD_MAX_BYTES = 1_073_741_824
+PROGRESS_STORE_DEFAULT_BYTES = 67_108_864
+PROGRESS_CAPACITY_SCHEMA = "lfg.teacher-progress-capacity.v1"
+PROGRESS_HEADER_MAX_BYTES = 16 * 1024 * 1024
+PROGRESS_TERMINAL_MAX_BYTES = 32 * 1024 * 1024
+PROGRESS_EVENT_MAX_BYTES = 1_048_576
+PUBLICATION_TEMP_EVIDENCE_MAX = 32
 
 # These diagnostics are deliberately independent of exception text and config values.
 DIAGNOSTIC_SCHEMA = "lfg.teacher-lifecycle-diagnostic.v1"
@@ -48,6 +65,7 @@ DIAGNOSTIC_PHASES = frozenset({
     "worker_config_validation", "worker_receipt_validation", "worker_boundary_check",
     "worker_resource_snapshot", "worker_artifact_check", "worker_server_startup",
     "worker_warmup", "worker_payload", "worker_result", "worker_cleanup",
+    "source_recheck", "publication",
 })
 _DIAGNOSTIC_PHASE = "unknown"
 _DIAGNOSTIC_CLEANUP = "not_started"
@@ -190,6 +208,14 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
             type(cfg["max_export_bytes"]) is not int or cfg["max_export_bytes"] < 1 or
             type(cfg["max_protocol_bytes"]) is not int or cfg["max_protocol_bytes"] < 1):
         raise ProposalError("invalid output or prompt bound")
+    requested_capacity = cfg.get("max_progress_store_bytes")
+    if requested_capacity is None:
+        requested_capacity = min(PROGRESS_STORE_HARD_MAX_BYTES,
+                                  max(PROGRESS_STORE_DEFAULT_BYTES, 4 * cfg["max_protocol_bytes"] +
+                                      PROGRESS_TERMINAL_MAX_BYTES))
+    if type(requested_capacity) is not int or not 1 <= requested_capacity <= PROGRESS_STORE_HARD_MAX_BYTES:
+        raise ProposalError("max_progress_store_bytes must be within the supported progress-store capacity")
+    cfg["max_progress_store_bytes"] = requested_capacity
     if type(cfg["assume_exhaustive_labels"]) is not bool:
         raise ProposalError("assume_exhaustive_labels must be boolean")
     if not isinstance(cfg["selection"], dict) or set(cfg["selection"]) - {"row_ids", "max_rows"}:
@@ -327,30 +353,65 @@ def _payload_row(row: dict) -> dict:
 
 
 def _check_result_bounds(rows: list[dict], columns: list[dict], max_output_bytes: int,
-                         max_protocol_bytes: int) -> None:
+                         max_protocol_bytes: int) -> dict[str, int]:
     labels = [f"{c['field']}:{c['label']}" for c in columns]
     output_bound = 0
     protocol_bound = 0
+    max_record_bytes = 0
+    statuses = {"answered", "abstain", "malformed", "invalid_schema", "refusal", "truncated",
+                "incomplete", "identity_mismatch", "http_error", "timeout", "transport_error",
+                "protocol_error", "request_too_large_not_started", "not_attempted_after_abort"}
+    unknown_elapsed = {"timeout", "transport_error", "protocol_error",
+                       "request_too_large_not_started", "not_attempted_after_abort"}
     for index, row in enumerate(rows):
-        item = {"row_id": row["id"], "family_sha256": row["family"],
+        common = {"row_id": row["id"], "family_sha256": row["family"],
                 "text_sha256": row["text_sha256"], "original_text_sha256": row["original_text_sha256"],
                 "screening": row["screening"], "verified_source_claim": row["verified_source_claim"],
                 "source_identity": row["source_identity"], "columns": columns,
                 "source_targets": row["targets"], "source_known_mask": row["known_mask"],
                 "source_target_origins": row["target_origins"], "source_reviewer_claims": row["target_reviewer_claims"],
-                "status": "not_attempted_after_abort", "elapsed_ms": None,
-                "proposal_states": {label: "proposed_negative" for label in labels},
+                "proposal_states": {label: "proposed_positive" for label in labels},
                 "conflict_labels": labels, "provenance": "unreviewed_local_teacher_claim"}
-        encoded = (json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        event = {"phase": "progress", "index": index, "status": item["status"],
-                 "elapsed_ms": None, "result": item}
-        line = (json.dumps(event, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        if len(line) > 1_048_576:
-            raise ProposalError("one worker result line exceeds protocol limit")
-        output_bound += len(encoded)
-        protocol_bound += len(line)
+        max_row_output = 0
+        max_event_protocol = 0
+        for status in statuses:
+            elapsed = None if status in unknown_elapsed else sys.float_info.max
+            states = (common["proposal_states"] if status == "answered"
+                      else {label: "unknown" for label in labels})
+            conflicts = [] if status == "not_attempted_after_abort" else labels
+            item = {**common, "status": status, "elapsed_ms": elapsed,
+                    "proposal_states": states, "conflict_labels": conflicts}
+            encoded = (json.dumps(item, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+            event = {"phase": "progress", "index": index, "status": status,
+                     "elapsed_ms": elapsed, "result": item}
+            line = (json.dumps(event, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+            if len(line) > PROGRESS_EVENT_MAX_BYTES:
+                raise ProposalError("one worker result line exceeds protocol limit")
+            stored_event = {**event, "index": index}
+            record_base = {"schema_version": PROGRESS_EVENT_SCHEMA,
+                           "attempt_id": "f" * 32, "index": index,
+                           "event": stored_event}
+            record = {**record_base,
+                      "record_sha256": _sha(_canonical_json(record_base).rstrip(b"\n"))}
+            record_raw = _canonical_json(record)
+            if len(record_raw) > PROGRESS_EVENT_MAX_BYTES:
+                raise ProposalError("serialized checkpoint event exceeds stored-record limit")
+            max_row_output = max(max_row_output, len(encoded))
+            max_event_protocol = max(max_event_protocol, len(line))
+            max_record_bytes = max(max_record_bytes, len(record_raw))
+        output_bound += max_row_output
+        protocol_bound += max_event_protocol
     if output_bound > max_output_bytes or protocol_bound > max_protocol_bytes:
         raise ProposalError("selected train rows exceed configured proposal or worker-protocol bounds")
+    # The persisted envelope adds fixed JSON framing per row, a per-attempt
+    # record, and reserved room for the terminal publication record.
+    progress_store_bound = (sum(max_record_bytes for _ in rows) + 512 * len(rows)
+                            + PROGRESS_TERMINAL_MAX_BYTES + 4096)
+    return {"max_output_bytes": output_bound, "max_protocol_bytes": protocol_bound,
+            "max_progress_record_bytes": max_record_bytes if rows else 0,
+            "progress_store_bytes": progress_store_bound}
 
 
 def _request(config: dict, labels: list[str], text: str, max_bytes: int) -> bytes:
@@ -403,12 +464,1141 @@ def _write_new(path: Path, raw: bytes) -> None:
             os.close(fd)
 
 
+def _canonical_json(value: Any) -> bytes:
+    return (json.dumps(value, sort_keys=True, ensure_ascii=False,
+                        separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+
+
+def _sync_directory(path: Path) -> bool:
+    """Flush directory metadata where Python exposes a supported operation."""
+    if os.name == "nt":
+        # Windows file fsync uses the CRT commit operation. Python does not
+        # provide a portable directory FlushFileBuffers handle here.
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def _progress_store_path(final_path: Path, allow_final: bool = False) -> Path:
+    if final_path.is_symlink() or (final_path.exists() and not allow_final):
+        raise ProposalError("proposal output destination must be new for a fresh run and not a symlink")
+    final_path = final_path.resolve()
+    return final_path.parent / f".{final_path.name}.teacher-progress"
+
+
+@contextlib.contextmanager
+def _output_lease(final_path: Path):
+    """Kernel-released, cross-process exclusive lease; keep the lock inode forever."""
+    parent = final_path.parent.resolve(strict=True)
+    if not _private_dir(parent):
+        raise ProposalError("progress lease parent is not owner-private")
+    lock_path = parent / f".{final_path.name}.teacher-progress.lock"
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    created = False
+    try:
+        fd = os.open(lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        if lock_path.is_symlink():
+            raise ProposalError("progress lease is unsafe") from None
+        fd = os.open(lock_path, flags)
+    acquired = False
+    try:
+        info = os.fstat(fd)
+        path_info = lock_path.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)):
+            raise ProposalError("progress lease is unsafe")
+        if created:
+            # A fresh Windows file inherits ACEs. Secure it before writing even
+            # the sentinel byte; never rewrite an existing lease's ACL.
+            _masked()._secure_private_path(lock_path, is_directory=False)
+        if not _private_file(lock_path):
+            raise ProposalError("progress lease permissions are not owner-private")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except (OSError, BlockingIOError) as exc:
+            raise ProposalError("another teacher run holds the progress lease") from exc
+        # Read or initialize the byte only after acquiring the lock; on Windows
+        # another holder's byte-range lock can prohibit even a sentinel read.
+        if os.fstat(fd).st_size == 0:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, b"\0")
+            os.fsync(fd)
+        elif os.fstat(fd).st_size != 1:
+            raise ProposalError("progress lease has invalid contents")
+        else:
+            os.lseek(fd, 0, os.SEEK_SET)
+            sentinel = os.read(fd, 1)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if sentinel != b"\0":
+                raise ProposalError("progress lease has invalid contents")
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _proposal_config_identity_sha(cfg: dict) -> str:
+    # Storage capacity is a mutable operational ceiling; it does not alter the
+    # source, teacher, prompt, or inference semantics bound to proposal rows.
+    identity = {key: value for key, value in cfg.items() if key != "max_progress_store_bytes"}
+    return _sha(_canonical_json(identity).rstrip(b"\n"))
+
+
+def _stable_runtime_identity(boundary: Any) -> dict:
+    if not isinstance(boundary, dict):
+        raise ProposalError("runtime boundary evidence is invalid")
+    stable = {key: boundary.get(key) for key in
+              ("boundary", "server_binary_sha256", "server_version")}
+    if (stable["boundary"] != "same_uid_private_network_namespace_without_nonloopback_routes"
+            or not isinstance(stable["server_binary_sha256"], str)
+            or not HEX.fullmatch(stable["server_binary_sha256"])
+            or not isinstance(stable["server_version"], str) or not stable["server_version"]):
+        raise ProposalError("runtime boundary stable identity is invalid")
+    return stable
+
+
+def _validate_runtime_observation(boundary: Any) -> dict:
+    stable = _stable_runtime_identity(boundary)
+    if (type(boundary.get("server_pid")) is not int or boundary["server_pid"] <= 0
+            or type(boundary.get("network_namespace_inode")) is not int
+            or boundary["network_namespace_inode"] <= 0
+            or type(boundary.get("process_tree_rss_bytes")) is not int
+            or boundary["process_tree_rss_bytes"] < 0
+            or boundary.get("process_tree_rss_scope") !=
+                "server and observed descendants; summed RSS can double-count shared pages"):
+        raise ProposalError("runtime boundary observation is incomplete or invalid")
+    return stable
+
+
+def _progress_binding(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
+                      rows: list[dict], source_binding: dict, adapter_sha: str,
+                      comparator_sha: str, ready: dict) -> dict:
+    selected_ids = [row["id"] for row in rows]
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ProposalError("selected train rows contain duplicate identities")
+    model_identity = ready.get("model_identity", {})
+    runtime = ready.get("runtime_boundary", {})
+    return {
+        "schema_version": PROGRESS_STORE_SCHEMA,
+        "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
+        "comparison_config_sha256": comp_sha,
+        "export_manifest_sha256": source_binding["manifest_sha256"],
+        "export_config_sha256": source_binding["config_sha256"],
+        "train_sha256": source_binding["train_sha256"],
+        "taxonomy_sha256": cfg["taxonomy_sha256"],
+        "selected_columns_sha256": _sha(_canonical_json(cfg["selected_columns"])),
+        "selected_row_ids": selected_ids,
+        "selected_row_order_sha256": _sha(_canonical_json(selected_ids)),
+        "selected_source_identities_sha256": _sha(_canonical_json([
+            {"row_id": row["id"], "source_identity": row["source_identity"],
+             "text_sha256": row["text_sha256"], "original_text_sha256": row["original_text_sha256"]}
+            for row in rows])),
+        "model_name": comp["model_name"],
+        "model_manifest_sha256": model_identity.get("reported_manifest_sha256"),
+        "server_binary_sha256": comp["server_binary_sha256"],
+        "server_version": comp["server_version"],
+        "prompt_contract_sha256": _sha((comp["system_prompt"] + "\0" + comp["prompt_revision"]).encode()),
+        "adapter_code_sha256": adapter_sha,
+        "comparator_code_sha256": comparator_sha,
+        "runtime_boundary": runtime.get("boundary"),
+        "request_policy_sha256": _sha(_canonical_json({k: comp[k] for k in (
+            "timeout_seconds", "max_request_bytes", "max_response_bytes", "num_ctx", "num_predict",
+            "temperature", "top_k", "top_p", "repeat_penalty")})),
+        "resource_policy_sha256": _sha(_canonical_json({k: comp[k] for k in (
+            "resource_memory_max_bytes", "resource_cpu_quota_percent", "remote_scope_tasks_max",
+            "min_memory_available_bytes", "min_disk_free_bytes", "min_gpu_free_bytes")})),
+    }
+
+
+def _progress_store_usage(store: Path) -> int:
+    total = 0
+    for path in store.iterdir():
+        if path.is_symlink() or not path.is_file() or not _private_file(path):
+            raise ProposalError("progress store contains unsafe or unverified storage")
+        total += path.stat(follow_symlinks=False).st_size
+        if total > PROGRESS_STORE_HARD_MAX_BYTES:
+            raise ProposalError("progress store exceeds its hard safety limit")
+    return total
+
+
+def _progress_capacity_records(store: Path, requested: int, create: bool = False,
+                               update_increase: bool = True,
+                               config_sha256: str | None = None,
+                               original_config_sha256: str | None = None) -> int:
+    path = store / "capacity.jsonl"
+    if create:
+        history = []
+    else:
+        if path.is_symlink() or not path.is_file() or not _private_file(path):
+            raise ProposalError("progress capacity history is unavailable or unsafe")
+        raw = _read(path, 65_536, "progress capacity history")
+        if not raw.endswith(b"\n"):
+            raise ProposalError("progress capacity history is truncated")
+        history = []
+        for line in raw.splitlines():
+            record = _json(line, "progress capacity record")
+            required = {"schema_version", "sequence", "capacity_bytes", "record_sha256"}
+            if (not isinstance(record, dict)
+                    or set(record) not in (required, required | {"config_sha256"})):
+                raise ProposalError("progress capacity record schema is invalid")
+            base = {key: value for key, value in record.items() if key != "record_sha256"}
+            if (record["schema_version"] != PROGRESS_CAPACITY_SCHEMA
+                    or type(record["sequence"]) is not int
+                    or type(record["capacity_bytes"]) is not int
+                    or not 1 <= record["capacity_bytes"] <= PROGRESS_STORE_HARD_MAX_BYTES
+                    or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))
+                    or record["sequence"] != len(history)
+                    or (history and record["capacity_bytes"] <= history[-1]["capacity_bytes"])):
+                raise ProposalError("progress capacity history integrity or monotonicity failed")
+            recorded_config = record.get("config_sha256")
+            if recorded_config is not None and (not isinstance(recorded_config, str)
+                    or not HEX.fullmatch(recorded_config)):
+                raise ProposalError("progress capacity configuration provenance is invalid")
+            history.append({"capacity_bytes": record["capacity_bytes"],
+                            "config_sha256": recorded_config})
+        if not history:
+            raise ProposalError("progress capacity history is empty")
+        if (original_config_sha256 is not None
+                and history[0]["config_sha256"] not in (None, original_config_sha256)):
+            raise ProposalError("progress capacity history does not preserve original config provenance")
+    current_record = history[-1] if history else {"capacity_bytes": 0, "config_sha256": None}
+    current = current_record["capacity_bytes"]
+    if not create and requested < current:
+        raise ProposalError("progress store capacity cannot be decreased")
+    if (not create and requested == current and config_sha256 is not None
+            and current_record["config_sha256"] is not None
+            and current_record["config_sha256"] != config_sha256):
+        raise ProposalError("proposal config changed without a capacity increase")
+    if requested > current and update_increase:
+        base = {"schema_version": PROGRESS_CAPACITY_SCHEMA, "sequence": len(history),
+                "capacity_bytes": requested, "config_sha256": config_sha256}
+        record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+        line = _canonical_json(record)
+        if create:
+            _write_new(path, line)
+        else:
+            existing_usage = _progress_store_usage(store)
+            if existing_usage > current:
+                raise ProposalError("stored progress already exceeds its recorded capacity")
+            if existing_usage + len(line) > requested:
+                raise ProposalError("requested capacity cannot cover its durable history record")
+            flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            fd = os.open(path, flags)
+            try:
+                view = memoryview(line)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short capacity-history write")
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _sync_directory(store)
+    capacity = requested if requested > current and update_increase else current
+    if _progress_store_usage(store) > capacity:
+        raise ProposalError("progress store exceeds configured capacity")
+    return capacity
+
+
+def _published_report_package(path: Path) -> tuple[dict, bytes, str]:
+    if (path.is_symlink() or not path.is_dir()
+            or not comparator._verify_private_report_directory(path)
+            or not _outside_git(path)):
+        raise ProposalError("prior report revision is unsafe")
+    names = {item.name for item in path.iterdir()}
+    if not {"manifest.json", "proposals.jsonl"}.issubset(names):
+        raise ProposalError("prior report revision lacks its published files")
+    manifest_path, proposals_path = path / "manifest.json", path / "proposals.jsonl"
+    if (manifest_path.is_symlink() or proposals_path.is_symlink()
+            or not _private_file(manifest_path) or not _private_file(proposals_path)):
+        raise ProposalError("prior report revision files are unsafe")
+    raw = _read(manifest_path, PROGRESS_TERMINAL_MAX_BYTES, "prior report manifest")
+    manifest = _json(raw, "prior report manifest")
+    proposal_raw = _read(proposals_path, PROGRESS_STORE_HARD_MAX_BYTES, "prior proposal rows")
+    if (not isinstance(manifest, dict) or manifest.get("status") not in {"complete", "partial_aborted_ambiguous"}
+            or manifest.get("promotion_eligible") is not False
+            or manifest.get("proposals_sha256") != _sha(proposal_raw)
+            or manifest.get("proposals_bytes") != len(proposal_raw)
+            or manifest.get("rows_written") != len(proposal_raw.splitlines())):
+        raise ProposalError("prior report revision contents do not match its manifest")
+    provenance = manifest.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ProposalError("prior report revision provenance is invalid")
+    event_sha = provenance.get("progress_store_events_sha256")
+    expected_publication_id = _sha(_canonical_json({"proposal_sha256": _sha(proposal_raw),
+        "progress_events_sha256": event_sha, "status": manifest["status"]}).rstrip(b"\n"))
+    if manifest.get("publication_id") != expected_publication_id:
+        raise ProposalError("prior report revision publication identity is invalid")
+    allowed = {"manifest.json", "proposals.jsonl", "revision-reservation.json"}
+    if "revision-reservation.json" in names:
+        reservation_path = path / "revision-reservation.json"
+        if reservation_path.is_symlink() or not _private_file(reservation_path):
+            raise ProposalError("prior report revision reservation is unsafe")
+        reservation = _json(_read(reservation_path, 65_536, "report revision reservation"),
+                            "report revision reservation")
+        revision = manifest.get("provenance", {}).get("publication_revision")
+        reference = {key: reservation.get(key) for key in ("revision_id", "sequence",
+            "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256")}
+        if (not isinstance(reservation, dict)
+                or reservation.get("schema_version") != PROGRESS_REVISION_SCHEMA
+                or not isinstance(revision, dict) or revision != reference
+                or reservation.get("record_sha256") != _sha(_canonical_json({k: v for k, v in
+                    reservation.items() if k != "record_sha256"}).rstrip(b"\n"))):
+            raise ProposalError("published report revision reservation does not match its manifest")
+    evidence_re = re.compile(r"^\.(?:manifest-incomplete|manifest-complete|proposals)-"
+                             + re.escape(expected_publication_id) + r"-[0-9a-f]{32}\.tmp$")
+    if any(name not in allowed and not evidence_re.fullmatch(name) for name in names):
+        raise ProposalError("prior report revision contains unknown entries")
+    for name in names - allowed:
+        item = path / name
+        if item.is_symlink() or not item.is_file() or not _private_file(item):
+            raise ProposalError("prior report revision staging evidence is unsafe")
+    return manifest, raw, _sha(proposal_raw)
+
+
+def _published_matches_expected(path: Path, proposals: list[dict], manifest: dict) -> bool:
+    if not path.exists():
+        return False
+    saved, _raw, _proposal_sha = _published_report_package(path)
+    payload = ("\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                           for row in proposals) + "\n").encode("utf-8")
+    event_sha = manifest.get("provenance", {}).get("progress_store_events_sha256")
+    publication_id = _sha(_canonical_json({"proposal_sha256": _sha(payload),
+        "progress_events_sha256": event_sha, "status": manifest["status"]}).rstrip(b"\n"))
+    expected = {**manifest, "publication_id": publication_id, "proposals_sha256": _sha(payload),
+        "proposals_bytes": len(payload), "rows_written": len(proposals)}
+    return saved == expected
+
+
+def _progress_event_snapshot(store: Path, binding: dict, events_sha256: str) -> tuple[bytes, dict, set[str]]:
+    path = store / "events.jsonl"
+    if path.is_symlink() or not _private_file(path):
+        raise ProposalError("historical progress event snapshot is unavailable or unsafe")
+    current = _read(path, PROGRESS_STORE_HARD_MAX_BYTES, "historical progress event log")
+    candidates = [b""] if _sha(b"") == events_sha256 else []
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    if current and not current.endswith(b"\n"):
+        raise ProposalError("historical progress event log is truncated")
+    for line in current.splitlines(keepends=True):
+        prefix.extend(line)
+        digest.update(line)
+        if digest.hexdigest() == events_sha256:
+            candidates.append(bytes(prefix))
+    if len(candidates) != 1:
+        raise ProposalError("historical report event digest is not a unique durable prefix")
+    snapshot = candidates[0]
+    latest: dict[int, dict] = {}
+    attempts: set[str] = set()
+    selected_count = len(binding.get("selected_row_ids", []))
+    for line in snapshot.splitlines():
+        record = _json(line, "historical progress event")
+        if (not isinstance(record, dict)
+                or set(record) != {"schema_version", "attempt_id", "index", "event", "record_sha256"}):
+            raise ProposalError("historical progress event schema is invalid")
+        base = {key: record[key] for key in ("schema_version", "attempt_id", "index", "event")}
+        if (record["schema_version"] != PROGRESS_EVENT_SCHEMA
+                or not isinstance(record["attempt_id"], str)
+                or not re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
+                or type(record["index"]) is not int
+                or not 0 <= record["index"] < selected_count
+                or not isinstance(record["event"], dict)
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
+            raise ProposalError("historical progress event integrity is invalid")
+        attempts.add(record["attempt_id"])
+        latest[record["index"]] = record["event"].get("result")
+    if set(latest) != set(range(selected_count)) or any(not isinstance(value, dict) for value in latest.values()):
+        raise ProposalError("published parent does not have a complete historical row snapshot")
+    return snapshot, latest, attempts
+
+
+def _progress_publication_receipts_validate(store: Path, binding: dict) -> None:
+    binding_sha = _sha(_canonical_json(binding).rstrip(b"\n"))
+    for path in store.iterdir():
+        if not path.name.startswith("publication-"):
+            continue
+        if (path.is_symlink() or not path.is_file() or not _private_file(path)
+                or not re.fullmatch(r"publication-[0-9a-f]{64}\.json", path.name)):
+            raise ProposalError("private progress publication receipt is unsafe")
+        record = _json(_read(path, 65_536, "progress publication receipt"),
+                       "progress publication receipt")
+        required = {"schema_version", "publication_id", "binding_sha256", "events_sha256",
+                    "report_manifest_sha256", "proposal_sha256", "proposal_bytes", "rows_written",
+                    "status", "record_sha256"}
+        base = {key: value for key, value in record.items() if key != "record_sha256"} if isinstance(record, dict) else {}
+        if (not isinstance(record, dict) or set(record) != required
+                or record["schema_version"] != PROGRESS_PUBLICATION_SCHEMA
+                or record["publication_id"] != path.stem.removeprefix("publication-")
+                or record["binding_sha256"] != binding_sha
+                or not isinstance(record["events_sha256"], str) or not HEX.fullmatch(record["events_sha256"])
+                or not isinstance(record["report_manifest_sha256"], str) or not HEX.fullmatch(record["report_manifest_sha256"])
+                or not isinstance(record["proposal_sha256"], str) or not HEX.fullmatch(record["proposal_sha256"])
+                or type(record["proposal_bytes"]) is not int or record["proposal_bytes"] < 0
+                or type(record["rows_written"]) is not int or record["rows_written"] < 1
+                or record["status"] != "partial_aborted_ambiguous"
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
+            raise ProposalError("progress publication receipt identity or integrity is invalid")
+        _snapshot, latest, _attempts = _progress_event_snapshot(store, binding, record["events_sha256"])
+        expected_payload = ("\n".join(json.dumps(latest[index], sort_keys=True,
+            ensure_ascii=False, separators=(",", ":")) for index in range(len(binding["selected_row_ids"])))
+            + "\n").encode("utf-8")
+        expected_publication_id = _sha(_canonical_json({"proposal_sha256": _sha(expected_payload),
+            "progress_events_sha256": record["events_sha256"], "status": record["status"]}).rstrip(b"\n"))
+        if (record["proposal_sha256"] != _sha(expected_payload)
+                or record["proposal_bytes"] != len(expected_payload)
+                or record["rows_written"] != len(latest)
+                or record["publication_id"] != expected_publication_id):
+            raise ProposalError("progress publication receipt does not match its durable event snapshot")
+
+
+def _progress_store_write_publication_receipt(store: Path, binding: dict, proposals: list[dict],
+                                               manifest: dict, capacity: int) -> None:
+    payload = ("\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                         for row in proposals) + "\n").encode("utf-8")
+    provenance = manifest.get("provenance", {})
+    events_sha256 = provenance.get("progress_store_events_sha256")
+    if (manifest.get("status") != "partial_aborted_ambiguous"
+            or provenance.get("terminal_worker_result_verified") is not False
+            or provenance.get("progress_store_id_sha256") != _sha(_canonical_json(binding).rstrip(b"\n"))
+            or not isinstance(events_sha256, str) or not HEX.fullmatch(events_sha256)):
+        raise ProposalError("unverified report cannot be bound to progress history")
+    publication_id = _sha(_canonical_json({"proposal_sha256": _sha(payload),
+        "progress_events_sha256": events_sha256, "status": manifest["status"]}).rstrip(b"\n"))
+    base = {"schema_version": PROGRESS_PUBLICATION_SCHEMA,
+        "publication_id": publication_id,
+        "binding_sha256": _sha(_canonical_json(binding).rstrip(b"\n")),
+        "events_sha256": events_sha256,
+        "report_manifest_sha256": _sha(_canonical_json(manifest).rstrip(b"\n")),
+        "proposal_sha256": _sha(payload), "proposal_bytes": len(payload),
+        "rows_written": len(proposals), "status": manifest["status"]}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    raw = _canonical_json(record)
+    path = store / f"publication-{publication_id}.json"
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not _private_file(path) or _read(path, 65_536,
+                "progress publication receipt") != raw:
+            raise ProposalError("existing progress publication receipt differs from this report")
+        return
+    if len(raw) > 65_536 or _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover the publication receipt")
+    _write_new(path, raw)
+    _sync_directory(store)
+
+
+def _verify_historical_parent_report(store: Path, path: Path, manifest: dict,
+                                     binding: dict) -> None:
+    package_fields = {"publication_id", "proposals_sha256", "proposals_bytes", "rows_written"}
+    if not package_fields.issubset(manifest):
+        raise ProposalError("historical parent manifest lacks immutable publication fields")
+    provenance = manifest.get("provenance")
+    if (not isinstance(provenance, dict)
+            or provenance.get("progress_store_id_sha256") != _sha(_canonical_json(binding).rstrip(b"\n"))):
+        raise ProposalError("historical parent report is not bound to this progress store")
+    events_sha256 = provenance.get("progress_store_events_sha256")
+    if not isinstance(events_sha256, str) or not HEX.fullmatch(events_sha256):
+        raise ProposalError("historical parent report lacks a valid event snapshot")
+    _snapshot, latest, attempts = _progress_event_snapshot(store, binding, events_sha256)
+    proposals_path = path / "proposals.jsonl"
+    proposal_raw = _read(proposals_path, PROGRESS_STORE_HARD_MAX_BYTES, "historical parent proposals")
+    expected_proposals = ("\n".join(json.dumps(latest[index], sort_keys=True, ensure_ascii=False,
+        separators=(",", ":")) for index in range(len(binding["selected_row_ids"]))) + "\n").encode("utf-8")
+    if proposal_raw != expected_proposals:
+        raise ProposalError("historical parent proposals do not match its durable event snapshot")
+    original_manifest = {key: value for key, value in manifest.items() if key not in package_fields}
+    if provenance.get("terminal_worker_result_verified") is True:
+        terminal = _progress_store_matching_terminal(store, binding, events_sha256)
+        if (terminal is None or terminal["attempt_id"] not in attempts
+                or terminal["output_manifest"] != original_manifest):
+            raise ProposalError("historical parent manifest does not match its terminal event snapshot")
+        return
+    if provenance.get("terminal_worker_result_verified") is not False:
+        raise ProposalError("historical parent verification state is invalid")
+    receipt_path = store / f"publication-{manifest['publication_id']}.json"
+    if receipt_path.is_symlink() or not _private_file(receipt_path):
+        raise ProposalError("unverified historical parent lacks a durable publication receipt")
+    receipt = _json(_read(receipt_path, 65_536, "progress publication receipt"),
+                    "progress publication receipt")
+    if not isinstance(receipt, dict):
+        raise ProposalError("unverified historical parent publication receipt is invalid")
+    receipt_base = {key: value for key, value in receipt.items() if key != "record_sha256"}
+    expected_publication_id = _sha(_canonical_json({"proposal_sha256": _sha(proposal_raw),
+        "progress_events_sha256": events_sha256, "status": manifest["status"]}).rstrip(b"\n"))
+    if (receipt.get("events_sha256") != events_sha256
+            or receipt.get("schema_version") != PROGRESS_PUBLICATION_SCHEMA
+            or receipt.get("publication_id") != manifest.get("publication_id")
+            or receipt.get("binding_sha256") != _sha(_canonical_json(binding).rstrip(b"\n"))
+            or receipt.get("record_sha256") != _sha(_canonical_json(receipt_base).rstrip(b"\n"))
+            or receipt.get("report_manifest_sha256") != _sha(_canonical_json(original_manifest).rstrip(b"\n"))
+            or receipt.get("proposal_sha256") != _sha(proposal_raw)
+            or receipt.get("proposal_bytes") != len(proposal_raw)
+            or receipt.get("rows_written") != len(proposal_raw.splitlines())
+            or receipt.get("status") != manifest.get("status")
+            or receipt.get("publication_id") != expected_publication_id):
+        raise ProposalError("unverified historical parent differs from its durable publication receipt")
+
+
+def _progress_revision_state(store: Path, base_output: Path,
+                             binding: dict) -> dict | None:
+    paths = []
+    for path in store.iterdir():
+        if path.name.startswith("revision-"):
+            if (path.is_symlink() or not path.is_file() or not _private_file(path)
+                    or not re.fullmatch(r"revision-[0-9]{4}-[0-9a-f]{32}\.json", path.name)):
+                raise ProposalError("private report revision record is unsafe")
+            paths.append(path)
+    records = []
+    previous_name = base_output.name
+    previous_manifest_sha = previous_proposals_sha = None
+    for path in sorted(paths):
+        record = _json(_read(path, 65_536, "report revision record"), "report revision record")
+        required = {"schema_version", "sequence", "revision_id", "binding_sha256",
+                    "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256",
+                    "target_output_name", "record_sha256"}
+        if not isinstance(record, dict) or set(record) != required:
+            raise ProposalError("report revision record schema is invalid")
+        base = {key: value for key, value in record.items() if key != "record_sha256"}
+        sequence = len(records)
+        if (record["schema_version"] != PROGRESS_REVISION_SCHEMA
+                or record["sequence"] != sequence
+                or record["revision_id"] != path.stem.removeprefix("revision-").split("-")[-1]
+                or record["binding_sha256"] != _sha(_canonical_json(binding).rstrip(b"\n"))
+                or record["parent_output_name"] != previous_name
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))
+                or Path(record["target_output_name"]).name != record["target_output_name"]
+                or not record["target_output_name"].startswith(base_output.name + ".revision-")):
+            raise ProposalError("report revision record binding or chain is invalid")
+        parent_path = base_output.parent / record["parent_output_name"]
+        parent_manifest, parent_raw, parent_proposals_sha = _published_report_package(parent_path)
+        if (record["parent_manifest_sha256"] != _sha(parent_raw)
+                or record["parent_proposals_sha256"] != parent_proposals_sha):
+            raise ProposalError("report revision parent evidence changed")
+        _verify_historical_parent_report(store, parent_path, parent_manifest, binding)
+        target = base_output.parent / record["target_output_name"]
+        target_published = False
+        if target.exists() or target.is_symlink():
+            if (target.is_symlink() or not target.is_dir()
+                    or not comparator._verify_private_report_directory(target)):
+                raise ProposalError("reserved report revision target is unsafe")
+            reservation_path = target / "revision-reservation.json"
+            if reservation_path.exists() or reservation_path.is_symlink():
+                if (reservation_path.is_symlink() or not reservation_path.is_file()
+                        or not _private_file(reservation_path)
+                        or _read(reservation_path, 65_536, "report revision reservation") !=
+                            _canonical_json(record)):
+                    raise ProposalError("reserved report revision path does not match its private reservation")
+            elif any(target.iterdir()):
+                raise ProposalError("unmarked report revision directory contains foreign data; preserve it and inspect the private revision record")
+            marker = target / "manifest.json"
+            if marker.exists():
+                marker_value = _json(_read(marker, PROGRESS_TERMINAL_MAX_BYTES,
+                    "reserved report revision manifest"), "reserved report revision manifest")
+                if marker_value.get("status") != "incomplete":
+                    child_manifest, child_raw, child_proposals_sha = _published_report_package(target)
+                    revision = child_manifest.get("provenance", {}).get("publication_revision")
+                    if (revision != {key: record[key] for key in ("revision_id", "sequence",
+                        "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256")}):
+                        raise ProposalError("published report revision does not link to its reservation")
+                    previous_manifest_sha, previous_proposals_sha = _sha(child_raw), child_proposals_sha
+                    target_published = True
+                else:
+                    previous_manifest_sha = previous_proposals_sha = None
+            else:
+                previous_manifest_sha = previous_proposals_sha = None
+        else:
+            previous_manifest_sha = previous_proposals_sha = None
+        previous_name = record["target_output_name"]
+        records.append(record)
+    if not records:
+        return None
+    latest = records[-1]
+    return {"record": latest, "target": base_output.parent / latest["target_output_name"],
+            "published": target_published,
+            "records": records,
+            "reference": {key: latest[key] for key in ("revision_id", "sequence",
+                "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256")}}
+
+
+def _progress_revision_reserve(store: Path, base_output: Path, binding: dict,
+                               capacity: int) -> dict | None:
+    state = _progress_revision_state(store, base_output, binding)
+    if state is None:
+        if not base_output.exists():
+            return None
+        parent_path = base_output
+        sequence = 0
+    elif not state["published"]:
+        _ensure_revision_target(state)
+        return state
+    else:
+        parent_path = state["target"]
+        sequence = len(state["records"])
+    parent_manifest, parent_raw, parent_proposals_sha = _published_report_package(parent_path)
+    _verify_historical_parent_report(store, parent_path, parent_manifest, binding)
+    if parent_manifest.get("status") != "partial_aborted_ambiguous":
+        raise ProposalError("a completed report cannot be revised from retryable progress")
+    revision_id = uuid.uuid4().hex
+    target_name = f"{base_output.name}.revision-{sequence:04d}-{revision_id}"
+    target = base_output.parent / target_name
+    if target.exists() or target.is_symlink():
+        raise ProposalError("reserved report revision destination already exists")
+    if not _private_dir(base_output.parent):
+        raise ProposalError("report revision parent is not owner-private")
+    base = {"schema_version": PROGRESS_REVISION_SCHEMA, "sequence": sequence,
+        "revision_id": revision_id,
+        "binding_sha256": _sha(_canonical_json(binding).rstrip(b"\n")),
+        "parent_output_name": parent_path.name,
+        "parent_manifest_sha256": _sha(parent_raw),
+        "parent_proposals_sha256": parent_proposals_sha,
+        "target_output_name": target_name}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    record_path = store / f"revision-{sequence:04d}-{revision_id}.json"
+    raw = _canonical_json(record)
+    if _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover the report revision reservation")
+    _write_new(record_path, raw)
+    _sync_directory(store)
+    state = {"record": record, "target": target, "published": False,
+            "records": ([] if state is None else state["records"]) + [record],
+            "reference": {key: record[key] for key in ("revision_id", "sequence",
+                "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256")}}
+    _ensure_revision_target(state)
+    return state
+
+
+def _ensure_revision_target(state: dict) -> None:
+    target, record = state["target"], state["record"]
+    if not target.exists() and not target.is_symlink():
+        created = comparator._private_report_directory(target)
+        if created != target or not comparator._verify_private_report_directory(target):
+            raise ProposalError("reserved report revision directory is not owner-private")
+        _sync_directory(target.parent)
+    elif (target.is_symlink() or not target.is_dir()
+            or not comparator._verify_private_report_directory(target)):
+        raise ProposalError("reserved report revision target is unsafe")
+    reservation_path = target / "revision-reservation.json"
+    if reservation_path.exists() or reservation_path.is_symlink():
+        if (reservation_path.is_symlink() or not _private_file(reservation_path)
+                or _read(reservation_path, 65_536, "report revision reservation") != _canonical_json(record)):
+            raise ProposalError("reserved report revision marker differs from its durable record")
+    else:
+        if any(target.iterdir()):
+            raise ProposalError("unreserved data exists at the report revision destination")
+        _write_new(reservation_path, _canonical_json(record))
+        _sync_directory(target)
+
+
+def _progress_probe_receipts_validate(store: Path, binding: dict) -> None:
+    expected_binding_sha = _sha(_canonical_json(binding).rstrip(b"\n"))
+    for path in store.iterdir():
+        if not path.name.startswith("recovery-probe-"):
+            continue
+        if (path.is_symlink() or not path.is_file() or not _private_file(path)
+                or not re.fullmatch(r"recovery-probe-[0-9a-f]{32}\.json", path.name)):
+            raise ProposalError("private recovery probe receipt is unsafe")
+        record = _json(_read(path, PROGRESS_TERMINAL_MAX_BYTES, "recovery probe receipt"),
+                       "recovery probe receipt")
+        required = {"schema_version", "receipt_id", "binding_sha256",
+                    "proposal_config_sha256", "probe", "record_sha256"}
+        if not isinstance(record, dict) or set(record) != required:
+            raise ProposalError("recovery probe receipt schema is invalid")
+        base = {key: value for key, value in record.items() if key != "record_sha256"}
+        probe = record["probe"]
+        if (record["schema_version"] != PROGRESS_PROBE_RECEIPT_SCHEMA
+                or record["receipt_id"] != path.stem.removeprefix("recovery-probe-")
+                or record["binding_sha256"] != expected_binding_sha
+                or not isinstance(record["proposal_config_sha256"], str)
+                or not HEX.fullmatch(record["proposal_config_sha256"])
+                or not isinstance(probe, dict) or probe.get("zero_row_probe") is not True
+                or probe.get("proposal_config_identity_sha256") != binding["proposal_config_identity_sha256"]
+                or probe.get("model_identity", {}).get("reported_manifest_sha256") != binding["model_manifest_sha256"]
+                or probe.get("runtime_boundary", {}).get("server_binary_sha256") != binding["server_binary_sha256"]
+                or probe.get("runtime_boundary", {}).get("server_version") != binding["server_version"]
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
+            raise ProposalError("recovery probe receipt identity or integrity is invalid")
+        _validate_runtime_observation(probe.get("runtime_boundary"))
+
+
+def _progress_probe_receipt_write(store: Path, binding: dict, probe: dict,
+                                  config_sha256: str, capacity: int) -> None:
+    receipt_id = uuid.uuid4().hex
+    base = {"schema_version": PROGRESS_PROBE_RECEIPT_SCHEMA,
+        "receipt_id": receipt_id,
+        "binding_sha256": _sha(_canonical_json(binding).rstrip(b"\n")),
+        "proposal_config_sha256": config_sha256, "probe": probe}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    raw = _canonical_json(record)
+    if len(raw) > PROGRESS_TERMINAL_MAX_BYTES or _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover the recovery probe receipt")
+    _write_new(store / f"recovery-probe-{receipt_id}.json", raw)
+    _sync_directory(store)
+
+
+def _progress_store_read(store: Path, expected_binding: dict, rows: list[dict], cfg: dict,
+                         config_sha256: str | None = None,
+                         return_metadata: bool = False,
+                         update_capacity: bool = True) -> tuple[list[dict], dict[int, dict]] | tuple[list[dict], dict[int, dict], dict]:
+    if (store.is_symlink() or not store.is_dir() or not _outside_git(store)
+            or not _private_dir(store.parent) or not _private_dir(store)):
+        raise ProposalError("private progress store is unavailable or unsafe")
+    header_path, events_path = store / "checkpoint.json", store / "events.jsonl"
+    if (header_path.is_symlink() or events_path.is_symlink()
+            or not _private_file(header_path) or not _private_file(events_path)):
+        raise ProposalError("private progress store permissions changed")
+    header_raw = _read(header_path, PROGRESS_HEADER_MAX_BYTES, "progress checkpoint")
+    header = _json(header_raw, "progress checkpoint")
+    if (not isinstance(header, dict)
+            or set(header) != {"schema_version", "binding", "proposal_config_sha256"}
+            or header.get("schema_version") != PROGRESS_STORE_SCHEMA
+            or header.get("binding") != expected_binding
+            or (header.get("proposal_config_sha256") is not None
+                and (not isinstance(header["proposal_config_sha256"], str)
+                     or not HEX.fullmatch(header["proposal_config_sha256"])) )):
+        raise ProposalError("progress checkpoint identity or selected row order changed")
+    historical_config_sha256 = header["proposal_config_sha256"]
+    capacity = _progress_capacity_records(store, cfg["max_progress_store_bytes"],
+                                          update_increase=False,
+                                          config_sha256=config_sha256,
+                                          original_config_sha256=historical_config_sha256)
+    events_raw = _read(events_path, capacity, "progress event log")
+    attempt_rows = {}
+    for path in store.iterdir():
+        if path.name.startswith("attempt-"):
+            if (path.is_symlink() or not path.is_file() or not _private_file(path)
+                    or not re.fullmatch(r"attempt-[0-9a-f]{32}\.json", path.name)):
+                raise ProposalError("private progress attempt record is unsafe")
+            record = _json(_read(path, 1_048_576, "progress attempt record"), "progress attempt record")
+            expected_keys = {"schema_version", "attempt_id", "binding_sha256", "indices",
+                             "row_ids_sha256", "state", "record_sha256"}
+            if not isinstance(record, dict) or set(record) != expected_keys:
+                raise ProposalError("progress attempt record schema is invalid")
+            base = {key: record[key] for key in expected_keys - {"record_sha256"}}
+            attempt_id = path.stem.removeprefix("attempt-")
+            indices = record["indices"]
+            if (record["schema_version"] != PROGRESS_ATTEMPT_SCHEMA or record["attempt_id"] != attempt_id
+                    or record["binding_sha256"] != _sha(_canonical_json(expected_binding).rstrip(b"\n"))
+                    or not isinstance(indices, list) or not indices
+                    or any(type(index) is not int or index < 0 or index >= len(rows) for index in indices)
+                    or len(indices) != len(set(indices)) or indices != sorted(indices)
+                    or record["row_ids_sha256"] != _sha(_canonical_json([expected_binding["selected_row_ids"][i]
+                                                                           for i in indices]).rstrip(b"\n"))
+                    or record["state"] != "prepared_or_sent_outcome_unknown"
+                    or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
+                raise ProposalError("progress attempt identity or integrity is invalid")
+            attempt_rows[attempt_id] = set(indices)
+        elif (path.name not in {"checkpoint.json", "events.jsonl", "capacity.jsonl"}
+              and not path.name.startswith(("terminal-", "revision-", "recovery-probe-", "publication-"))):
+            raise ProposalError("progress store contains an unknown entry")
+    if events_raw and not events_raw.endswith(b"\n"):
+        raise ProposalError("progress event log is truncated")
+    seen = set()
+    records = []
+    latest: dict[int, dict] = {}
+    for line in events_raw.splitlines():
+        if not line or len(line) > PROGRESS_EVENT_MAX_BYTES:
+            raise ProposalError("progress event log contains an invalid record")
+        record = _json(line, "progress event")
+        if not isinstance(record, dict) or set(record) != {"schema_version", "attempt_id", "index", "event", "record_sha256"}:
+            raise ProposalError("progress event schema is invalid")
+        base = {k: record[k] for k in ("schema_version", "attempt_id", "index", "event")}
+        if (record["schema_version"] != PROGRESS_EVENT_SCHEMA
+                or not isinstance(record["attempt_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
+                or type(record["index"]) is not int or not 0 <= record["index"] < len(rows)
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
+            raise ProposalError("progress event integrity or index is invalid")
+        key = (record["attempt_id"], record["index"])
+        if key in seen or record["attempt_id"] not in attempt_rows or record["index"] not in attempt_rows[record["attempt_id"]]:
+            raise ProposalError("progress event contains duplicate attempt indices")
+        seen.add(key)
+        event = record["event"]
+        if not isinstance(event, dict) or event.get("index") != record["index"]:
+            raise ProposalError("progress event does not preserve original row index")
+        _validate_progress_event(event, record["index"], rows[record["index"]],
+                                 cfg["selected_columns"], cfg["assume_exhaustive_labels"])
+        records.append(record)
+        latest[record["index"]] = event["result"]
+    terminal = _progress_store_matching_terminal(store, expected_binding, _sha(events_raw))
+    if terminal is not None and terminal["attempt_id"] not in attempt_rows:
+        raise ProposalError("progress terminal attempt is absent from attempt records")
+    _progress_probe_receipts_validate(store, expected_binding)
+    _progress_publication_receipts_validate(store, expected_binding)
+    revision_state = _progress_revision_state(store, Path(cfg["output_dir"]), expected_binding)
+    # An increase becomes durable only after all identity, event and terminal
+    # evidence has passed validation; a rejected resume leaves history untouched.
+    if update_capacity:
+        _progress_capacity_records(store, cfg["max_progress_store_bytes"], update_increase=True,
+                                   config_sha256=config_sha256,
+                                   original_config_sha256=historical_config_sha256)
+    if return_metadata:
+        capacity_raw = _read(store / "capacity.jsonl", 65_536, "progress capacity history")
+        capacity_config_hashes = [_json(line, "progress capacity record").get("config_sha256")
+                                  for line in capacity_raw.splitlines()]
+        return records, latest, {"proposal_config_sha256": historical_config_sha256,
+                                 "capacity_config_sha256s": capacity_config_hashes,
+                                 "capacity_bytes": cfg["max_progress_store_bytes"],
+                                 "revision_state": revision_state}
+    return records, latest
+
+
+def _progress_store_create(store: Path, expected_binding: dict,
+                           capacity: int = PROGRESS_STORE_DEFAULT_BYTES,
+                           proposal_config_sha256: str | None = None) -> None:
+    if (store.exists() or store.is_symlink() or not _outside_git(store)
+            or not store.parent.exists() or not _private_dir(store.parent)):
+        raise ProposalError("progress store already exists or is inside Git; use explicit resume")
+    if proposal_config_sha256 is not None and not HEX.fullmatch(proposal_config_sha256):
+        raise ProposalError("original proposal config digest is invalid")
+    header_raw = _canonical_json({"schema_version": PROGRESS_STORE_SCHEMA,
+                                  "binding": expected_binding,
+                                  "proposal_config_sha256": proposal_config_sha256})
+    capacity_base = {"schema_version": PROGRESS_CAPACITY_SCHEMA,
+                     "sequence": 0, "capacity_bytes": capacity,
+                     "config_sha256": proposal_config_sha256}
+    capacity_raw = _canonical_json({**capacity_base,
+        "record_sha256": _sha(_canonical_json(capacity_base).rstrip(b"\n"))})
+    if len(header_raw) + len(capacity_raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover its initial identity records")
+    created = False
+    try:
+        store.mkdir(mode=0o700, parents=False, exist_ok=False)
+        created = True
+        os.chmod(store, 0o700)
+        _masked()._secure_private_path(store, is_directory=True)
+        _masked()._verify_owner_private_access(store, is_directory=True)
+        _write_new(store / "checkpoint.json", header_raw)
+        _write_new(store / "events.jsonl", b"")
+        _progress_capacity_records(store, capacity, create=True,
+                                   config_sha256=proposal_config_sha256)
+        _sync_directory(store)
+        _sync_directory(store.parent)
+    except Exception:
+        # Remove only this call's empty directory; keep it intact once it has
+        # acquired checkpoint or event bytes so interrupted work remains evidence.
+        try:
+            if created and store.is_dir() and not store.is_symlink() and not any(store.iterdir()):
+                store.rmdir()
+        except OSError:
+            pass
+        raise
+
+
+def _progress_store_append(store: Path, attempt_id: str, index: int, event: dict,
+                           capacity: int) -> None:
+    path = store / "events.jsonl"
+    if (not _private_dir(store.parent) or not _private_dir(store)
+            or path.is_symlink() or not path.is_file() or not _private_file(path)):
+        raise ProposalError("private progress event file is unavailable or unsafe")
+    base = {"schema_version": PROGRESS_EVENT_SCHEMA, "attempt_id": attempt_id,
+            "index": index, "event": event}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    raw = _canonical_json(record)
+    if len(raw) > PROGRESS_EVENT_MAX_BYTES or _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("private progress event log exceeds configured bound")
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        path_info = path.stat(follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)):
+            raise ProposalError("private progress event file changed type")
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short progress checkpoint write")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _progress_store_record_attempt(store: Path, attempt_id: str, indices: list[int],
+                                   binding: dict, capacity: int = PROGRESS_STORE_DEFAULT_BYTES) -> None:
+    base = {"schema_version": PROGRESS_ATTEMPT_SCHEMA, "attempt_id": attempt_id,
+            "binding_sha256": _sha(_canonical_json(binding).rstrip(b"\n")),
+            "indices": indices,
+            "row_ids_sha256": _sha(_canonical_json([binding["selected_row_ids"][i]
+                                                     for i in indices]).rstrip(b"\n")),
+            "state": "prepared_or_sent_outcome_unknown"}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    raw = _canonical_json(record)
+    if _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover the next attempt record")
+    _write_new(store / f"attempt-{attempt_id}.json", raw)
+    _sync_directory(store)
+
+
+def _progress_store_write_terminal(store: Path, attempt_id: str, binding: dict,
+                                   events_sha256: str, output_manifest: dict,
+                                   capacity: int = PROGRESS_STORE_DEFAULT_BYTES) -> None:
+    base = {"schema_version": PROGRESS_TERMINAL_SCHEMA, "attempt_id": attempt_id,
+            "binding": binding, "events_sha256": events_sha256,
+            "output_manifest": output_manifest}
+    record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+    raw = _canonical_json(record)
+    if len(raw) > PROGRESS_TERMINAL_MAX_BYTES or _progress_store_usage(store) + len(raw) > capacity:
+        raise ProposalError("progress store capacity cannot cover the terminal record")
+    _write_new(store / f"terminal-{attempt_id}.json", raw)
+    _sync_directory(store)
+
+
+def _progress_store_matching_terminal(store: Path, binding: dict,
+                                      events_sha256: str) -> dict | None:
+    matches = []
+    for path in store.iterdir():
+        if not path.name.startswith("terminal-"):
+            continue
+        if (path.is_symlink() or not path.is_file() or not _private_file(path)
+                or len(path.name) != len("terminal-") + 32 + len(".json")
+                or not re.fullmatch(r"terminal-[0-9a-f]{32}\.json", path.name)):
+            raise ProposalError("private progress terminal record is unsafe")
+        record = _json(_read(path, PROGRESS_TERMINAL_MAX_BYTES, "progress terminal record"),
+                       "progress terminal record")
+        expected_keys = {"schema_version", "attempt_id", "binding", "events_sha256",
+                         "output_manifest", "record_sha256"}
+        if not isinstance(record, dict) or set(record) != expected_keys:
+            raise ProposalError("progress terminal record schema is invalid")
+        base = {key: record[key] for key in expected_keys - {"record_sha256"}}
+        if (record["schema_version"] != PROGRESS_TERMINAL_SCHEMA
+                or record["attempt_id"] != path.stem.removeprefix("terminal-")
+                or not isinstance(record["events_sha256"], str) or not HEX.fullmatch(record["events_sha256"])
+                or record["binding"] != binding
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))
+                or not isinstance(record["output_manifest"], dict)
+                or record["output_manifest"].get("schema_version") != REPORT_SCHEMA
+                or record["output_manifest"].get("provenance", {}).get("progress_store_events_sha256") != record["events_sha256"]
+                or record["output_manifest"].get("provenance", {}).get("terminal_worker_result_verified") is not True):
+            raise ProposalError("progress terminal record identity or integrity is invalid")
+        if record["events_sha256"] == events_sha256:
+            matches.append(record)
+    if len(matches) > 1:
+        raise ProposalError("progress store has ambiguous matching terminal records")
+    return matches[0] if matches else None
+
+
+def _progress_pending_indices(rows: list[dict], stored_progress: dict[int, dict]) -> list[int]:
+    retryable = {"timeout", "transport_error", "protocol_error", "identity_mismatch",
+                 "http_error", "incomplete", "request_too_large_not_started",
+                 "not_attempted_after_abort"}
+    return [index for index in range(len(rows))
+            if index not in stored_progress or stored_progress[index]["status"] in retryable]
+
+
+def _validate_terminal_report(report: Any, cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
+                              source_manifest: dict, source_binding: dict, rows: list[dict],
+                              latest: dict[int, dict], checkpoint_binding: dict,
+                              events_sha: str, probe: dict, adapter_sha: str,
+                              comparator_sha: str, config_history: dict,
+                              expected_revision: dict | None) -> dict:
+    if not isinstance(report, dict):
+        raise ProposalError("durable terminal report is not an object")
+    top_keys = {"schema_version", "created_at_epoch_seconds", "status", "promotion_eligible", "claims",
+                "provenance", "counts", "pre_data_zero_row_probe", "abort", "resources", "uncertainty"}
+    if set(report) != top_keys or report.get("schema_version") != REPORT_SCHEMA:
+        raise ProposalError("durable terminal report schema is invalid")
+    status_counts = dict(sorted(Counter(item["status"] for item in latest.values()).items()))
+    label_coverage = Counter(f"{label}:{state}" for item in latest.values()
+        for label, state in item["proposal_states"].items())
+    expected_counts = {"selected_rows": len(rows), "statuses": status_counts,
+        "answered_rows": status_counts.get("answered", 0),
+        "abstentions": status_counts.get("abstain", 0),
+        "failures": sum(n for status, n in status_counts.items() if status not in ("answered", "abstain")),
+        "not_attempted_after_abort": status_counts.get("not_attempted_after_abort", 0),
+        "per_label_and_state": dict(sorted(label_coverage.items()))}
+    abort_map = {"timeout": "timeout_or_worker_lifecycle_ambiguous",
+        "transport_error": "transport_or_worker_lifecycle_ambiguous",
+        "protocol_error": "protocol_or_worker_lifecycle_ambiguous",
+        "identity_mismatch": "model_identity_or_response_lifecycle_ambiguous",
+        "http_error": "model_identity_or_response_lifecycle_ambiguous",
+        "incomplete": "model_identity_or_response_lifecycle_ambiguous"}
+    abort_status = next((latest[i]["status"] for i in range(len(rows))
+                         if latest[i]["status"] in abort_map), None)
+    expected_abort = {"aborted": abort_status is not None,
+                      "reason": abort_map.get(abort_status)}
+    expected_claims = {"teacher_suggestions_are_unreviewed": True, "heldout_accessed": False,
+        "labels_independently_verified": False, "screening_independently_verified": False,
+        "promotion_eligible": False}
+    expected_uncertainty = {"source_and_review_claims_independently_verified": False,
+        "teacher_labels_are_claims": True, "omitted_labels_are_negative": cfg["assume_exhaustive_labels"],
+        "selection_claim": "configured train-only subset; no heldout data opened"}
+    expected_status = "partial_aborted_ambiguous" if abort_status is not None else "complete"
+    if (report.get("status") != expected_status or report.get("promotion_eligible") is not False
+            or report.get("claims") != expected_claims or report.get("counts") != expected_counts
+            or report.get("abort") != expected_abort or report.get("uncertainty") != expected_uncertainty
+            or type(report.get("created_at_epoch_seconds")) is not int
+            or report["created_at_epoch_seconds"] < 0):
+        raise ProposalError("durable terminal claims, counts, status or uncertainty do not match row evidence")
+    probe_record = report.get("pre_data_zero_row_probe")
+    if not isinstance(probe_record, dict):
+        raise ProposalError("durable terminal probe evidence is invalid")
+    stable_config_sha = _proposal_config_identity_sha(cfg)
+    original_config_sha = config_history.get("proposal_config_sha256") or cfg_sha
+    allowed_raw_configs = {value for value in config_history.get("capacity_config_sha256s", [])
+                           if isinstance(value, str) and HEX.fullmatch(value)}
+    allowed_raw_configs.add(original_config_sha)
+    if (probe_record.get("zero_row_probe") is not True
+            or probe_record.get("worker_ready") is not True
+            or probe_record.get("cleanup_verified") is not True
+            or probe_record.get("outside_listener_denied") is not True
+            or probe_record.get("persistent_service_unchanged") is not True
+            or probe_record.get("proposal_config_sha256") not in allowed_raw_configs
+            or probe_record.get("proposal_config_identity_sha256") != stable_config_sha
+            or probe_record.get("comparison_config_sha256") != comp_sha
+            or probe_record.get("adapter_code_sha256") != adapter_sha
+            or probe_record.get("comparator_code_sha256") != comparator_sha
+            or probe_record.get("receipt_sha256") != probe.get("receipt_sha256")
+            or probe_record.get("model_identity", {}).get("reported_manifest_sha256") !=
+                probe.get("model_identity", {}).get("reported_manifest_sha256")
+            or probe_record.get("model_layer_bytes") != probe.get("model_layer_bytes")):
+        raise ProposalError("durable original probe evidence differs from stable task identity")
+    original_host = probe_record.get("host_before")
+    current_host = probe.get("host_before")
+    if (not isinstance(original_host, dict) or not isinstance(current_host, dict)
+            or original_host.get("hostname") != current_host.get("hostname")
+            or original_host.get("architecture") != current_host.get("architecture")):
+        raise ProposalError("durable original probe host identity differs from current task")
+    original_probe_runtime = _validate_runtime_observation(probe_record.get("runtime_boundary"))
+    fresh_probe_runtime = _validate_runtime_observation(probe.get("runtime_boundary"))
+    if original_probe_runtime != fresh_probe_runtime:
+        raise ProposalError("fresh probe changed stable runtime identity")
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ProposalError("durable terminal provenance is invalid")
+    artifacts = source_manifest.get("source_artifacts", [])
+    artifact_hashes = {item["path"]: item["sha256"] for item in artifacts
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+        and isinstance(item.get("sha256"), str)}
+    copy_claim = source_manifest.get("source_copy_claim", {})
+    source_lineage = {"source_artifacts": artifacts, "source_artifacts_sha256": artifact_hashes,
+        "source_artifact_inventory_sha256": _sha(json.dumps(artifact_hashes, sort_keys=True,
+            separators=(",", ":")).encode()),
+        "screening_policy_sha256": source_manifest.get("screening_policy_sha256"),
+        "screening_code_sha256": source_manifest.get("screening_code_sha256"),
+        "taxonomy_sha256": source_manifest.get("taxonomy_sha256"),
+        "taxonomy_loader_sha256": source_manifest.get("taxonomy_loader_sha256"),
+        "export_config_sha256": source_manifest.get("config_sha256"),
+        "workspace_plan_sha256": source_manifest.get("workspace_plan_sha256") or copy_claim.get("plan_sha256"),
+        "review_ledger_sha256": source_manifest.get("review_ledger_sha256") or copy_claim.get("ledger_sha256"),
+        "partial_sidecar_sha256": source_manifest.get("partial_sidecar_sha256") or copy_claim.get("sidecar_sha256"),
+        "label_guide_sha256": source_manifest.get("label_guide_sha256"),
+        "target_policy": source_manifest.get("target_policy"),
+        "selected_columns": source_manifest.get("selected_columns"),
+        "counts": source_manifest.get("counts"), "promotion_eligible": False}
+    selected_ids = [row["id"] for row in rows]
+    labels = [f"{column['field']}:{column['label']}" for column in cfg["selected_columns"]]
+    expected_provenance = {"comparison_config_sha256": comp_sha,
+        "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
+        "export_manifest_sha256": source_binding["manifest_sha256"],
+        "export_config_sha256": source_binding["config_sha256"],
+        "train_file_sha256": source_binding["train_sha256"], "train_file_bytes": source_binding["train_bytes"],
+        "taxonomy_sha256": cfg["taxonomy_sha256"], "source_lineage": source_lineage,
+        "selected_row_count": len(rows),
+        "selected_row_ids_sha256": _sha(json.dumps(selected_ids, separators=(",", ":")).encode()),
+        "selected_text_digests_sha256": _sha(json.dumps([r["text_sha256"] for r in rows], separators=(",", ":")).encode()),
+        "target_mask_sha256": _sha(json.dumps([r["known_mask"] for r in rows], separators=(",", ":")).encode()),
+        "proposal_schema_sha256": _sha(json.dumps(comparator.output_schema(labels), sort_keys=True,
+            separators=(",", ":")).encode()),
+        "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
+        "progress_store_schema": PROGRESS_STORE_SCHEMA,
+        "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
+        "progress_store_events_sha256": events_sha, "terminal_worker_result_verified": True,
+        "model_name": comp["model_name"], "model_manifest_sha256": checkpoint_binding["model_manifest_sha256"],
+        "model_layer_bytes": probe.get("model_layer_bytes"), "receipt_sha256": probe.get("receipt_sha256"),
+        "server_binary_sha256": comp["server_binary_sha256"], "server_version": comp["server_version"],
+        "request_policy": {k: comp[k] for k in ("timeout_seconds", "max_request_bytes", "max_response_bytes",
+            "num_ctx", "num_predict", "temperature", "top_k", "top_p", "repeat_penalty")},
+        "resource_policy": {k: comp[k] for k in ("resource_memory_max_bytes", "resource_cpu_quota_percent",
+            "remote_scope_tasks_max", "min_memory_available_bytes", "min_disk_free_bytes", "min_gpu_free_bytes")}}
+    allowed_provenance = set(expected_provenance) | {"proposal_config_sha256",
+        "proposal_config_origin_sha256", "proposal_config_identity_sha256",
+        "worker_config_sha256", "payload_sha256", "progress_resumed", "runtime_boundary",
+        "publication_revision"}
+    if (set(provenance) != allowed_provenance
+            or any(provenance.get(key) != value for key, value in expected_provenance.items())
+            or provenance.get("proposal_config_sha256") not in allowed_raw_configs
+            or provenance.get("proposal_config_origin_sha256") != original_config_sha
+            or provenance.get("proposal_config_identity_sha256") != stable_config_sha
+            or provenance.get("publication_revision") != expected_revision
+            or type(provenance.get("progress_resumed")) is not bool
+            or not isinstance(provenance.get("worker_config_sha256"), str)
+            or not HEX.fullmatch(provenance["worker_config_sha256"])
+            or not isinstance(provenance.get("payload_sha256"), str)
+            or not HEX.fullmatch(provenance["payload_sha256"])):
+        raise ProposalError("durable terminal provenance does not match source/model/task identity")
+    actual_runtime = _validate_runtime_observation(provenance.get("runtime_boundary"))
+    if actual_runtime != original_probe_runtime:
+        raise ProposalError("actual worker runtime differs from original probe stable identity")
+    resources = report.get("resources")
+    if (not isinstance(resources, dict) or set(resources) != {"before", "after"}
+            or not isinstance(resources["before"], dict) or not isinstance(resources["after"], dict)):
+        raise ProposalError("durable terminal resource accounting is invalid")
+    return report
+
+
+def _checkpoint_worker_event(store: Path, attempt_id: str, worker_index: int,
+                             original_index: int, row: dict, event: dict,
+                             columns: list[dict], exhaustive: bool,
+                             max_bytes: int) -> dict:
+    item = _validate_progress_event(event, worker_index, row, columns, exhaustive)
+    stored_event = {**event, "index": original_index}
+    _progress_store_append(store, attempt_id, original_index, stored_event, max_bytes)
+    return item
+
+
+def _progress_event_digest(event: dict) -> str:
+    return _sha(_canonical_json(event).rstrip(b"\n"))
+
+
+def _progress_ack(attempt_id: str, index: int, event: dict) -> dict:
+    return {"schema_version": PROGRESS_ACK_SCHEMA, "phase": "ack",
+            "attempt_id": attempt_id, "index": index,
+            "event_sha256": _progress_event_digest(event)}
+
+
+def _validate_progress_ack(value: Any, attempt_id: str, index: int, event: dict) -> None:
+    if (not isinstance(value, dict)
+            or set(value) != {"schema_version", "phase", "attempt_id", "index", "event_sha256"}
+            or value.get("schema_version") != PROGRESS_ACK_SCHEMA
+            or value.get("phase") != "ack"
+            or value.get("attempt_id") != attempt_id
+            or value.get("index") != index
+            or value.get("event_sha256") != _progress_event_digest(event)):
+        raise ProposalError("worker progress acknowledgment is missing or mismatched")
+
+
 def _validate_worker_payload(payload: Any, expected: dict) -> tuple[list[dict], list[dict]]:
-    if not isinstance(payload, dict) or set(payload) != {"schema_version", "binding", "records", "zero_row_probe"}:
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "binding", "records", "zero_row_probe", "attempt_id"}:
         raise ProposalError("worker payload schema is invalid")
     binding = payload.get("binding")
     expected_payload_binding = expected["payload_binding"]
     if (payload.get("schema_version") != PAYLOAD_SCHEMA or not isinstance(binding, dict)
+            or not isinstance(payload.get("attempt_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", payload["attempt_id"])
             or set(binding) != set(expected_payload_binding) or binding != expected_payload_binding
             or payload["zero_row_probe"] != expected["zero_row_probe"]
             or binding.get("manifest_sha256") != expected["export_manifest_sha256"]
@@ -480,7 +1670,8 @@ def _validate_worker_payload(payload: Any, expected: dict) -> tuple[list[dict], 
 
 def _worker_loop(records: list[dict], columns: list[dict], config: dict,
                  infer: Callable[[bytes, set[str]], tuple[str, list[str] | None, float]],
-                 exhaustive: bool, max_prompt_bytes: int) -> tuple[list[dict], list[dict], bool, str | None]:
+                 exhaustive: bool, max_prompt_bytes: int,
+                 progress_emit: Callable[[dict], None] | None = None) -> tuple[list[dict], list[dict], bool, str | None]:
     labels = [f"{c['field']}:{c['label']}" for c in columns]
     allowed = set(labels)
     progress, result_rows = [], []
@@ -536,8 +1727,11 @@ def _worker_loop(records: list[dict], columns: list[dict], config: dict,
                 "status": status, "elapsed_ms": elapsed, "proposal_states": states,
                 "conflict_labels": conflicts, "provenance": "unreviewed_local_teacher_claim"}
         result_rows.append(item)
-        progress.append({"phase": "progress", "index": index, "status": status,
-                         "elapsed_ms": elapsed, "result": item})
+        event = {"phase": "progress", "index": index, "status": status,
+                 "elapsed_ms": elapsed, "result": item}
+        progress.append(event)
+        if progress_emit is not None:
+            progress_emit(event)
     return progress, result_rows, aborted, abort_reason
 
 
@@ -634,6 +1828,24 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
         if not raw_payload or len(raw_payload) > cfg["max_payload_bytes"] or not raw_payload.endswith(b"\n"):
             raise ProposalError("bounded worker payload is absent, oversized or incomplete")
         payload = _json(raw_payload, "worker payload")
+        encoded_progress = []
+        encoded_progress_bytes = 0
+        def emit_progress(event: dict) -> None:
+            nonlocal encoded_progress_bytes
+            line = (json.dumps(event, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":")) + "\n").encode("utf-8")
+            encoded_progress_bytes += len(line)
+            if (len(line) > PROGRESS_EVENT_MAX_BYTES
+                    or encoded_progress_bytes > cfg["teacher_binding"]["max_protocol_bytes"]):
+                raise ProposalError("bounded worker progress protocol exceeded its configured limit")
+            encoded_progress.append(line)
+            print(line.decode("utf-8").rstrip("\n"), flush=True)
+            ack_raw = sys.stdin.buffer.readline(PROGRESS_ACK_MAX_BYTES + 1)
+            if (not ack_raw or len(ack_raw) > PROGRESS_ACK_MAX_BYTES
+                    or not ack_raw.endswith(b"\n")):
+                raise ProposalError("bounded worker progress acknowledgment is absent or incomplete")
+            _validate_progress_ack(_json(ack_raw, "progress acknowledgment"),
+                                   payload["attempt_id"], event["index"], event)
         if payload.get("zero_row_probe") is True:
             records, columns = _validate_worker_payload(payload, cfg["teacher_binding"])
             if records:
@@ -644,13 +1856,8 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
         if not payload["zero_row_probe"]:
             progress, outputs, aborted, abort_reason = _worker_loop(records, columns, cfg,
                 lambda body, labels: comparator._prediction_http(cfg, body, labels),
-                cfg["teacher_binding"]["assume_exhaustive_labels"], cfg["teacher_binding"]["max_prompt_bytes"])
-        encoded_progress = [(json.dumps(event, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8") for event in progress]
-        if (sum(map(len, encoded_progress)) > cfg["teacher_binding"]["max_protocol_bytes"]
-                or any(len(line) > 1_048_576 for line in encoded_progress)):
-            raise ProposalError("bounded worker progress protocol exceeded its configured limit")
-        for line in encoded_progress:
-            print(line.decode("utf-8").rstrip("\n"), flush=True)
+                cfg["teacher_binding"]["assume_exhaustive_labels"],
+                cfg["teacher_binding"]["max_prompt_bytes"], progress_emit=emit_progress)
         _diagnostic_phase("worker_result")
         resources_after = comparator.resource_snapshot(cfg, enforce=False)
         response = {"phase": "result", "schema_version": WORKER_RESULT_SCHEMA,
@@ -906,54 +2113,254 @@ def _validate_progress_event(event: dict, index: int, row: dict, columns: list[d
     return _validate_progress_result(event, index, row, columns, exhaustive)
 
 
-def _atomic_private_publish(final_path: Path, proposals: list[dict], manifest: dict) -> tuple[Path, str]:
+def _atomic_private_publish(final_path: Path, proposals: list[dict], manifest: dict,
+                            max_output_bytes: int | None = None) -> tuple[Path, str]:
     if final_path.is_symlink():
         raise ProposalError("final proposal directory cannot be a symlink")
     final_path = final_path.resolve()
-    if final_path.exists() or final_path.is_symlink() or not _outside_git(final_path):
-        raise ProposalError("final proposal directory must be new and outside Git")
+    if final_path.is_symlink() or not _outside_git(final_path):
+        raise ProposalError("final proposal directory must be outside Git and not a symlink")
     parent = final_path.parent
     if not parent.exists() or not _private_dir(parent):
         raise ProposalError("proposal output parent must already be owner-private")
     publish_status = manifest.get("status")
     if publish_status not in {"complete", "partial_aborted_ambiguous"}:
         raise ProposalError("proposal publication status is not a recognized terminal state")
-    partial = parent / f".{final_path.name}.partial-{uuid.uuid4().hex}"
-    partial = comparator._private_report_directory(partial)
-    incomplete = {"schema_version": REPORT_SCHEMA, "status": "incomplete", "promotion_eligible": False,
-                  "run_id": partial.name}
-    try:
-        _write_new(partial / "manifest.json", (json.dumps(incomplete, sort_keys=True) + "\n").encode())
-    except Exception:
+    payload = ("\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                          for row in proposals) + "\n").encode("utf-8")
+    if max_output_bytes is not None and len(payload) > max_output_bytes:
+        raise ProposalError("encoded proposals exceed configured output-byte bound")
+    event_sha = manifest.get("provenance", {}).get("progress_store_events_sha256")
+    publication_id = _sha(_canonical_json({"proposal_sha256": _sha(payload),
+        "progress_events_sha256": event_sha, "status": publish_status}).rstrip(b"\n"))
+    manifest = {**manifest, "publication_id": publication_id}
+    complete_manifest = {**manifest, "status": publish_status, "proposals_sha256": _sha(payload),
+                         "proposals_bytes": len(payload), "rows_written": len(proposals)}
+    desired_raw = (json.dumps(complete_manifest, indent=2, sort_keys=True,
+                              ensure_ascii=False, allow_nan=False) + "\n").encode()
+
+    def safe_dir(path: Path) -> bool:
+        return (not path.is_symlink() and path.is_dir()
+                and comparator._verify_private_report_directory(path)
+                and _outside_git(path))
+
+    def file_bytes(path: Path, limit: int, label: str) -> bytes:
         try:
-            shutil.rmtree(partial)
+            info = path.stat(follow_symlinks=False)
         except OSError:
-            pass
-        raise
-    try:
-        payload = ("\n".join(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                              for row in proposals) + "\n").encode("utf-8")
-        _write_new(partial / "proposals.jsonl", payload)
-        manifest = {**manifest, "status": publish_status, "proposals_sha256": _sha(payload),
-                    "proposals_bytes": len(payload), "rows_written": len(proposals)}
-        raw_manifest = (json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode()
-        temp_manifest = partial / ".manifest-complete.tmp"
-        _write_new(temp_manifest, raw_manifest)
-        if final_path.exists():
-            raise ProposalError("final proposal directory appeared during publication")
-        os.rename(partial, final_path)
-        temp_manifest = final_path / temp_manifest.name
-        # The destination remains explicitly incomplete until the last atomic file replace.
-        os.replace(temp_manifest, final_path / "manifest.json")
+            raise ProposalError(f"{label} is unsafe") from None
+        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or not _private_file(path)):
+            raise ProposalError(f"{label} is unsafe")
+        return _read(path, limit, label)
+
+    def validate_revision_reservation(directory: Path) -> bool:
+        reservation_path = directory / "revision-reservation.json"
+        if not reservation_path.exists() and not reservation_path.is_symlink():
+            return False
+        raw = file_bytes(reservation_path, 65_536, "report revision reservation")
+        record = _json(raw, "report revision reservation")
+        required = {"schema_version", "sequence", "revision_id", "binding_sha256",
+                    "parent_output_name", "parent_manifest_sha256", "parent_proposals_sha256",
+                    "target_output_name", "record_sha256"}
+        if not isinstance(record, dict) or set(record) != required:
+            raise ProposalError("report revision reservation schema is invalid")
+        base = {key: value for key, value in record.items() if key != "record_sha256"}
+        reference = {key: record[key] for key in ("revision_id", "sequence", "parent_output_name",
+            "parent_manifest_sha256", "parent_proposals_sha256")}
+        if (record["schema_version"] != PROGRESS_REVISION_SCHEMA
+                or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))
+                or manifest.get("provenance", {}).get("publication_revision") != reference):
+            raise ProposalError("report revision reservation does not match publication input")
+        return True
+
+    def validate_complete(raw: bytes) -> dict:
+        value = _json(raw, "completed proposal manifest")
+        if not isinstance(value, dict):
+            raise ProposalError("persisted publication manifest is invalid")
+        provenance = value.get("provenance", {})
+        if not isinstance(provenance, dict):
+            raise ProposalError("persisted publication source identity is invalid")
+        if value != complete_manifest:
+            raise ProposalError("persisted full publication manifest does not match trusted task evidence")
+        return value
+
+    def validate_proposal_file(directory: Path) -> None:
+        if file_bytes(directory / "proposals.jsonl", max_output_bytes or PROGRESS_STORE_HARD_MAX_BYTES,
+                      "published proposal bytes") != payload:
+            raise ProposalError("persisted proposal bytes do not match durable task evidence")
+
+    def atomic_new(directory: Path, target_name: str, prefix: str, raw: bytes) -> Path:
+        temp = directory / f".{prefix}-{uuid.uuid4().hex}.tmp"
+        _write_new(temp, raw)
+        os.replace(temp, directory / target_name)
+        _sync_directory(directory)
+        return directory / target_name
+
+    marker_evidence_prefix = f".manifest-incomplete-{publication_id}-"
+    proposal_evidence_prefix = f".proposals-{publication_id}-"
+    complete_evidence_prefix = f".manifest-complete-{publication_id}-"
+
+    def validate_staging_evidence(directory: Path, names: set[str]) -> set[str]:
+        evidence = [name for name in names if name.startswith((marker_evidence_prefix,
+            proposal_evidence_prefix, complete_evidence_prefix)) and name.endswith(".tmp")]
+        if len(evidence) > PUBLICATION_TEMP_EVIDENCE_MAX:
+            raise ProposalError("publication contains too many retained staging records")
+        for name in evidence:
+            path = directory / name
+            if name.startswith(marker_evidence_prefix):
+                raw = file_bytes(path, 1_048_576, "retained incomplete marker")
+                if not raw or not marker_raw_expected.startswith(raw):
+                    raise ProposalError("retained incomplete marker evidence is altered")
+            elif name.startswith(proposal_evidence_prefix):
+                raw = file_bytes(path, max_output_bytes or PROGRESS_STORE_HARD_MAX_BYTES,
+                                 "retained proposal staging bytes")
+                if not raw or not payload.startswith(raw):
+                    raise ProposalError("retained proposal staging evidence is altered")
+            else:
+                raw = file_bytes(path, PROGRESS_TERMINAL_MAX_BYTES,
+                                 "retained complete-manifest staging bytes")
+                try:
+                    _json(raw, "retained complete-manifest staging bytes")
+                except ProposalError:
+                    if not raw or not desired_raw.startswith(raw):
+                        raise ProposalError("retained complete-manifest staging evidence is altered") from None
+                else:
+                    validate_complete(raw)
+        return set(evidence)
+
+    marker_raw_expected = _canonical_json({"schema_version": REPORT_SCHEMA, "status": "incomplete",
+        "promotion_eligible": False, "publication_id": publication_id})
+
+    reserved_revision_dir = False
+    if final_path.exists():
+        if safe_dir(final_path):
+            initial_names = {p.name for p in final_path.iterdir()}
+            if ("revision-reservation.json" in initial_names
+                    and "manifest.json" not in initial_names
+                    and "proposals.jsonl" not in initial_names):
+                validate_revision_reservation(final_path)
+                validate_staging_evidence(final_path, initial_names)
+                if not initial_names.issubset({"revision-reservation.json"} |
+                        validate_staging_evidence(final_path, initial_names)):
+                    raise ProposalError("reserved report revision contains foreign entries")
+                reserved_revision_dir = True
+    if final_path.exists() and not reserved_revision_dir:
+        if not safe_dir(final_path):
+            raise ProposalError("existing proposal directory is unsafe")
+        names = {p.name for p in final_path.iterdir()}
+        has_revision_reservation = validate_revision_reservation(final_path)
+        marker_path = final_path / "manifest.json"
+        marker_raw = file_bytes(marker_path, PROGRESS_TERMINAL_MAX_BYTES, "proposal manifest")
+        marker_value = _json(marker_raw, "proposal manifest")
+        if not isinstance(marker_value, dict):
+            raise ProposalError("proposal manifest is invalid")
+        retained = validate_staging_evidence(final_path, names)
+        if not names.issubset({"manifest.json", "proposals.jsonl", "revision-reservation.json"} | retained):
+            raise ProposalError("existing proposal directory has foreign or unknown entries")
+        if marker_value.get("status") != "incomplete":
+            if not {"manifest.json", "proposals.jsonl"}.issubset(names):
+                raise ProposalError("completed proposal directory is missing required files")
+            validate_proposal_file(final_path)
+            validate_complete(marker_raw)
+            return final_path, _sha(marker_raw)
+        marker = _json(marker_raw, "incomplete proposal marker")
+        if marker != {"schema_version": REPORT_SCHEMA, "status": "incomplete",
+                      "promotion_eligible": False, "publication_id": publication_id}:
+            raise ProposalError("existing proposal marker does not match recoverable publication")
+        if "proposals.jsonl" in names:
+            validate_proposal_file(final_path)
+        else:
+            atomic_new(final_path, "proposals.jsonl", "proposals", payload)
+        manifests = []
+        for name in sorted(names):
+            if name.startswith(complete_evidence_prefix) and name.endswith(".tmp"):
+                raw = file_bytes(final_path / name, PROGRESS_TERMINAL_MAX_BYTES,
+                                 "pending publication manifest")
+                try:
+                    parsed = _json(raw, "pending publication manifest")
+                except ProposalError:
+                    # A process may have died while writing this staging file.
+                    # Keep it as evidence and rebuild from the durable terminal.
+                    continue
+                validate_complete(raw)
+                manifests.append((name, raw))
+        if manifests and len({raw for _name, raw in manifests}) != 1:
+            raise ProposalError("multiple different pending publication manifests are ambiguous")
+        raw_manifest = manifests[0][1] if manifests else desired_raw
+        marker_evidence = final_path / f"{marker_evidence_prefix}{uuid.uuid4().hex}.tmp"
+        _write_new(marker_evidence, marker_raw)
+        _sync_directory(final_path)
+        temp_path = final_path / f"{complete_evidence_prefix}{uuid.uuid4().hex}.tmp"
+        _write_new(temp_path, raw_manifest)
+        _sync_directory(final_path)
+        os.replace(temp_path, marker_path)
+        _sync_directory(final_path)
         return final_path, _sha(raw_manifest)
-    except Exception:
-        # Keep the exact private partial directory and its incomplete marker for operator cleanup.
-        try:
-            if 'temp_manifest' in locals() and temp_manifest.exists():
-                temp_manifest.unlink()
-        except OSError:
-            pass
-        raise
+
+    already_final = reserved_revision_dir
+    partial = final_path if reserved_revision_dir else parent / f".{final_path.name}.partial-{publication_id}"
+    if already_final:
+        pass
+    elif partial.exists():
+        if not safe_dir(partial):
+            raise ProposalError("matching partial publication directory is unsafe")
+    else:
+        partial = comparator._private_report_directory(partial)
+        if not safe_dir(partial):
+            raise ProposalError("new partial publication directory is not owner-private")
+        _sync_directory(parent)
+    names = {p.name for p in partial.iterdir()}
+    retained = validate_staging_evidence(partial, names)
+    allowed = {"manifest.json", "proposals.jsonl"} | retained
+    if already_final:
+        allowed.add("revision-reservation.json")
+    if not names.issubset(allowed):
+        raise ProposalError("partial publication contains unexpected entries")
+    marker_path = partial / "manifest.json"
+    if marker_path.exists():
+        marker = _json(file_bytes(marker_path, 1_048_576, "partial publication marker"),
+                       "partial publication marker")
+        if marker != {"schema_version": REPORT_SCHEMA, "status": "incomplete",
+                      "promotion_eligible": False, "publication_id": publication_id}:
+            raise ProposalError("partial publication marker identity does not match")
+    else:
+        atomic_new(partial, "manifest.json", f"manifest-incomplete-{publication_id}",
+                   marker_raw_expected)
+    if (partial / "proposals.jsonl").exists():
+        validate_proposal_file(partial)
+    else:
+        # Never consume a retained staged file: it records what survived the
+        # earlier interruption. Publish from the durable row evidence again.
+        atomic_new(partial, "proposals.jsonl", f"proposals-{publication_id}", payload)
+    manifest_temps = []
+    for path in partial.iterdir():
+        if path.name.startswith(".manifest-complete-") and path.name.endswith(".tmp"):
+            raw = file_bytes(path, PROGRESS_TERMINAL_MAX_BYTES, "pending publication manifest")
+            try:
+                _json(raw, "pending publication manifest")
+            except ProposalError:
+                # Retain interrupted staging bytes; a later valid temp can be
+                # written without discarding this evidence.
+                continue
+            validate_complete(raw)
+            manifest_temps.append((path, raw))
+    if manifest_temps and len({raw for _path, raw in manifest_temps}) != 1:
+        raise ProposalError("multiple different pending publication manifests are ambiguous")
+    raw_manifest = manifest_temps[0][1] if manifest_temps else desired_raw
+    # Keep any interrupted complete-manifest staging files as evidence. A
+    # fresh publication temp is the one atomically promoted to the marker.
+    temp_manifest = partial / f"{complete_evidence_prefix}{uuid.uuid4().hex}.tmp"
+    _write_new(temp_manifest, raw_manifest)
+    _sync_directory(partial)
+    if final_path.exists() and not already_final:
+        raise ProposalError("final proposal directory appeared during publication")
+    if not already_final:
+        os.rename(partial, final_path)
+        _sync_directory(parent)
+    os.replace(final_path / temp_manifest.name, final_path / "manifest.json")
+    _sync_directory(final_path)
+    return final_path, _sha(raw_manifest)
 
 
 
@@ -1078,7 +2485,7 @@ def _remote_identity_snapshot(comp: dict) -> dict:
 
 def _validate_zero_probe_match(probe: dict, ready: dict, host_before: dict, cfg_sha: str,
                                comp_sha: str, adapter_sha: str, comparator_sha: str,
-                               receipt_sha: str) -> None:
+                               receipt_sha: str, config_identity_sha256: str | None = None) -> None:
     identity = probe.get("model_identity") if isinstance(probe, dict) else None
     probe_host = probe.get("host_before", {}) if isinstance(probe, dict) else None
     boundary = probe.get("runtime_boundary", {}) if isinstance(probe, dict) else None
@@ -1088,6 +2495,8 @@ def _validate_zero_probe_match(probe: dict, ready: dict, host_before: dict, cfg_
             or probe.get("outside_listener_denied") is not True
             or probe.get("persistent_service_unchanged") is not True
             or probe.get("proposal_config_sha256") != cfg_sha
+            or (config_identity_sha256 is not None
+                and probe.get("proposal_config_identity_sha256") != config_identity_sha256)
             or probe.get("comparison_config_sha256") != comp_sha
             or probe.get("adapter_code_sha256") != adapter_sha
             or probe.get("comparator_code_sha256") != comparator_sha
@@ -1109,7 +2518,9 @@ def _validate_zero_probe_match(probe: dict, ready: dict, host_before: dict, cfg_
 def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
                           local_receipt: dict, local_receipt_sha: str,
                           manifest: dict | None, rows: list[dict] | None, binding: dict | None,
-                          zero_rows: bool, expected_probe: dict | None = None) -> dict:
+                          zero_rows: bool, expected_probe: dict | None = None,
+                          resume: bool = False, publication_path: Path | None = None,
+                          publication_revision: dict | None = None) -> dict:
     global _DIAGNOSTIC_CLEANUP
     _DIAGNOSTIC_CLEANUP = "not_started"
     _diagnostic_phase("remote_snapshot")
@@ -1170,6 +2581,11 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
     work_created = False
     process = None
     progress_rows: list[dict] = []
+    worker_progress_events: list[dict] = []
+    stored_progress: dict[int, dict] = {}
+    progress_store: Path | None = None
+    progress_attempt_id = run_id
+    checkpoint_binding = None
     sent_payload_sha = None
     result = None
     installed = None
@@ -1220,17 +2636,43 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             raise ProposalError("warmed model identity differs from the pinned expected manifest")
         if not zero_rows:
             _validate_zero_probe_match(expected_probe, ready, host_before, cfg_sha, comp_sha,
-                                       adapter_sha, comparator_sha, local_receipt_sha)
+                                       adapter_sha, comparator_sha, local_receipt_sha,
+                                       _proposal_config_identity_sha(cfg))
         _diagnostic_phase("payload_result")
         if zero_rows:
             payload = {"schema_version": PAYLOAD_SCHEMA, "binding": payload_binding,
-                       "records": [], "zero_row_probe": True}
+                       "records": [], "zero_row_probe": True, "attempt_id": progress_attempt_id}
             selected_ids = []
         else:
             assert manifest is not None and rows is not None and binding is not None
             _reverify_export(cfg, binding, comp["max_manifest_bytes"])
             payload = {"schema_version": PAYLOAD_SCHEMA, "binding": payload_binding,
                        "records": [_payload_row(row) for row in rows], "zero_row_probe": False}
+            selected_ids = [row["id"] for row in rows]
+            checkpoint_binding = _progress_binding(cfg, cfg_sha, comp, comp_sha, rows, binding,
+                                                   adapter_sha, comparator_sha, ready)
+            progress_store = _progress_store_path(Path(cfg["output_dir"]), allow_final=resume)
+            if resume:
+                _records, stored_progress, progress_metadata = _progress_store_read(
+                    progress_store, checkpoint_binding, rows, cfg,
+                    config_sha256=cfg_sha, return_metadata=True)
+                original_config_sha256 = progress_metadata["proposal_config_sha256"] or cfg_sha
+            else:
+                _progress_store_create(progress_store, checkpoint_binding,
+                                        cfg["max_progress_store_bytes"], cfg_sha)
+                original_config_sha256 = cfg_sha
+            pending_indices = _progress_pending_indices(rows, stored_progress)
+            if not pending_indices:
+                raise ProposalError("durable progress is complete; publication recovery is required")
+            pending_rows = [rows[i] for i in pending_indices]
+            capacity_bound = _check_result_bounds(pending_rows, cfg["selected_columns"],
+                cfg["max_output_bytes"], cfg["max_protocol_bytes"])
+            if (_progress_store_usage(progress_store) + capacity_bound["progress_store_bytes"]
+                    > cfg["max_progress_store_bytes"]):
+                raise ProposalError("progress store capacity cannot cover a full attempted batch")
+            payload = {"schema_version": PAYLOAD_SCHEMA, "binding": payload_binding,
+                       "records": [_payload_row(row) for row in pending_rows], "zero_row_probe": False,
+                       "attempt_id": progress_attempt_id}
             selected_ids = [row["id"] for row in rows]
         payload_raw = (json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                   separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
@@ -1239,30 +2681,55 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         sent_payload_sha = _sha(payload_raw)
         assert process.stdin is not None
         try:
+            if not zero_rows:
+                assert progress_store is not None and checkpoint_binding is not None
+                _progress_store_record_attempt(progress_store, progress_attempt_id,
+                                               pending_indices, checkpoint_binding,
+                                               cfg["max_progress_store_bytes"])
             process.stdin.write(payload_raw)
             process.stdin.flush()
-            process.stdin.close()
+            if zero_rows:
+                process.stdin.close()
         except OSError:
             raise ProposalError("worker input transport failed after readiness") from None
-        count = 0 if zero_rows else len(rows or [])
+        count = 0 if zero_rows else len(pending_rows)
         batch_timeout = float(comp["timeout_seconds"]) * (count + 2) + comp["batch_overhead_margin_seconds"]
         if not math.isfinite(batch_timeout) or batch_timeout > sys.maxsize / 1_000_000_000:
             raise ProposalError("batch timeout exceeds safe platform arithmetic")
         deadline = time.monotonic() + batch_timeout
-        expected_rows = rows or []
-        for index in range(count):
+        expected_rows = pending_rows if not zero_rows else []
+        for worker_index in range(count):
             event = _read_worker_line(process, lines, max(0.001, deadline - time.monotonic()))
-            row = expected_rows[index]
-            item = _validate_progress_event(event, index, row, cfg["selected_columns"],
-                                            cfg["assume_exhaustive_labels"])
+            row = expected_rows[worker_index]
+            original_index = pending_indices[worker_index]
+            assert progress_store is not None
+            item = _checkpoint_worker_event(progress_store, progress_attempt_id, worker_index,
+                original_index, row, event, cfg["selected_columns"], cfg["assume_exhaustive_labels"],
+                cfg["max_progress_store_bytes"])
+            ack_raw = (_canonical_json(_progress_ack(progress_attempt_id, worker_index, event)))
+            if len(ack_raw) > PROGRESS_ACK_MAX_BYTES:
+                raise ProposalError("progress acknowledgment exceeds protocol limit")
+            try:
+                process.stdin.write(ack_raw)
+                process.stdin.flush()
+            except OSError:
+                raise ProposalError("progress acknowledgment transport failed") from None
+            worker_progress_events.append(event)
             progress_rows.append(item)
+        if not zero_rows:
+            assert process.stdin is not None
+            process.stdin.close()
         progress_digest = _sha(b"".join(
-            (json.dumps({"phase": "progress", "index": i, "status": row["status"],
-                         "elapsed_ms": row["elapsed_ms"], "result": row}, sort_keys=True,
-                        ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-            for i, row in enumerate(progress_rows)))
+            (json.dumps(event, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+            for event in worker_progress_events))
         result = _read_worker_line(process, lines, max(0.001, deadline - time.monotonic()))
         return_code = process.wait(timeout=30)
+        try:
+            trailing = lines.get(timeout=5)
+        except queue.Empty:
+            raise ProposalError("worker protocol did not terminate cleanly") from None
+        if trailing is not None:
+            raise ProposalError("worker emitted protocol data after its terminal result")
         reported_statuses = [row["status"] for row in progress_rows]
         requires_abort = any(status in {"timeout", "transport_error", "protocol_error", "identity_mismatch",
                                         "http_error", "incomplete", "not_attempted_after_abort"}
@@ -1335,9 +2802,16 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
                 "resources_before": ready["resources_before"], "resources_after": result["resources_after"],
                 "warmup": result["warmup"], "cleanup_verified": result["cleanup_verified"],
                 "persistent_service_unchanged": True, "host_before": host_before, "host_after": host_after,
-                "proposal_config_sha256": cfg_sha, "comparison_config_sha256": comp_sha,
+                "proposal_config_sha256": cfg_sha,
+                "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
+                "comparison_config_sha256": comp_sha,
                 "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha}
     assert manifest is not None and rows is not None and binding is not None
+    assert progress_store is not None
+    for original_index, item in zip(pending_indices, progress_rows):
+        stored_progress[original_index] = item
+    progress_rows = [stored_progress[index] for index in range(len(rows))]
+    _diagnostic_phase("source_recheck")
     _reverify_export(cfg, binding, comp["max_manifest_bytes"])
     if len(progress_rows) != len(rows):
         raise ProposalError("worker returned incomplete row status coverage")
@@ -1365,12 +2839,20 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         "target_policy": manifest.get("target_policy"), "selected_columns": manifest.get("selected_columns"),
         "counts": manifest.get("counts"), "promotion_eligible": False}
     model = result["model_identity"]
+    progress_events_sha256 = _sha(_read(
+        progress_store / "events.jsonl",
+        cfg["max_progress_store_bytes"],
+        "progress event log"))
     output_manifest = {"schema_version": REPORT_SCHEMA, "created_at_epoch_seconds": int(time.time()),
         "status": "complete" if not result.get("aborted") else "partial_aborted_ambiguous",
         "promotion_eligible": False, "claims": {"teacher_suggestions_are_unreviewed": True,
             "heldout_accessed": False, "labels_independently_verified": False,
             "screening_independently_verified": False, "promotion_eligible": False},
-        "provenance": {"proposal_config_sha256": cfg_sha, "comparison_config_sha256": comp_sha,
+        "provenance": {"proposal_config_sha256": cfg_sha,
+            "proposal_config_origin_sha256": original_config_sha256,
+            "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
+            "publication_revision": publication_revision,
+            "comparison_config_sha256": comp_sha,
             "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
             "worker_config_sha256": worker_config_sha, "payload_sha256": sent_payload_sha,
             "export_manifest_sha256": binding["manifest_sha256"], "export_config_sha256": binding["config_sha256"],
@@ -1382,6 +2864,11 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             "proposal_schema_sha256": _sha(json.dumps(comparator.output_schema([f"{c['field']}:{c['label']}" for c in cfg["selected_columns"]]),
                 sort_keys=True, separators=(",", ":")).encode()),
             "prompt_contract_sha256": _sha((comp["system_prompt"] + "\0" + comp["prompt_revision"]).encode()),
+            "progress_store_schema": PROGRESS_STORE_SCHEMA,
+            "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
+            "progress_store_events_sha256": progress_events_sha256,
+            "progress_resumed": resume,
+            "terminal_worker_result_verified": True,
             "model_name": comp["model_name"], "model_manifest_sha256": model["reported_manifest_sha256"],
             "model_layer_bytes": result["artifact"]["model_layer_bytes"], "receipt_sha256": result["receipt_sha256"],
             "server_binary_sha256": comp["server_binary_sha256"], "server_version": comp["server_version"],
@@ -1401,13 +2888,172 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         "uncertainty": {"source_and_review_claims_independently_verified": False,
             "teacher_labels_are_claims": True, "omitted_labels_are_negative": cfg["assume_exhaustive_labels"],
             "selection_claim": "configured train-only subset; no heldout data opened"}}
-    final_path, manifest_sha = _atomic_private_publish(Path(cfg["output_dir"]), progress_rows, output_manifest)
+    _diagnostic_phase("publication")
+    _progress_store_write_terminal(progress_store, progress_attempt_id, checkpoint_binding,
+                                   progress_events_sha256, output_manifest,
+                                   cfg["max_progress_store_bytes"])
+    final_path, manifest_sha = _atomic_private_publish(publication_path or Path(cfg["output_dir"]), progress_rows,
+                                                        output_manifest, cfg["max_output_bytes"])
     return {"rows_selected": len(rows), "rows_completed": len(progress_rows),
             "manifest_sha256": manifest_sha, "output_directory": str(final_path),
             "status_counts": status_counts, "promotion_eligible": False}
 
 
-def run(config_path: Path, zero_rows: bool = False) -> dict:
+def _resume_published_progress(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
+                               manifest: dict, rows: list[dict], source_binding: dict,
+                               probe: dict) -> dict | None:
+    adapter_sha = _sha(Path(__file__).resolve(strict=True).read_bytes())
+    comparator_sha = _sha(Path(comparator.__file__).resolve(strict=True).read_bytes())
+    checkpoint_binding = _progress_binding(cfg, cfg_sha, comp, comp_sha, rows,
+                                           source_binding, adapter_sha, comparator_sha, probe)
+    store = _progress_store_path(Path(cfg["output_dir"]), allow_final=True)
+    _records, latest, config_history = _progress_store_read(store, checkpoint_binding, rows, cfg,
+        config_sha256=cfg_sha, return_metadata=True, update_capacity=False)
+    pending = bool(_progress_pending_indices(rows, latest))
+    events_sha = _sha(_read(store / "events.jsonl",
+                            cfg["max_progress_store_bytes"],
+                            "progress event log"))
+    terminal = _progress_store_matching_terminal(store, checkpoint_binding, events_sha)
+    status_counts = dict(sorted(Counter(item["status"] for item in latest.values()).items()))
+    revision_state = config_history["revision_state"]
+    expected_revision = revision_state["reference"] if revision_state is not None else None
+    publication_path = revision_state["target"] if revision_state is not None else Path(cfg["output_dir"])
+    if terminal is not None:
+        output_manifest = _validate_terminal_report(terminal["output_manifest"], cfg, cfg_sha,
+            comp, comp_sha, manifest, source_binding, rows, latest, checkpoint_binding,
+            events_sha, probe, adapter_sha, comparator_sha, config_history, expected_revision)
+        if pending:
+            proposals = [latest[index] for index in range(len(rows))]
+            _reverify_export(cfg, source_binding, comp["max_manifest_bytes"])
+            _progress_capacity_records(store, cfg["max_progress_store_bytes"], update_increase=True,
+                config_sha256=cfg_sha, original_config_sha256=config_history["proposal_config_sha256"])
+            _progress_probe_receipt_write(store, checkpoint_binding, probe, cfg_sha,
+                                          cfg["max_progress_store_bytes"])
+            _atomic_private_publish(publication_path, proposals, output_manifest, cfg["max_output_bytes"])
+            return None
+    elif pending:
+        _progress_capacity_records(store, cfg["max_progress_store_bytes"], update_increase=True,
+            config_sha256=cfg_sha, original_config_sha256=config_history["proposal_config_sha256"])
+        _progress_probe_receipt_write(store, checkpoint_binding, probe, cfg_sha,
+                                      cfg["max_progress_store_bytes"])
+        return None
+    else:
+        # Per-row events remain usable when the process stopped after a durable
+        # event but before a verified terminal result. Publish them explicitly as
+        # an ambiguous partial report, never as a complete worker run.
+        artifacts = manifest.get("source_artifacts", [])
+        artifact_hashes = {item["path"]: item["sha256"] for item in artifacts
+                           if isinstance(item, dict) and isinstance(item.get("path"), str)
+                           and isinstance(item.get("sha256"), str)}
+        source_copy_claim = manifest.get("source_copy_claim", {})
+        source_lineage = {"source_artifacts": artifacts,
+            "source_artifacts_sha256": artifact_hashes,
+            "source_artifact_inventory_sha256": _sha(_canonical_json(artifact_hashes).rstrip(b"\n")),
+            "screening_policy_sha256": manifest.get("screening_policy_sha256"),
+            "screening_code_sha256": manifest.get("screening_code_sha256"),
+            "taxonomy_sha256": manifest.get("taxonomy_sha256"),
+            "taxonomy_loader_sha256": manifest.get("taxonomy_loader_sha256"),
+            "export_config_sha256": manifest.get("config_sha256"),
+            "workspace_plan_sha256": manifest.get("workspace_plan_sha256") or source_copy_claim.get("plan_sha256"),
+            "review_ledger_sha256": manifest.get("review_ledger_sha256") or source_copy_claim.get("ledger_sha256"),
+            "partial_sidecar_sha256": manifest.get("partial_sidecar_sha256") or source_copy_claim.get("sidecar_sha256"),
+            "label_guide_sha256": manifest.get("label_guide_sha256"),
+            "target_policy": manifest.get("target_policy"),
+            "selected_columns": manifest.get("selected_columns"),
+            "counts": manifest.get("counts"), "promotion_eligible": False}
+        selected_ids = [row["id"] for row in rows]
+        labels = [f"{column['field']}:{column['label']}" for column in cfg["selected_columns"]]
+        coverage = Counter(f"{label}:{state}" for row in latest.values()
+                           for label, state in row["proposal_states"].items())
+        # With no trusted terminal event, keep the recovery report entirely
+        # derived from durable row evidence and stable task bindings. A new
+        # timestamp or resource snapshot on each resume would make identical
+        # ambiguous partial recovery appear to be a different publication.
+        output_manifest = {"schema_version": REPORT_SCHEMA,
+            "status": "partial_aborted_ambiguous", "promotion_eligible": False,
+            "claims": {"teacher_suggestions_are_unreviewed": True, "heldout_accessed": False,
+                       "labels_independently_verified": False, "screening_independently_verified": False,
+                       "promotion_eligible": False},
+            "provenance": {"proposal_config_sha256": config_history["proposal_config_sha256"] or cfg_sha,
+                "proposal_config_origin_sha256": config_history["proposal_config_sha256"] or cfg_sha,
+                "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
+                "publication_revision": expected_revision,
+                "comparison_config_sha256": comp_sha,
+                "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
+                "worker_config_sha256": None, "payload_sha256": None,
+                "export_manifest_sha256": source_binding["manifest_sha256"],
+                "export_config_sha256": source_binding["config_sha256"],
+                "train_file_sha256": source_binding["train_sha256"],
+                "train_file_bytes": source_binding["train_bytes"],
+                "taxonomy_sha256": cfg["taxonomy_sha256"], "source_lineage": source_lineage,
+                "selected_row_count": len(rows),
+                "selected_row_ids_sha256": _sha(_canonical_json(selected_ids).rstrip(b"\n")),
+                "selected_text_digests_sha256": _sha(_canonical_json([r["text_sha256"] for r in rows]).rstrip(b"\n")),
+                "target_mask_sha256": _sha(_canonical_json([r["known_mask"] for r in rows]).rstrip(b"\n")),
+                "proposal_schema_sha256": _sha(_canonical_json(comparator.output_schema(labels)).rstrip(b"\n")),
+                "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
+                "progress_store_schema": PROGRESS_STORE_SCHEMA,
+                "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
+                "progress_store_events_sha256": events_sha, "progress_resumed": True,
+                "publication_recovered": True, "terminal_worker_result_verified": False,
+                "individual_row_events_validated": True,
+                "model_name": comp["model_name"],
+                "model_manifest_sha256": checkpoint_binding["model_manifest_sha256"],
+                "model_layer_bytes": probe.get("model_layer_bytes"),
+                "receipt_sha256": probe.get("receipt_sha256"),
+                "server_binary_sha256": comp["server_binary_sha256"],
+                "server_version": comp["server_version"],
+                "runtime_boundary": _stable_runtime_identity(probe.get("runtime_boundary")),
+                "request_policy": {k: comp[k] for k in ("timeout_seconds", "max_request_bytes", "max_response_bytes",
+                    "num_ctx", "num_predict", "temperature", "top_k", "top_p", "repeat_penalty")},
+                "resource_policy": {k: comp[k] for k in ("resource_memory_max_bytes", "resource_cpu_quota_percent",
+                    "remote_scope_tasks_max", "min_memory_available_bytes", "min_disk_free_bytes", "min_gpu_free_bytes")}},
+            "counts": {"selected_rows": len(rows), "statuses": status_counts,
+                "answered_rows": status_counts.get("answered", 0),
+                "abstentions": status_counts.get("abstain", 0),
+                "failures": sum(n for status, n in status_counts.items() if status not in ("answered", "abstain")),
+                "not_attempted_after_abort": status_counts.get("not_attempted_after_abort", 0),
+                "per_label_and_state": dict(sorted(coverage.items()))},
+            "abort": {"aborted": True, "reason": "verified_terminal_result_unavailable"},
+            "uncertainty": {"source_and_review_claims_independently_verified": False,
+                "teacher_labels_are_claims": True,
+                "omitted_labels_are_negative": cfg["assume_exhaustive_labels"],
+                "selection_claim": "configured train-only subset; no heldout data opened"}}
+        partial_rows = [latest[index] for index in range(len(rows))]
+        if (terminal is None and revision_state is None
+                and Path(cfg["output_dir"]).exists()
+                and not _published_matches_expected(Path(cfg["output_dir"]), partial_rows, output_manifest)):
+            revision_state = _progress_revision_reserve(store, Path(cfg["output_dir"]), checkpoint_binding,
+                                                        cfg["max_progress_store_bytes"])
+            if revision_state is None:
+                raise ProposalError("changed partial report could not reserve a safe immutable revision")
+            expected_revision = revision_state["reference"]
+            publication_path = revision_state["target"]
+            output_manifest["provenance"]["publication_revision"] = expected_revision
+    _diagnostic_phase("source_recheck")
+    _reverify_export(cfg, source_binding, comp["max_manifest_bytes"])
+    # A terminal manifest is immutable publication input. Resume uses the
+    # original fsynced bytes; changing probe/progress provenance here would
+    # make a persisted temporary manifest appear mismatched after a crash.
+    proposals = [latest[index] for index in range(len(rows))]
+    _diagnostic_phase("publication")
+    if terminal is None:
+        _progress_capacity_records(store, cfg["max_progress_store_bytes"], update_increase=True,
+            config_sha256=cfg_sha, original_config_sha256=config_history["proposal_config_sha256"])
+        _progress_store_write_publication_receipt(store, checkpoint_binding, proposals,
+            output_manifest, cfg["max_progress_store_bytes"])
+    final_path, manifest_sha = _atomic_private_publish(publication_path, proposals,
+                                                        output_manifest, cfg["max_output_bytes"])
+    _progress_capacity_records(store, cfg["max_progress_store_bytes"], update_increase=True,
+        config_sha256=cfg_sha, original_config_sha256=config_history["proposal_config_sha256"])
+    _progress_probe_receipt_write(store, checkpoint_binding, probe, cfg_sha,
+                                  cfg["max_progress_store_bytes"])
+    return {"rows_selected": len(rows), "rows_completed": len(proposals),
+            "manifest_sha256": manifest_sha, "output_directory": str(final_path),
+            "status_counts": status_counts, "promotion_eligible": False}
+
+
+def _run_unleased(config_path: Path, zero_rows: bool = False, resume: bool = False) -> dict:
     global _DIAGNOSTIC_CLEANUP
     _DIAGNOSTIC_CLEANUP = "not_started"
     _diagnostic_phase("config_validation")
@@ -1433,12 +3079,39 @@ def run(config_path: Path, zero_rows: bool = False) -> dict:
             raise ProposalError("selected row count exceeds hard protocol bound")
         _check_result_bounds(rows, manifest["selected_columns"], cfg["max_output_bytes"], cfg["max_protocol_bytes"])
     if zero_rows:
+        if resume:
+            raise ProposalError("resume cannot be combined with a zero-row probe")
         return _run_transient_worker(cfg, cfg_sha, comp, comp_sha, local_receipt, local_receipt_sha,
                                      None, None, None, True)
     probe = _run_transient_worker(cfg, cfg_sha, comp, comp_sha, local_receipt, local_receipt_sha,
                                    None, None, None, True)
+    if resume:
+        recovered = _resume_published_progress(cfg, cfg_sha, comp, comp_sha,
+                                               manifest, rows, binding, probe)
+        if recovered is not None:
+            return recovered
+        adapter_sha = _sha(Path(__file__).resolve(strict=True).read_bytes())
+        comparator_sha = _sha(Path(comparator.__file__).resolve(strict=True).read_bytes())
+        checkpoint_binding = _progress_binding(cfg, cfg_sha, comp, comp_sha, rows, binding,
+            adapter_sha, comparator_sha, probe)
+        progress_store = _progress_store_path(Path(cfg["output_dir"]), allow_final=True)
+        revision_state = _progress_revision_reserve(progress_store, Path(cfg["output_dir"]),
+                                                    checkpoint_binding, cfg["max_progress_store_bytes"])
+        publication_path = revision_state["target"] if revision_state is not None else Path(cfg["output_dir"])
+        publication_revision = revision_state["reference"] if revision_state is not None else None
+    else:
+        publication_path = Path(cfg["output_dir"])
+        publication_revision = None
     return _run_transient_worker(cfg, cfg_sha, comp, comp_sha, local_receipt, local_receipt_sha,
-                                 manifest, rows, binding, False, expected_probe=probe)
+                                 manifest, rows, binding, False, expected_probe=probe, resume=resume,
+                                 publication_path=publication_path,
+                                 publication_revision=publication_revision)
+
+
+def run(config_path: Path, zero_rows: bool = False, resume: bool = False) -> dict:
+    cfg, _ = load_config(config_path)
+    with _output_lease(Path(cfg["output_dir"])):
+        return _run_unleased(config_path, zero_rows=zero_rows, resume=resume)
 
 
 def main() -> None:
@@ -1448,6 +3121,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--zero-row-probe", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="explicitly resume matching owner-private durable progress")
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--config-sha256")
     args = parser.parse_args()
@@ -1459,7 +3134,7 @@ def main() -> None:
             return
         if args.config_sha256 is not None:
             raise ProposalError("worker config digest is only valid in worker mode")
-        result = run(args.config, zero_rows=args.zero_row_probe)
+        result = run(args.config, zero_rows=args.zero_row_probe, resume=args.resume)
         print(json.dumps(result, sort_keys=True))
     except Exception as exc:
         record = _diagnostic_record(exc)
