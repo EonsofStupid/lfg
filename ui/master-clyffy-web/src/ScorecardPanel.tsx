@@ -564,6 +564,12 @@ function ClassifierComparisonView({ reports, link }: {
       <section aria-label="Owned LFG comparison results"><h4>Owned LFG</h4>
         <p>{owned ? `${owned.identity ?? 'Model identity unknown'} · ${owned.validationRows} validation rows` : 'Not selected.'}</p>
         {owned && <p>Model identity is report-supplied and does not establish binary identity. Reported end-to-end timing: median {formatComparisonMetric('median_ms', owned.timing.median_ms)} ms; p95 {formatComparisonMetric('p95_ms', owned.timing.p95_ms)} ms.</p>}
+        {owned?.referenceGuideAssessment && <p>
+          Guide provenance: development reference {owned.referenceGuideAssessment.referenceStatus}; model response {owned.referenceGuideAssessment.modelStatus ?? 'not reported'}; semantic comparability {owned.referenceGuideAssessment.semanticComparability}. Unknown-guide policy {owned.referenceGuideAssessment.policy ? (owned.referenceGuideAssessment.provisionalComparisonEnabled ? 'configured and active' : 'configured but inactive') : 'not configured'}.
+        </p>}
+        {owned?.referenceGuideAssessment?.provisionalComparisonEnabled && <p role="note">
+          Reference labeling-guide provenance is unknown. Owned agreement metrics are provisional comparisons against report-supplied target claims; review and history remain report claims and are not independently verified. These results are not adjudicated truth or model qualification.
+        </p>}
         {metricList(owned?.metrics.owned)}
         {owned && <TargetSupport support={owned.targetSupport} />}
         {owned && <p>Observed response statuses: {Object.entries(owned.statuses).map(([k, v]) => `${k} ${v}`).join(' · ') || 'Unknown'}.</p>}

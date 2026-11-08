@@ -43,10 +43,11 @@ An optional top-level `atomic_query_contract` in the private comparator config
 enables scoring for one selected field and label only when it pins a completed
 `lfg.owned-multilabel-sft-result.v1`, loaded weights, cached graph manifest,
 training manifest, system, framing, taxonomy, guide, and instruction-template
-digests. The development plan must declare `label_guide` as a path whose bytes
-match a taxonomy-valid review guide, or explicitly set `label_guide` to `null`
-to attest that no guide was used. A missing `label_guide` property is unknown
-and cannot authorize atomic scoring. The configured template is
+digests. By default, the development plan must declare `label_guide` as a path
+whose bytes match a taxonomy-valid review guide, or explicitly set
+`label_guide` to `null` to attest that no guide was used. A missing
+`label_guide` property remains unknown and cannot authorize atomic scoring
+unless the separately versioned opt-in below is present. The configured template is
 formatted with the bound field and label, then the exact training user text is
 sent: `instruction + "\n" + the same screened source text`. Deterministic
 requests still use that screened source text without the added instruction.
@@ -61,6 +62,42 @@ Without this extension, the prior free-form intent path remains unscorable.
 Configuration identity alone does not establish a completed checkpoint or
 classifier quality; this adapter performs no inference during configuration or
 test validation.
+
+When development reference-guide provenance is `not_declared` (or explicitly
+`unknown`), exploratory agreement can be opted into with this top-level private
+config extension:
+
+```json
+"unknown_reference_guide_policy": {
+  "schema_version": "lfg.owned-unknown-reference-guide-policy.v1",
+  "allow_provisional_agreement": true
+}
+```
+
+The opt-in only changes whether known target-mask cells may be compared. It
+does not fill the missing reference guide with `null`: the report separately
+records the development reference-guide status/digest and the model response
+guide status/digest. The model's guide identity remains required in the pinned
+atomic contract and in each response, including an explicit `guide_sha256: null`
+when the trained model manifest says the model guide is explicitly absent.
+Missing or mismatched model response identity remains unscored. A conflicting
+verified development-guide digest still rejects the run, even with the opt-in.
+Unknown target-mask cells, abstentions, failed responses, and invalid output
+remain unscored; unknown targets are never converted to negatives.
+
+If this policy is configured while the reference guide is verified or
+explicitly absent, the report retains the policy as configured but marks it
+inactive; it does not produce an unknown-guide warning. The UI also retains
+the reference/model guide statuses and the reported review/history claims.
+
+Reports record `owned.reference_guide_assessment` and matching provenance
+fields, with semantic comparability `unknown`, the exact opt-in policy, and a
+`provisional_comparison_enabled` marker. UI imports display this warning next to the owned
+metrics. The numbers are agreement against the recorded target claims; those
+claims retain their reported review/history status and are not adjudicated
+truth, accuracy, qualification, or promotion evidence. Old reports remain
+readable with no inferred guide status. The option does not change legacy
+free-form scoring behavior.
 
 The atomic worker requires the actual private `cached-manifest.json` beside the
 framing, runtime, and completed training metadata. It verifies that manifest's
