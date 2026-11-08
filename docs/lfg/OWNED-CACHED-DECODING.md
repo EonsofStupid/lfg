@@ -180,6 +180,91 @@ tolerance policy, establish why the environments differ, qualify runtime
 performance, or evaluate assessment accuracy. Both runs and their private
 reports were kept separate; neither modified the starting checkpoint.
 
+### Read-only parity diagnostics
+
+`ml/lfg-encoder/diagnose_owned_cached_parity.py` measures existing cached ONNX
+graphs without exporting, modifying, promoting, or certifying them. Its v2
+private policy pins the checkpoint manifest and weights, model/cache/exporter
+code, export config, graph bytes, and a train-source selection manifest. Before
+inference it checks the exporter graph input/output names, types, order, ranks,
+static dimensions, dynamic cache-position axes, and cache-state mapping. It
+loads the verified weights and graph bytes from the already-hashed memory
+buffers, then checks every source path again afterward and records mutations.
+Pinned `owned_student` and `owned_cached_decode` modules are registered from
+those captured bytes before loading the pinned exporter, then prior
+`sys.modules` bindings are restored. The export config must retain the original
+`atol=1e-5` and `rtol=1e-5`.
+
+The selection manifest maps opaque source-ID digests to source digests and
+screening-manifest digests. The screening records must match those identifiers
+and hashes, but screening status remains an operator claim until independently
+verified. Free-text metadata and unknown extension fields are ignored. Reports
+contain allowlisted hashes and aggregate measurements; they omit paths, inputs,
+logits, cache values, token choices, output text, and exception messages.
+
+The report keeps teacher-forced parity on the full-reference stream separate
+from independent greedy PyTorch and ONNX trajectories. It reports trajectory
+agreement at each decision, first divergence, and each trajectory's same-history
+comparison against its full-prefix model result. Per-tensor statistics use
+NumPy's original-dtype `assert_allclose` comparison (`equal_nan=True`) for the
+failure count, while nonfinite data receives a separate status. Absolute and
+nonzero-reference relative errors, denominator, invalid shapes/dtypes, empty
+tensors, crashes, and not-tested steps are identified independently. Descriptive
+differences are calculated in float64 after original-dtype comparison; an
+unrepresentable statistic is marked explicitly and serialized as JSON `null`.
+Reports use strict JSON and reject NaN or Infinity. Invalid or nonfinite logits
+stop the affected trajectories before any next-token argmax; prior safe
+teacher-forced measurements remain recorded and later steps are marked not
+tested. Decision rows cover the prefill decision at index zero and every
+requested decode decision; decisions unavailable because of an invalid prefix,
+timeout, or earlier failure are explicitly marked not tested. Teacher-forced
+rows retain tensor statistics for an attempted invalid or nonfinite step, with
+the row status set to `invalid` or `nonfinite`. The attempted counter includes
+such rows; the completed counter includes only valid measured transitions, and
+the combined decode completion count is the minimum of valid teacher-forced
+and free-trajectory transitions. The free-trajectory attempted counter counts
+decode calls launched; its completed counter advances only after all decision
+comparisons for that step are valid. A failed free decision retains its row and
+does not count as a completed transition.
+
+The sample/work/prefix limits are enforced by the runner. `--max-seconds` is a
+cooperative in-process timer: it checks between operations and cannot interrupt
+a single PyTorch or ONNX call. Reports say explicitly that no hard wall-time,
+CPU or memory limit was enforced. Any future real-input run needs separate
+verified host supervision and resource/coexistence checks in a fresh handoff.
+The report's external-prerequisite fields describe these limitations; they do
+not enforce a real-input prohibition, verify owner authorization, or validate
+screening claims. A real-input operator must establish those conditions before
+starting a run.
+Elapsed and CPU time include preflight, model/session setup and measured work;
+peak RSS is unavailable. A private atomic partial report is updated during
+execution. Incomplete, context-truncated, crashed, or input-mutated runs cannot
+return `diagnostic_complete`; no safe report may be available if private output
+setup itself fails. A complete diagnostic means all requested measurements ran,
+not that numerical parity passed or model quality was established.
+
+Output requires a new directory and the exporter's verified private POSIX
+directory checks. Windows output remains disabled until current-user ACL
+verification is implemented. Example invocation:
+
+```powershell
+python ml/lfg-encoder/diagnose_owned_cached_parity.py `
+  --checkpoint PRIVATE_CHECKPOINT --export-config PRIVATE_EXPORT_CONFIG.json `
+  --graphs PRIVATE_EXISTING_GRAPH_DIRECTORY --policy PRIVATE_PIN_POLICY.json `
+  --selection-manifest PRIVATE_TRAIN_SELECTION.json `
+  --source SOURCE_ID_SHA256=PRIVATE_SOURCE.bin `
+  --screening-manifest SOURCE_ID_SHA256=PRIVATE_SCREENING.json `
+  --output NEW_PRIVATE_DIAGNOSTIC_DIRECTORY --length 64 --length 573 `
+  --decode-steps 4 --threads 1 --max-bytes 1000000000 `
+  --max-work-items 8 --max-prefix-tokens 100000 --max-seconds 600
+```
+
+Tests exercise synthetic float32 tolerance boundaries and the public runner
+against a tiny generated fixture on a compatible POSIX CPU environment. Fixture
+results establish only that test path; they are not real-input evidence. No
+private example, validation/test data, deployment, or GPU work is part of this
+diagnostic implementation.
+
 Run the local benchmark against an existing private checkpoint and an
 authorized local source prefix:
 
