@@ -25,6 +25,15 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
                {'field': 'intents', 'label': 'known.software'},
                {'field': 'risks', 'label': 'sensitive-data'}]
 
+    def synthetic_private_paths(self, root: Path) -> tuple[str, str]:
+        """Return distinct native absolute paths without touching private inputs."""
+        report = (root / 'synthetic-report-manifest.json').resolve()
+        proposals = (root / 'synthetic-teacher-proposals.jsonl').resolve()
+        self.assertTrue(report.is_absolute())
+        self.assertTrue(proposals.is_absolute())
+        self.assertNotEqual(report, proposals)
+        return str(report), str(proposals)
+
     def make_source(self, row_id: str, targets: list[int | None], known: list[bool]) -> dict:
         return {'id': row_id, 'split': 'train', 'family': 'a' * 64,
             'text': 'screened synthetic request', 'text_sha256': 'b' * 64,
@@ -57,6 +66,9 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
             'counts': {'train_rows': 2}, 'promotion_eligible': False}
 
     def make_package(self, report_status='partial_aborted_ambiguous', terminal_verified=None):
+        temp = tempfile.TemporaryDirectory(prefix='lfg-overlay-fixture-')
+        self.addCleanup(temp.cleanup)
+        report_path, proposals_path = self.synthetic_private_paths(Path(temp.name))
         if terminal_verified is None:
             terminal_verified = report_status == 'complete'
         source = self.make_source('3' * 64, [None, 1, 0], [False, True, True])
@@ -130,8 +142,8 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
             'status': manifest['status']}, sort_keys=True, ensure_ascii=False,
             separators=(',', ':'))).encode())
         manifest_raw = json.dumps(manifest).encode()
-        config = {'schema_version': overlay.CONFIG_SCHEMA, 'report_manifest': 'C:/private/report.json',
-            'report_manifest_sha256': sha(manifest_raw), 'proposals_file': 'C:/private/proposals.jsonl',
+        config = {'schema_version': overlay.CONFIG_SCHEMA, 'report_manifest': report_path,
+            'report_manifest_sha256': sha(manifest_raw), 'proposals_file': proposals_path,
             'proposals_sha256': sha(proposals_raw), 'default_weight': 1.5,
             'per_label_weights': {labels[0]: 2.0},
             'conflict_policy': 'retain_source_and_skip_conflicting_teacher_positive',
@@ -211,6 +223,24 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'finite and positive'):
             overlay.validate_config(config, self.columns)
 
+    def test_relative_private_paths_remain_rejected(self):
+        _, config, _, _, _ = self.make_package()
+        for field, other_field in (('report_manifest', 'proposals_file'),
+                                   ('proposals_file', 'report_manifest')):
+            with self.subTest(field=field):
+                invalid_config = config.copy()
+                invalid_config[field] = 'relative/synthetic-input.json'
+                self.assertTrue(Path(invalid_config[other_field]).is_absolute())
+                with self.assertRaisesRegex(ValueError, f'{field} must be an absolute private path'):
+                    overlay.validate_config(invalid_config, self.columns)
+
+    def test_native_fixture_paths_are_unique_and_absolute(self):
+        _, config, _, _, _ = self.make_package()
+        report, proposals = Path(config['report_manifest']), Path(config['proposals_file'])
+        self.assertTrue(report.is_absolute())
+        self.assertTrue(proposals.is_absolute())
+        self.assertNotEqual(report, proposals)
+
     def test_unknown_overlay_extension_is_retained_but_inert(self):
         sources, config, manifest_raw, proposals_raw, lineage = self.make_package()
         config['future_extension'] = {'teacher_weight': 999999, 'claim': 'opaque'}
@@ -250,7 +280,8 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
     def test_report_parser_rejects_duplicate_keys_and_nonfinite_numbers_safely(self):
         sources, config, _, proposals_raw, lineage = self.make_package()
         base = json.dumps({'schema_version': overlay.REPORT_SCHEMA}).encode()[:-1]
-        for suffix in (b',"extension":{"x":1,"x":2}}', b',"extension":Infinity}'):
+        for suffix in (b',"private":"synthetic-private-content-sentinel","extension":{"x":1,"x":2}}',
+                       b',"private":"synthetic-private-content-sentinel","extension":Infinity}'):
             report_raw = base + suffix
             config['report_manifest_sha256'] = sha(report_raw)
             with patch.object(overlay, '_read_private', side_effect=[report_raw, proposals_raw]), \
@@ -259,8 +290,9 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
                     source_config_sha256='7' * 64, source_train_sha256='8' * 64,
                     taxonomy_sha256='9' * 64, selected_columns=self.columns,
                     expected_source_lineage=lineage, max_rows=10)
-            self.assertNotIn('C:/private', str(caught.exception))
-            self.assertNotIn('proposals.jsonl', str(caught.exception))
+            self.assertNotIn(config['report_manifest'], str(caught.exception))
+            self.assertNotIn(config['proposals_file'], str(caught.exception))
+            self.assertNotIn('synthetic-private-content-sentinel', str(caught.exception))
 
     def test_proposal_parser_rejects_duplicate_nested_keys_and_nan(self):
         sources, config, manifest_raw, proposals_raw, lineage = self.make_package()
@@ -463,8 +495,10 @@ class LegacyTeacherOverlayTests(unittest.TestCase):
                 'max_rows': 10, 'max_output_bytes': 100000, 'default_weight': 2.0,
                 'per_label_weights': {},
                 'legacy_teacher_overlay': {'schema_version': overlay.CONFIG_SCHEMA,
-                    'report_manifest': 'C:/private/report.json', 'report_manifest_sha256': sha(report_raw),
-                    'proposals_file': 'C:/private/proposals.jsonl', 'proposals_sha256': sha(proposals_raw),
+                    'report_manifest': str((root / 'synthetic-report-manifest.json').resolve()),
+                    'report_manifest_sha256': sha(report_raw),
+                    'proposals_file': str((root / 'synthetic-teacher-proposals.jsonl').resolve()),
+                    'proposals_sha256': sha(proposals_raw),
                     'default_weight': 1.5, 'per_label_weights': {},
                     'conflict_policy': 'retain_source_and_skip_conflicting_teacher_positive',
                     'max_manifest_bytes': 100000, 'max_proposals_bytes': 100000}}
