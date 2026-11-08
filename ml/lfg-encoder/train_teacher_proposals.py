@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import compare_local_12b as comparator
+import teacher_explicit_labels as explicit_labels
 masked_supervision = None
 
 SCHEMA = "lfg.train-teacher-proposals-config.v1"
@@ -46,6 +47,7 @@ PROGRESS_REVISION_SCHEMA = "lfg.teacher-progress-revision.v1"
 PROGRESS_PROBE_RECEIPT_SCHEMA = "lfg.teacher-progress-probe-receipt.v1"
 PROGRESS_PUBLICATION_SCHEMA = "lfg.teacher-progress-publication.v1"
 PROGRESS_ATTEMPT_SCHEMA = "lfg.teacher-progress-attempt.v1"
+PRIVATE_EXTENSION_SCHEMA = "lfg.teacher-private-extensions.v1"
 PROGRESS_STORE_HARD_MAX_BYTES = 1_073_741_824
 PROGRESS_STORE_DEFAULT_BYTES = 67_108_864
 PROGRESS_CAPACITY_SCHEMA = "lfg.teacher-progress-capacity.v1"
@@ -110,8 +112,66 @@ class WorkerDiagnosticError(ProposalError):
         self.worker_cleanup = cleanup
 
 
+class PrivateTeacherExtensions:
+    """Deliberately retrieved, owner-private inert extension values."""
+    __slots__ = ("__metadata", "__extensions", "__present")
+
+    def __init__(self, metadata: dict, extensions: dict | None, present: bool):
+        self.__metadata = json.loads(json.dumps(metadata, ensure_ascii=False))
+        self.__extensions = json.loads(json.dumps(extensions, ensure_ascii=False)) if present else None
+        self.__present = present
+
+    def metadata(self) -> dict:
+        return json.loads(json.dumps(self.__metadata, ensure_ascii=False))
+
+    def extensions_present(self) -> bool:
+        return self.__present
+
+    def private_extensions(self) -> dict | None:
+        """Return a detached copy; callers must treat it as sensitive input."""
+        return json.loads(json.dumps(self.__extensions, ensure_ascii=False)) if self.__present else None
+
+    def __repr__(self) -> str:
+        return "PrivateTeacherExtensions(<private values withheld>)"
+
+    __str__ = __repr__
+
+    def __reduce_ex__(self, _protocol: int) -> Any:
+        raise TypeError("private teacher extension serialization is disabled")
+
+
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _identity_token(field: str, label: str) -> str:
+    """Collision-free serialization used only as a JSON object key."""
+    return json.dumps([field, label], ensure_ascii=True, separators=(",", ":"))
+
+
+def _teacher_wire_identity(config: dict, module_sha256: str | None = None) -> dict:
+    if module_sha256 is None:
+        module_path = Path(explicit_labels.__file__).resolve(strict=True)
+        module_sha256 = _sha(module_path.read_bytes())
+    if not isinstance(module_sha256, str) or not HEX.fullmatch(module_sha256):
+        raise ProposalError("explicit-label parser module identity is invalid")
+    if config.get("teacher_response_mode") != explicit_labels.SCHEMA_VERSION:
+        return {"mode": "legacy_positive", "schema_sha256": None,
+                "prompt_sha256": None, "module_sha256": module_sha256}
+    selected = config["selected_columns"]
+    schema = explicit_labels.build_response_schema(selected, config["taxonomy_sha256"])
+    prompt_sha = _sha(config["teacher_prompt_contract"].encode("utf-8"))
+    schema_sha = _sha(_canonical_json(schema).rstrip(b"\n"))
+    return {"mode": explicit_labels.SCHEMA_VERSION, "schema_sha256": schema_sha,
+            "prompt_sha256": prompt_sha, "module_sha256": module_sha256}
+
+
+def _proposal_schema_digest(config: dict) -> str:
+    identity = _teacher_wire_identity(config)
+    if identity["schema_sha256"] is not None:
+        return identity["schema_sha256"]
+    labels = [f"{c['field']}:{c['label']}" for c in config["selected_columns"]]
+    return _sha(_canonical_json(comparator.output_schema(labels)).rstrip(b"\n"))
 
 
 def _masked() -> Any:
@@ -218,6 +278,33 @@ def load_config(path: Path) -> tuple[dict[str, Any], str]:
     cfg["max_progress_store_bytes"] = requested_capacity
     if type(cfg["assume_exhaustive_labels"]) is not bool:
         raise ProposalError("assume_exhaustive_labels must be boolean")
+    mode = cfg.get("teacher_response_mode", "legacy_positive")
+    if not isinstance(mode, str) or mode not in {"legacy_positive", explicit_labels.SCHEMA_VERSION}:
+        raise ProposalError("unsupported teacher response mode")
+    cfg["teacher_response_mode"] = mode
+    extension_limit = cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES)
+    if (type(extension_limit) is not int or extension_limit < 0
+            or extension_limit > explicit_labels.MAX_EXTENSION_BYTES):
+        raise ProposalError("max_teacher_extension_bytes exceeds the supported parser bound")
+    cfg["max_teacher_extension_bytes"] = extension_limit
+    if mode == explicit_labels.SCHEMA_VERSION:
+        prompt_contract = cfg.get("teacher_prompt_contract")
+        try:
+            prompt_size = len(prompt_contract.encode("utf-8")) if isinstance(prompt_contract, str) else 0
+            explicit_labels.build_response_schema(cols, cfg["taxonomy_sha256"])
+        except (UnicodeError, explicit_labels.ContractError):
+            raise ProposalError("explicit tri-state taxonomy or prompt contract is invalid") from None
+        if (cfg["assume_exhaustive_labels"] is not False
+                or not isinstance(prompt_contract, str) or not prompt_contract.strip()
+                or prompt_size > 16_384
+                or "{identities}" not in prompt_contract or "{text}" not in prompt_contract):
+            raise ProposalError("explicit tri-state mode requires non-exhaustive labels and a bounded prompt contract with identity and text slots")
+    else:
+        # The legacy positive-only wire format must not silently alias
+        # field/label pairs joined by a colon.
+        joined = [f"{c['field']}:{c['label']}" for c in cols]
+        if len(joined) != len(set(joined)):
+            raise ProposalError("legacy label identities are ambiguous")
     if not isinstance(cfg["selection"], dict) or set(cfg["selection"]) - {"row_ids", "max_rows"}:
         raise ProposalError("selection must contain only row_ids and max_rows")
     row_ids = cfg["selection"].get("row_ids", [])
@@ -353,11 +440,20 @@ def _payload_row(row: dict) -> dict:
 
 
 def _check_result_bounds(rows: list[dict], columns: list[dict], max_output_bytes: int,
-                         max_protocol_bytes: int) -> dict[str, int]:
+                         max_protocol_bytes: int, teacher_identity: dict | None = None,
+                         max_extension_bytes: int = explicit_labels.MAX_EXTENSION_BYTES,
+                         model_name: str | None = None) -> dict[str, int]:
     labels = [f"{c['field']}:{c['label']}" for c in columns]
+    explicit_mode = (teacher_identity or {}).get("mode") == explicit_labels.SCHEMA_VERSION
+    if type(max_extension_bytes) is not int or not 0 <= max_extension_bytes <= explicit_labels.MAX_EXTENSION_BYTES:
+        raise ProposalError("configured teacher extension bound is invalid")
+    if explicit_mode and (not isinstance(model_name, str) or not model_name):
+        raise ProposalError("explicit teacher result sizing requires the pinned model identity")
+    state_keys = [_identity_token(c["field"], c["label"]) for c in columns] if explicit_mode else labels
     output_bound = 0
     protocol_bound = 0
     max_record_bytes = 0
+    max_ack_bytes = 0
     statuses = {"answered", "abstain", "malformed", "invalid_schema", "refusal", "truncated",
                 "incomplete", "identity_mismatch", "http_error", "timeout", "transport_error",
                 "protocol_error", "request_too_large_not_started", "not_attempted_after_abort"}
@@ -370,29 +466,71 @@ def _check_result_bounds(rows: list[dict], columns: list[dict], max_output_bytes
                 "source_identity": row["source_identity"], "columns": columns,
                 "source_targets": row["targets"], "source_known_mask": row["known_mask"],
                 "source_target_origins": row["target_origins"], "source_reviewer_claims": row["target_reviewer_claims"],
-                "proposal_states": {label: "proposed_positive" for label in labels},
-                "conflict_labels": labels, "provenance": "unreviewed_local_teacher_claim"}
+                # Negative is the longest legal state encoding; using it keeps
+                # this byte bound conservative for explicit and exhaustive modes.
+                "proposal_states": {label: "proposed_negative" for label in state_keys},
+                "conflict_labels": ([{"field": c["field"], "label": c["label"]} for c in columns]
+                                    if explicit_mode else labels),
+                "provenance": "unreviewed_local_teacher_claim"}
+        if explicit_mode:
+            common["teacher_identity"] = teacher_identity
+        extension_present = explicit_mode and max_extension_bytes >= 2
+        extension_value = {}
+        if extension_present and max_extension_bytes == 6:
+            extension_value = {"": 0}
+        elif extension_present and max_extension_bytes >= 7:
+            # A canonical extension object may use every byte of the budget.
+            # ASCII string bytes are a conservative wire-size witness because
+            # JSON escaping controls and Unicode never expands beyond their
+            # ensure_ascii canonical representation in the surrounding event.
+            extension_value = {"": "x" * (max_extension_bytes - 7)}
+        extension_bytes = explicit_labels._canonical_bytes(extension_value) if explicit_mode else b""
+        extension_digest = _sha(extension_bytes) if extension_present else None
         max_row_output = 0
         max_event_protocol = 0
         for status in statuses:
             elapsed = None if status in unknown_elapsed else sys.float_info.max
             states = (common["proposal_states"] if status == "answered"
-                      else {label: "unknown" for label in labels})
-            conflicts = [] if status == "not_attempted_after_abort" else labels
+                      else {label: "unknown" for label in state_keys})
+            conflicts = common["conflict_labels"] if status == "answered" else []
             item = {**common, "status": status, "elapsed_ms": elapsed,
                     "proposal_states": states, "conflict_labels": conflicts}
             encoded = (json.dumps(item, sort_keys=True, ensure_ascii=False,
                                   separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
             event = {"phase": "progress", "index": index, "status": status,
                      "elapsed_ms": elapsed, "result": item}
+            if explicit_mode:
+                answered = status in {"answered", "abstain"} and extension_present
+                event.update({"private_extensions_present": answered,
+                    "private_extensions_sha256": extension_digest if answered else None,
+                    "private_extensions": extension_value if answered else {}})
             line = (json.dumps(event, sort_keys=True, ensure_ascii=False,
                                separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
             if len(line) > PROGRESS_EVENT_MAX_BYTES:
                 raise ProposalError("one worker result line exceeds protocol limit")
-            stored_event = {**event, "index": index}
+            ack_bytes = len(_canonical_json(_progress_ack("f" * 32, index, event)))
+            if ack_bytes > PROGRESS_ACK_MAX_BYTES:
+                raise ProposalError("serialized progress acknowledgment exceeds protocol limit")
+            stored_event = {k: v for k, v in event.items() if k != "private_extensions"}
+            stored_event["index"] = index
             record_base = {"schema_version": PROGRESS_EVENT_SCHEMA,
                            "attempt_id": "f" * 32, "index": index,
                            "event": stored_event}
+            if explicit_mode:
+                answered = status in {"answered", "abstain"} and extension_present
+                private_base = {"schema_version": PRIVATE_EXTENSION_SCHEMA,
+                    "attempt_id": "f" * 32, "worker_index": index, "original_index": index,
+                    "source_row_id": row["id"],
+                    "source_identity_sha256": _sha(_canonical_json(row["source_identity"]).rstrip(b"\n")),
+                    "source_text_sha256": row["text_sha256"],
+                    "checkpoint_binding_sha256": "f" * 64, "teacher_identity": teacher_identity,
+                    "model_name": model_name, "model_manifest_sha256": "f" * 64,
+                    "taxonomy_sha256": "f" * 64,
+                    "extensions_present": answered,
+                    "extensions_sha256": extension_digest if answered else None,
+                    "extensions": extension_value if answered else None,
+                    "worker_event_sha256": "f" * 64}
+                record_base["private_extension_record"] = {**private_base, "record_sha256": "f" * 64}
             record = {**record_base,
                       "record_sha256": _sha(_canonical_json(record_base).rstrip(b"\n"))}
             record_raw = _canonical_json(record)
@@ -401,6 +539,7 @@ def _check_result_bounds(rows: list[dict], columns: list[dict], max_output_bytes
             max_row_output = max(max_row_output, len(encoded))
             max_event_protocol = max(max_event_protocol, len(line))
             max_record_bytes = max(max_record_bytes, len(record_raw))
+            max_ack_bytes = max(max_ack_bytes, ack_bytes)
         output_bound += max_row_output
         protocol_bound += max_event_protocol
     if output_bound > max_output_bytes or protocol_bound > max_protocol_bytes:
@@ -411,10 +550,26 @@ def _check_result_bounds(rows: list[dict], columns: list[dict], max_output_bytes
                             + PROGRESS_TERMINAL_MAX_BYTES + 4096)
     return {"max_output_bytes": output_bound, "max_protocol_bytes": protocol_bound,
             "max_progress_record_bytes": max_record_bytes if rows else 0,
+            "max_ack_bytes": max_ack_bytes if rows else 0,
             "progress_store_bytes": progress_store_bound}
 
 
+def _render_teacher_prompt(template: str, identities: str, text: str) -> str:
+    """Substitute only placeholders present in the configured template."""
+    replacements = {"identities": identities, "text": text}
+    return re.sub(r"\{(identities|text)\}", lambda match: replacements[match.group(1)], template)
+
+
 def _request(config: dict, labels: list[str], text: str, max_bytes: int) -> bytes:
+    if config.get("teacher_response_mode") == explicit_labels.SCHEMA_VERSION:
+        selected = config["selected_columns"]
+        schema = explicit_labels.build_response_schema(selected, config["taxonomy_sha256"])
+        identities = _canonical_json(selected).decode("utf-8").strip()
+        prompt = _render_teacher_prompt(config["teacher_prompt_contract"], identities, text)
+        body = comparator._explicit_schema_request(config, schema, prompt)
+        if len(body) > max_bytes:
+            raise ProposalError("bounded model request exceeds configured limit")
+        return body
     schema = comparator.output_schema(labels)
     body = comparator._schema_request(config, schema, text)
     if len(body) > max_bytes:
@@ -467,6 +622,10 @@ def _write_new(path: Path, raw: bytes) -> None:
 def _canonical_json(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, ensure_ascii=False,
                         separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+
+
+def _private_extension_sha256(value: dict) -> str:
+    return _sha(explicit_labels._canonical_bytes(value))
 
 
 def _sync_directory(path: Path) -> bool:
@@ -602,6 +761,7 @@ def _progress_binding(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         raise ProposalError("selected train rows contain duplicate identities")
     model_identity = ready.get("model_identity", {})
     runtime = ready.get("runtime_boundary", {})
+    teacher_identity = _teacher_wire_identity(cfg)
     return {
         "schema_version": PROGRESS_STORE_SCHEMA,
         "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
@@ -622,6 +782,11 @@ def _progress_binding(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         "server_binary_sha256": comp["server_binary_sha256"],
         "server_version": comp["server_version"],
         "prompt_contract_sha256": _sha((comp["system_prompt"] + "\0" + comp["prompt_revision"]).encode()),
+        "teacher_response_mode": cfg.get("teacher_response_mode", "legacy_positive"),
+        "max_teacher_extension_bytes": cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES),
+        "teacher_schema_sha256": teacher_identity["schema_sha256"],
+        "teacher_prompt_sha256": teacher_identity["prompt_sha256"],
+        "explicit_labels_module_sha256": teacher_identity["module_sha256"],
         "adapter_code_sha256": adapter_sha,
         "comparator_code_sha256": comparator_sha,
         "runtime_boundary": runtime.get("boundary"),
@@ -795,6 +960,31 @@ def _published_matches_expected(path: Path, proposals: list[dict], manifest: dic
     return saved == expected
 
 
+def _progress_attempt_indices(store: Path, attempt_id: str, binding: dict,
+                             selected_ids: list[str]) -> list[int]:
+    path = store / f"attempt-{attempt_id}.json"
+    if path.is_symlink() or not path.is_file() or not _private_file(path):
+        raise ProposalError("private progress attempt evidence is unavailable")
+    record = _json(_read(path, 1_048_576, "progress attempt record"), "progress attempt record")
+    keys = {"schema_version", "attempt_id", "binding_sha256", "indices",
+        "row_ids_sha256", "state", "record_sha256"}
+    base = ({key: record[key] for key in keys - {"record_sha256"}}
+            if isinstance(record, dict) else {})
+    indices = record.get("indices") if isinstance(record, dict) else None
+    if (not isinstance(record, dict) or set(record) != keys
+            or record.get("schema_version") != PROGRESS_ATTEMPT_SCHEMA
+            or record.get("attempt_id") != attempt_id
+            or record.get("binding_sha256") != _sha(_canonical_json(binding).rstrip(b"\n"))
+            or not isinstance(indices, list) or not indices
+            or any(type(i) is not int or not 0 <= i < len(selected_ids) for i in indices)
+            or len(indices) != len(set(indices)) or indices != sorted(indices)
+            or record.get("row_ids_sha256") != _sha(_canonical_json([selected_ids[i] for i in indices]).rstrip(b"\n"))
+            or record.get("state") != "prepared_or_sent_outcome_unknown"
+            or record.get("record_sha256") != _sha(_canonical_json(base).rstrip(b"\n"))):
+        raise ProposalError("private progress attempt binding or integrity failed")
+    return indices
+
+
 def _progress_event_snapshot(store: Path, binding: dict, events_sha256: str) -> tuple[bytes, dict, set[str]]:
     path = store / "events.jsonl"
     if path.is_symlink() or not _private_file(path):
@@ -815,13 +1005,27 @@ def _progress_event_snapshot(store: Path, binding: dict, events_sha256: str) -> 
     snapshot = candidates[0]
     latest: dict[int, dict] = {}
     attempts: set[str] = set()
+    explicit_mode = binding.get("teacher_response_mode") == explicit_labels.SCHEMA_VERSION
+    teacher_identity = {"mode": binding.get("teacher_response_mode"),
+        "schema_sha256": binding.get("teacher_schema_sha256"),
+        "prompt_sha256": binding.get("teacher_prompt_sha256"),
+        "module_sha256": binding.get("explicit_labels_module_sha256")}
+    if explicit_mode and any(not isinstance(teacher_identity[key], str)
+                             or not HEX.fullmatch(teacher_identity[key])
+                             for key in ("schema_sha256", "prompt_sha256", "module_sha256")):
+        raise ProposalError("historical explicit teacher identity is invalid")
     selected_count = len(binding.get("selected_row_ids", []))
+    selected_ids = binding.get("selected_row_ids", [])
+    attempt_orders: dict[str, list[int]] = {}
+    seen: set[tuple[str, int]] = set()
     for line in snapshot.splitlines():
         record = _json(line, "historical progress event")
-        if (not isinstance(record, dict)
-                or set(record) != {"schema_version", "attempt_id", "index", "event", "record_sha256"}):
+        expected_record_keys = {"schema_version", "attempt_id", "index", "event", "record_sha256"}
+        if explicit_mode:
+            expected_record_keys.add("private_extension_record")
+        if (not isinstance(record, dict) or set(record) != expected_record_keys):
             raise ProposalError("historical progress event schema is invalid")
-        base = {key: record[key] for key in ("schema_version", "attempt_id", "index", "event")}
+        base = {key: record[key] for key in expected_record_keys - {"record_sha256"}}
         if (record["schema_version"] != PROGRESS_EVENT_SCHEMA
                 or not isinstance(record["attempt_id"], str)
                 or not re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
@@ -830,8 +1034,31 @@ def _progress_event_snapshot(store: Path, binding: dict, events_sha256: str) -> 
                 or not isinstance(record["event"], dict)
                 or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
             raise ProposalError("historical progress event integrity is invalid")
+        attempt_id = record["attempt_id"]
+        key = (attempt_id, record["index"])
+        if key in seen:
+            raise ProposalError("historical progress contains duplicate attempt rows")
+        seen.add(key)
+        if attempt_id not in attempt_orders:
+            attempt_orders[attempt_id] = _progress_attempt_indices(store, attempt_id, binding, selected_ids)
+        if record["index"] not in attempt_orders[attempt_id]:
+            raise ProposalError("historical event index is not a member of its attempt")
         attempts.add(record["attempt_id"])
-        latest[record["index"]] = record["event"].get("result")
+        event = record["event"]
+        if explicit_mode:
+            item = event.get("result") if isinstance(event, dict) else None
+            if not isinstance(item, dict):
+                raise ProposalError("historical explicit progress event has no proposal result")
+            row = {"id": item.get("row_id"), "source_identity": item.get("source_identity"),
+                   "text_sha256": item.get("text_sha256")}
+            restored = _restore_private_extension_event(event, record["private_extension_record"],
+                record["attempt_id"], record["index"], row, binding, teacher_identity,
+                binding.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES))
+            worker_index = record["private_extension_record"].get("worker_index")
+            if worker_index != attempt_orders[attempt_id].index(record["index"]):
+                raise ProposalError("historical event worker ordinal does not map to its attempt row")
+            event = {**restored, "index": record["index"]}
+        latest[record["index"]] = event.get("result")
     if set(latest) != set(range(selected_count)) or any(not isinstance(value, dict) for value in latest.values()):
         raise ProposalError("published parent does not have a complete historical row snapshot")
     return snapshot, latest, attempts
@@ -1186,6 +1413,7 @@ def _progress_store_read(store: Path, expected_binding: dict, rows: list[dict], 
                                           original_config_sha256=historical_config_sha256)
     events_raw = _read(events_path, capacity, "progress event log")
     attempt_rows = {}
+    attempt_orders = {}
     for path in store.iterdir():
         if path.name.startswith("attempt-"):
             if (path.is_symlink() or not path.is_file() or not _private_file(path)
@@ -1210,6 +1438,7 @@ def _progress_store_read(store: Path, expected_binding: dict, rows: list[dict], 
                     or record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))):
                 raise ProposalError("progress attempt identity or integrity is invalid")
             attempt_rows[attempt_id] = set(indices)
+            attempt_orders[attempt_id] = indices
         elif (path.name not in {"checkpoint.json", "events.jsonl", "capacity.jsonl"}
               and not path.name.startswith(("terminal-", "revision-", "recovery-probe-", "publication-"))):
             raise ProposalError("progress store contains an unknown entry")
@@ -1218,13 +1447,18 @@ def _progress_store_read(store: Path, expected_binding: dict, rows: list[dict], 
     seen = set()
     records = []
     latest: dict[int, dict] = {}
+    expected_teacher_identity = _teacher_wire_identity(cfg)
+    explicit_mode = expected_teacher_identity["mode"] == explicit_labels.SCHEMA_VERSION
     for line in events_raw.splitlines():
         if not line or len(line) > PROGRESS_EVENT_MAX_BYTES:
             raise ProposalError("progress event log contains an invalid record")
         record = _json(line, "progress event")
-        if not isinstance(record, dict) or set(record) != {"schema_version", "attempt_id", "index", "event", "record_sha256"}:
+        expected_record_keys = {"schema_version", "attempt_id", "index", "event", "record_sha256"}
+        if explicit_mode:
+            expected_record_keys.add("private_extension_record")
+        if not isinstance(record, dict) or set(record) != expected_record_keys:
             raise ProposalError("progress event schema is invalid")
-        base = {k: record[k] for k in ("schema_version", "attempt_id", "index", "event")}
+        base = {k: record[k] for k in expected_record_keys - {"record_sha256"}}
         if (record["schema_version"] != PROGRESS_EVENT_SCHEMA
                 or not isinstance(record["attempt_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
                 or type(record["index"]) is not int or not 0 <= record["index"] < len(rows)
@@ -1237,9 +1471,22 @@ def _progress_store_read(store: Path, expected_binding: dict, rows: list[dict], 
         event = record["event"]
         if not isinstance(event, dict) or event.get("index") != record["index"]:
             raise ProposalError("progress event does not preserve original row index")
+        if explicit_mode:
+            private_record = record["private_extension_record"]
+            if (not isinstance(private_record, dict)
+                    or private_record.get("worker_index") != attempt_orders[record["attempt_id"]].index(record["index"])):
+                raise ProposalError("private extension worker ordinal does not map to its attempt row")
+            event = _restore_private_extension_event(event, record["private_extension_record"],
+                record["attempt_id"], record["index"], rows[record["index"]],
+                expected_binding, expected_teacher_identity,
+                cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES))
+            event = {**event, "index": record["index"]}
         _validate_progress_event(event, record["index"], rows[record["index"]],
-                                 cfg["selected_columns"], cfg["assume_exhaustive_labels"])
-        records.append(record)
+                                 cfg["selected_columns"], cfg["assume_exhaustive_labels"],
+                                 expected_teacher_identity,
+                                 cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES))
+        public_record = {k: record[k] for k in ("schema_version", "attempt_id", "index", "event", "record_sha256")}
+        records.append(public_record)
         latest[record["index"]] = event["result"]
     terminal = _progress_store_matching_terminal(store, expected_binding, _sha(events_raw))
     if terminal is not None and terminal["attempt_id"] not in attempt_rows:
@@ -1307,13 +1554,16 @@ def _progress_store_create(store: Path, expected_binding: dict,
 
 
 def _progress_store_append(store: Path, attempt_id: str, index: int, event: dict,
-                           capacity: int) -> None:
+                           capacity: int,
+                           private_extension_record: dict | None = None) -> None:
     path = store / "events.jsonl"
     if (not _private_dir(store.parent) or not _private_dir(store)
             or path.is_symlink() or not path.is_file() or not _private_file(path)):
         raise ProposalError("private progress event file is unavailable or unsafe")
     base = {"schema_version": PROGRESS_EVENT_SCHEMA, "attempt_id": attempt_id,
             "index": index, "event": event}
+    if private_extension_record is not None:
+        base["private_extension_record"] = private_extension_record
     record = {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
     raw = _canonical_json(record)
     if len(raw) > PROGRESS_EVENT_MAX_BYTES or _progress_store_usage(store) + len(raw) > capacity:
@@ -1471,6 +1721,7 @@ def _validate_terminal_report(report: Any, cfg: dict, cfg_sha: str, comp: dict, 
             or probe_record.get("comparison_config_sha256") != comp_sha
             or probe_record.get("adapter_code_sha256") != adapter_sha
             or probe_record.get("comparator_code_sha256") != comparator_sha
+            or probe_record.get("teacher_identity") != _teacher_wire_identity(cfg)
             or probe_record.get("receipt_sha256") != probe.get("receipt_sha256")
             or probe_record.get("model_identity", {}).get("reported_manifest_sha256") !=
                 probe.get("model_identity", {}).get("reported_manifest_sha256")
@@ -1517,12 +1768,12 @@ def _validate_terminal_report(report: Any, cfg: dict, cfg_sha: str, comp: dict, 
         "export_config_sha256": source_binding["config_sha256"],
         "train_file_sha256": source_binding["train_sha256"], "train_file_bytes": source_binding["train_bytes"],
         "taxonomy_sha256": cfg["taxonomy_sha256"], "source_lineage": source_lineage,
+        "teacher_identity": _teacher_wire_identity(cfg),
         "selected_row_count": len(rows),
         "selected_row_ids_sha256": _sha(json.dumps(selected_ids, separators=(",", ":")).encode()),
         "selected_text_digests_sha256": _sha(json.dumps([r["text_sha256"] for r in rows], separators=(",", ":")).encode()),
         "target_mask_sha256": _sha(json.dumps([r["known_mask"] for r in rows], separators=(",", ":")).encode()),
-        "proposal_schema_sha256": _sha(json.dumps(comparator.output_schema(labels), sort_keys=True,
-            separators=(",", ":")).encode()),
+        "proposal_schema_sha256": _proposal_schema_digest(cfg),
         "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
         "progress_store_schema": PROGRESS_STORE_SCHEMA,
         "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
@@ -1563,10 +1814,21 @@ def _validate_terminal_report(report: Any, cfg: dict, cfg_sha: str, comp: dict, 
 def _checkpoint_worker_event(store: Path, attempt_id: str, worker_index: int,
                              original_index: int, row: dict, event: dict,
                              columns: list[dict], exhaustive: bool,
-                             max_bytes: int) -> dict:
-    item = _validate_progress_event(event, worker_index, row, columns, exhaustive)
-    stored_event = {**event, "index": original_index}
-    _progress_store_append(store, attempt_id, original_index, stored_event, max_bytes)
+                             max_bytes: int, teacher_identity: dict | None = None,
+                             max_extension_bytes: int = explicit_labels.MAX_EXTENSION_BYTES,
+                             checkpoint_binding: dict | None = None) -> dict:
+    item = _validate_progress_event(event, worker_index, row, columns, exhaustive,
+                                    teacher_identity, max_extension_bytes)
+    stored_event = {key: value for key, value in event.items() if key != "private_extensions"}
+    stored_event["index"] = original_index
+    extension_record = None
+    if teacher_identity is not None and teacher_identity.get("mode") == explicit_labels.SCHEMA_VERSION:
+        if not isinstance(checkpoint_binding, dict):
+            raise ProposalError("explicit private-extension checkpoint binding is absent")
+        extension_record = _private_extension_record(event, attempt_id, worker_index,
+            original_index, row, teacher_identity, checkpoint_binding, max_extension_bytes)
+    _progress_store_append(store, attempt_id, original_index, stored_event, max_bytes,
+                           private_extension_record=extension_record)
     return item
 
 
@@ -1578,6 +1840,197 @@ def _progress_ack(attempt_id: str, index: int, event: dict) -> dict:
     return {"schema_version": PROGRESS_ACK_SCHEMA, "phase": "ack",
             "attempt_id": attempt_id, "index": index,
             "event_sha256": _progress_event_digest(event)}
+
+
+def _private_extension_record(event: dict, attempt_id: str, worker_index: int,
+                             original_index: int, row: dict, teacher_identity: dict,
+                             checkpoint_binding: dict, max_extension_bytes: int) -> dict:
+    present = event["private_extensions_present"]
+    extensions = event["private_extensions"]
+    extension_digest = event["private_extensions_sha256"]
+    if present:
+        value = explicit_labels._canonical_bytes(extensions)
+        if len(value) > max_extension_bytes or _sha(value) != extension_digest:
+            raise ProposalError("private extension bytes exceed the bound or fail their digest")
+        persisted_value = extensions
+    else:
+        persisted_value = None
+    base = {"schema_version": PRIVATE_EXTENSION_SCHEMA, "attempt_id": attempt_id,
+        "worker_index": worker_index, "original_index": original_index,
+        "source_row_id": row["id"],
+        "source_identity_sha256": _sha(_canonical_json(row["source_identity"]).rstrip(b"\n")),
+        "source_text_sha256": row["text_sha256"],
+        "checkpoint_binding_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
+        "teacher_identity": teacher_identity,
+        "model_name": checkpoint_binding["model_name"],
+        "model_manifest_sha256": checkpoint_binding["model_manifest_sha256"],
+        "taxonomy_sha256": checkpoint_binding["taxonomy_sha256"],
+        "extensions_present": present, "extensions_sha256": extension_digest,
+        "extensions": persisted_value, "worker_event_sha256": _progress_event_digest(event)}
+    return {**base, "record_sha256": _sha(_canonical_json(base).rstrip(b"\n"))}
+
+
+def _restore_private_extension_event(event: dict, private_record: Any, attempt_id: str,
+                                     original_index: int, row: dict, expected_binding: dict,
+                                     teacher_identity: dict, max_extension_bytes: int) -> dict:
+    keys = {"schema_version", "attempt_id", "worker_index", "original_index", "source_row_id",
+        "source_identity_sha256", "source_text_sha256", "checkpoint_binding_sha256",
+        "teacher_identity", "model_name", "model_manifest_sha256", "taxonomy_sha256",
+        "extensions_present", "extensions_sha256", "extensions", "worker_event_sha256", "record_sha256"}
+    if not isinstance(private_record, dict) or set(private_record) != keys:
+        raise ProposalError("private extension checkpoint record schema is invalid")
+    base = {k: private_record[k] for k in keys - {"record_sha256"}}
+    present, extensions = private_record["extensions_present"], private_record["extensions"]
+    digest = private_record["extensions_sha256"]
+    if (private_record["schema_version"] != PRIVATE_EXTENSION_SCHEMA
+            or private_record["attempt_id"] != attempt_id
+            or type(private_record["worker_index"]) is not int or private_record["worker_index"] < 0
+            or private_record["original_index"] != original_index
+            or private_record["source_row_id"] != row["id"]
+            or private_record["source_identity_sha256"] != _sha(_canonical_json(row["source_identity"]).rstrip(b"\n"))
+            or private_record["source_text_sha256"] != row["text_sha256"]
+            or private_record["checkpoint_binding_sha256"] != _sha(_canonical_json(expected_binding).rstrip(b"\n"))
+            or private_record["teacher_identity"] != teacher_identity
+            or private_record["model_name"] != expected_binding["model_name"]
+            or private_record["model_manifest_sha256"] != expected_binding["model_manifest_sha256"]
+            or private_record["taxonomy_sha256"] != expected_binding["taxonomy_sha256"]
+            or private_record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n"))
+            or type(present) is not bool):
+        raise ProposalError("private extension checkpoint identity or integrity is invalid")
+    if present:
+        if not isinstance(extensions, dict) or not isinstance(digest, str) or not HEX.fullmatch(digest):
+            raise ProposalError("private extension checkpoint value is invalid")
+        extension_bytes = explicit_labels._canonical_bytes(extensions)
+        if len(extension_bytes) > max_extension_bytes or _sha(extension_bytes) != digest:
+            raise ProposalError("private extension checkpoint value failed its bound or digest")
+    elif extensions is not None or digest is not None:
+        raise ProposalError("missing private extension checkpoint value was changed")
+    if (not isinstance(private_record["worker_event_sha256"], str)
+            or not HEX.fullmatch(private_record["worker_event_sha256"])):
+        raise ProposalError("private extension original event digest is invalid")
+    full_event = {**event, "index": private_record["worker_index"],
+        "private_extensions_present": present,
+        "private_extensions_sha256": digest,
+        "private_extensions": extensions if present else {}}
+    if _progress_event_digest(full_event) != private_record["worker_event_sha256"]:
+        raise ProposalError("private extension checkpoint does not match its original worker event")
+    return full_event
+
+
+def read_private_teacher_extensions(store: Path, row_id: str,
+                                    expected_binding: dict) -> list[PrivateTeacherExtensions]:
+    """Deliberately retrieve bounded extension values from a verified private checkpoint."""
+    if (not isinstance(row_id, str) or not HEX.fullmatch(row_id)
+            or not isinstance(expected_binding, dict)
+            or expected_binding.get("teacher_response_mode") != explicit_labels.SCHEMA_VERSION):
+        raise ProposalError("private extension retrieval identity is invalid")
+    if (store.is_symlink() or not store.is_dir() or not _outside_git(store)
+            or not _private_dir(store.parent) or not _private_dir(store)):
+        raise ProposalError("private extension progress store is unavailable or unsafe")
+    header_path, events_path = store / "checkpoint.json", store / "events.jsonl"
+    if any(path.is_symlink() or not path.is_file() or not _private_file(path)
+           for path in (header_path, events_path)):
+        raise ProposalError("private extension progress files are unavailable or unsafe")
+    header = _json(_read(header_path, PROGRESS_HEADER_MAX_BYTES, "progress checkpoint"),
+                   "progress checkpoint")
+    selected_ids = expected_binding.get("selected_row_ids")
+    if (not isinstance(header, dict) or header.get("schema_version") != PROGRESS_STORE_SCHEMA
+            or header.get("binding") != expected_binding
+            or not isinstance(selected_ids, list) or row_id not in selected_ids):
+        raise ProposalError("private extension checkpoint binding changed")
+    teacher_identity = {"mode": expected_binding.get("teacher_response_mode"),
+        "schema_sha256": expected_binding.get("teacher_schema_sha256"),
+        "prompt_sha256": expected_binding.get("teacher_prompt_sha256"),
+        "module_sha256": expected_binding.get("explicit_labels_module_sha256")}
+    if any(not isinstance(teacher_identity[key], str) or not HEX.fullmatch(teacher_identity[key])
+           for key in ("schema_sha256", "prompt_sha256", "module_sha256")):
+        raise ProposalError("private extension schema or code identity is invalid")
+    events_raw = _read(events_path, PROGRESS_STORE_HARD_MAX_BYTES, "progress event log")
+    if events_raw and not events_raw.endswith(b"\n"):
+        raise ProposalError("private extension progress log is truncated")
+    binding_sha = _sha(_canonical_json(expected_binding).rstrip(b"\n"))
+    attempts: dict[str, dict] = {}
+    seen: set[tuple[str, int]] = set()
+    found: list[PrivateTeacherExtensions] = []
+    for line in events_raw.splitlines():
+        record = _json(line, "progress event")
+        required = {"schema_version", "attempt_id", "index", "event", "record_sha256", "private_extension_record"}
+        if (not isinstance(record, dict) or set(record) != required
+                or record.get("schema_version") != PROGRESS_EVENT_SCHEMA
+                or not isinstance(record.get("attempt_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
+                or type(record.get("index")) is not int
+                or not 0 <= record["index"] < len(selected_ids)):
+            raise ProposalError("private extension progress record schema is invalid")
+        base = {key: record[key] for key in required - {"record_sha256"}}
+        if record["record_sha256"] != _sha(_canonical_json(base).rstrip(b"\n")):
+            raise ProposalError("private extension progress record integrity failed")
+        public_event = record["event"]
+        item = public_event.get("result") if isinstance(public_event, dict) else None
+        index = record["index"]
+        if (not isinstance(item, dict) or item.get("row_id") != selected_ids[index]
+                or public_event.get("index") != index):
+            raise ProposalError("private extension event source row changed")
+        attempt_id = record["attempt_id"]
+        key = (attempt_id, index)
+        if key in seen:
+            raise ProposalError("private extension progress contains duplicate attempt events")
+        seen.add(key)
+        if attempt_id not in attempts:
+            attempt_path = store / f"attempt-{attempt_id}.json"
+            if attempt_path.is_symlink() or not _private_file(attempt_path):
+                raise ProposalError("private extension attempt evidence is unavailable")
+            attempt = _json(_read(attempt_path, 1_048_576, "progress attempt record"),
+                            "progress attempt record")
+            attempt_keys = {"schema_version", "attempt_id", "binding_sha256", "indices",
+                "row_ids_sha256", "state", "record_sha256"}
+            attempt_base = ({k: attempt[k] for k in attempt_keys - {"record_sha256"}}
+                            if isinstance(attempt, dict) else {})
+            indices = attempt.get("indices") if isinstance(attempt, dict) else None
+            if (not isinstance(attempt, dict) or set(attempt) != attempt_keys
+                    or attempt.get("schema_version") != PROGRESS_ATTEMPT_SCHEMA
+                    or attempt.get("attempt_id") != attempt_id
+                    or attempt.get("binding_sha256") != binding_sha
+                    or not isinstance(indices, list) or not indices
+                    or any(type(i) is not int or not 0 <= i < len(selected_ids) for i in indices)
+                    or len(indices) != len(set(indices)) or indices != sorted(indices)
+                    or index not in indices
+                    or attempt.get("row_ids_sha256") != _sha(_canonical_json([selected_ids[i] for i in indices]).rstrip(b"\n"))
+                    or attempt.get("record_sha256") != _sha(_canonical_json(attempt_base).rstrip(b"\n"))):
+                raise ProposalError("private extension attempt binding or integrity failed")
+            attempts[attempt_id] = attempt
+        attempt_indices = attempts[attempt_id]["indices"]
+        private_record = record["private_extension_record"]
+        worker_index = private_record.get("worker_index") if isinstance(private_record, dict) else None
+        if (index not in attempt_indices
+                or worker_index != attempt_indices.index(index)):
+            raise ProposalError("private extension event ordinal is not bound to its attempt row")
+        source_row = {"id": item["row_id"], "source_identity": item["source_identity"],
+                      "text_sha256": item["text_sha256"]}
+        full_event = _restore_private_extension_event(public_event, record["private_extension_record"],
+            attempt_id, index, source_row, expected_binding, teacher_identity,
+            expected_binding.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES))
+        validation_row = {"id": item["row_id"], "family": item["family_sha256"],
+            "text_sha256": item["text_sha256"], "original_text_sha256": item["original_text_sha256"],
+            "screening": item["screening"], "verified_source_claim": item["verified_source_claim"],
+            "source_identity": item["source_identity"], "columns": item["columns"],
+            "targets": item["source_targets"], "known_mask": item["source_known_mask"],
+            "target_origins": item["source_target_origins"],
+            "target_reviewer_claims": item["source_reviewer_claims"]}
+        _validate_progress_event({**full_event, "index": index}, index, validation_row,
+            item["columns"], False, teacher_identity,
+            expected_binding.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES))
+        if row_id == item["row_id"]:
+            private_record = record["private_extension_record"]
+            metadata = {k: private_record[k] for k in (
+                "attempt_id", "worker_index", "original_index", "source_row_id",
+                "source_identity_sha256", "source_text_sha256", "teacher_identity",
+                "model_name", "model_manifest_sha256", "taxonomy_sha256",
+                "extensions_present", "extensions_sha256", "worker_event_sha256")}
+            found.append(PrivateTeacherExtensions(metadata,
+                private_record["extensions"] if private_record["extensions_present"] else None,
+                private_record["extensions_present"]))
+    return found
 
 
 def _validate_progress_ack(value: Any, attempt_id: str, index: int, event: dict) -> None:
@@ -1617,7 +2070,10 @@ def _validate_worker_payload(payload: Any, expected: dict) -> tuple[list[dict], 
         raise ProposalError("training payload is empty")
     columns = expected["selected_columns"]
     labels = [f"{c['field']}:{c['label']}" for c in columns]
-    if not labels or len(labels) != len(set(labels)):
+    explicit_mode = expected.get("teacher_response_mode") == explicit_labels.SCHEMA_VERSION
+    identity_keys = [_identity_token(c["field"], c["label"]) for c in columns]
+    if (not labels or (not explicit_mode and len(labels) != len(set(labels)))
+            or len(identity_keys) != len(set(identity_keys))):
         raise ProposalError("worker taxonomy is invalid")
     seen = set()
     for row in records:
@@ -1672,19 +2128,26 @@ def _worker_loop(records: list[dict], columns: list[dict], config: dict,
                  infer: Callable[[bytes, set[str]], tuple[str, list[str] | None, float]],
                  exhaustive: bool, max_prompt_bytes: int,
                  progress_emit: Callable[[dict], None] | None = None) -> tuple[list[dict], list[dict], bool, str | None]:
+    explicit_mode = config.get("teacher_response_mode") == explicit_labels.SCHEMA_VERSION
     labels = [f"{c['field']}:{c['label']}" for c in columns]
     allowed = set(labels)
     progress, result_rows = [], []
     aborted = False
     abort_reason = None
     for index, row in enumerate(records):
+        extensions_present = False
+        private_extensions: dict[str, Any] = {}
         if aborted:
             status, elapsed, positives = "not_attempted_after_abort", None, None
         else:
             try:
                 request = _request(config, labels, row["text"], max_prompt_bytes)
                 try:
-                    status, positives, elapsed = infer(request, allowed)
+                    inference = infer(request, allowed)
+                    if explicit_mode and isinstance(inference, tuple) and len(inference) == 5:
+                        status, positives, elapsed, extensions_present, private_extensions = inference
+                    else:
+                        status, positives, elapsed = inference
                 except comparator.RequestLimitError:
                     status, positives, elapsed = "request_too_large_not_started", None, None
                 except TimeoutError:
@@ -1705,18 +2168,26 @@ def _worker_loop(records: list[dict], columns: list[dict], config: dict,
             aborted, abort_reason = True, "unknown_worker_status"
         if status in {"identity_mismatch", "http_error", "incomplete"}:
             aborted, abort_reason = True, "model_identity_or_response_lifecycle_ambiguous"
-        if status == "answered" and positives is not None:
+        if status == "answered" and positives is not None and explicit_mode:
+            states = {_identity_token(c["field"], c["label"]): {
+                "positive": "proposed_positive", "negative": "proposed_negative", "unknown": "unknown"
+            }[positives.get((c["field"], c["label"]), "unknown")] for c in columns}
+        elif status == "answered" and positives is not None:
             states = {label: ("proposed_positive" if label in positives else
                               "proposed_negative" if exhaustive else "unknown") for label in labels}
+        elif explicit_mode:
+            states = {_identity_token(c["field"], c["label"]): "unknown" for c in columns}
         else:
             states = {label: "unknown" for label in labels}
         conflicts = []
         if status != "not_attempted_after_abort":
             for i, label in enumerate(labels):
                 target, known = row["targets"][i], row["known_mask"][i]
-                if known and ((target == 0 and states[label] == "proposed_positive") or
-                              (target == 1 and states[label] == "proposed_negative")):
-                    conflicts.append(label)
+                key = _identity_token(columns[i]["field"], columns[i]["label"]) if explicit_mode else label
+                if known and ((target == 0 and states[key] == "proposed_positive") or
+                              (target == 1 and states[key] == "proposed_negative")):
+                    conflicts.append({"field": columns[i]["field"], "label": columns[i]["label"]}
+                                     if explicit_mode else label)
         item = {"row_id": row["id"], "family_sha256": row["family"],
                 "text_sha256": row["text_sha256"], "original_text_sha256": row["original_text_sha256"],
                 "screening": row["screening"], "verified_source_claim": row["verified_source_claim"],
@@ -1726,9 +2197,24 @@ def _worker_loop(records: list[dict], columns: list[dict], config: dict,
                 "source_reviewer_claims": row["target_reviewer_claims"],
                 "status": status, "elapsed_ms": elapsed, "proposal_states": states,
                 "conflict_labels": conflicts, "provenance": "unreviewed_local_teacher_claim"}
+        if explicit_mode:
+            item["teacher_identity"] = _teacher_wire_identity(config)
         result_rows.append(item)
         event = {"phase": "progress", "index": index, "status": status,
                  "elapsed_ms": elapsed, "result": item}
+        if explicit_mode:
+            if not isinstance(private_extensions, dict):
+                status, item["status"], event["status"] = "protocol_error", "protocol_error", "protocol_error"
+                item["proposal_states"] = {_identity_token(c["field"], c["label"]): "unknown" for c in columns}
+                item["conflict_labels"] = []
+                item["elapsed_ms"] = None
+                event["elapsed_ms"] = None
+                extensions_present, private_extensions = False, {}
+                aborted, abort_reason = True, "protocol_or_worker_lifecycle_ambiguous"
+            extension_digest = (_private_extension_sha256(private_extensions) if extensions_present else None)
+            event.update({"private_extensions_present": extensions_present,
+                          "private_extensions_sha256": extension_digest,
+                          "private_extensions": private_extensions})
         progress.append(event)
         if progress_emit is not None:
             progress_emit(event)
@@ -1821,7 +2307,8 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
                  "worker_code_sha256": cfg["worker_code_sha256"],
                  "worker_config_sha256": config_sha, "runtime_boundary": boundary_after_warmup,
                  "model_identity": artifact_identity, "warmup": warmup,
-                 "resources_before": resources_before}
+                 "resources_before": resources_before,
+                 "teacher_identity": _teacher_wire_identity(cfg["teacher_binding"])}
         print(json.dumps(ready, sort_keys=True, separators=(",", ":")), flush=True)
         _diagnostic_phase("worker_payload")
         raw_payload = sys.stdin.buffer.readline(cfg["max_payload_bytes"] + 1)
@@ -1854,8 +2341,16 @@ def _worker(config_path: Path, expected_config_sha256: str) -> None:
         else:
             records, columns = _validate_worker_payload(payload, cfg["teacher_binding"])
         if not payload["zero_row_probe"]:
-            progress, outputs, aborted, abort_reason = _worker_loop(records, columns, cfg,
-                lambda body, labels: comparator._prediction_http(cfg, body, labels),
+            teacher_binding = cfg["teacher_binding"]
+            loop_config = {**cfg, **teacher_binding}
+            if teacher_binding.get("teacher_response_mode") == explicit_labels.SCHEMA_VERSION:
+                infer = lambda body, _labels: comparator._prediction_http_explicit(
+                    cfg, body, teacher_binding["selected_columns"], teacher_binding["taxonomy_sha256"],
+                    explicit_labels, teacher_binding["max_teacher_extension_bytes"])
+            else:
+                infer = lambda body, labels: comparator._prediction_http(cfg, body, labels)
+            progress, outputs, aborted, abort_reason = _worker_loop(records, columns, loop_config,
+                infer,
                 cfg["teacher_binding"]["assume_exhaustive_labels"],
                 cfg["teacher_binding"]["max_prompt_bytes"], progress_emit=emit_progress)
         _diagnostic_phase("worker_result")
@@ -1979,7 +2474,7 @@ def _read_worker_line(process: subprocess.Popen, lines: queue.Queue, timeout: fl
 
 def _worker_warmup_handshake(process: subprocess.Popen, lines: queue.Queue, comp: dict,
                              host_before: dict, adapter_sha: str, worker_config_sha: str,
-                             receipt_sha: str) -> dict:
+                             receipt_sha: str, teacher_identity: dict | None = None) -> dict:
     control = _read_worker_line(process, lines,
         comp["worker_start_timeout_seconds"] + comp["worker_ready_wait_margin_seconds"])
     boundary = control.get("runtime_boundary") if isinstance(control, dict) else None
@@ -2023,6 +2518,7 @@ def _worker_warmup_handshake(process: subprocess.Popen, lines: queue.Queue, comp
             or not isinstance(model_identity, dict)
             or ready.get("worker_code_sha256") != adapter_sha
             or ready.get("worker_config_sha256") != worker_config_sha
+            or (teacher_identity is not None and ready.get("teacher_identity") != teacher_identity)
             or ready.get("receipt_sha256") != receipt_sha
             or ready.get("network_namespace_inode") != control.get("network_namespace_inode")
             or ready.get("server_pid") != control.get("server_pid")
@@ -2046,12 +2542,15 @@ def _worker_warmup_handshake(process: subprocess.Popen, lines: queue.Queue, comp
 
 
 def _validate_progress_result(event: dict, index: int, row: dict, columns: list[dict],
-                              exhaustive: bool) -> dict:
+                              exhaustive: bool, teacher_identity: dict | None = None) -> dict:
     item = event.get("result")
     expected_keys = {"row_id", "family_sha256", "text_sha256", "original_text_sha256", "screening",
         "verified_source_claim", "source_identity", "columns", "source_targets", "source_known_mask",
         "source_target_origins", "source_reviewer_claims", "status", "elapsed_ms", "proposal_states",
         "conflict_labels", "provenance"}
+    explicit_mode = (teacher_identity or {}).get("mode") == explicit_labels.SCHEMA_VERSION
+    if explicit_mode:
+        expected_keys.add("teacher_identity")
     status = event.get("status")
     if (event.get("phase") != "progress" or event.get("index") != index
             or not isinstance(item, dict) or set(item) != expected_keys
@@ -2071,32 +2570,41 @@ def _validate_progress_result(event: dict, index: int, row: dict, columns: list[
             or item.get("elapsed_ms") != event.get("elapsed_ms")
             or item.get("provenance") != "unreviewed_local_teacher_claim"):
         raise ProposalError("worker progress result does not match its source-bound input row")
+    if explicit_mode and item.get("teacher_identity") != teacher_identity:
+        raise ProposalError("worker progress explicit-label identity differs from the pinned contract")
     ordered_labels = [f"{column['field']}:{column['label']}" for column in columns]
     labels = set(ordered_labels)
     states = item.get("proposal_states")
-    if (not isinstance(states, dict) or set(states) != labels
+    if explicit_mode:
+        expected_state_keys = {_identity_token(c["field"], c["label"]) for c in columns}
+    else:
+        expected_state_keys = labels
+    if (not isinstance(states, dict) or set(states) != expected_state_keys
             or any(value not in {"proposed_positive", "proposed_negative", "unknown"} for value in states.values())):
         raise ProposalError("worker proposal states differ from the pinned taxonomy")
     if status != "answered" and any(value != "unknown" for value in states.values()):
         raise ProposalError("non-answer worker status must leave every proposal unknown")
     if status == "answered" and exhaustive and any(value == "unknown" for value in states.values()):
         raise ProposalError("exhaustive answered rows must explicitly mark every label")
-    if status == "answered" and not exhaustive and any(value == "proposed_negative" for value in states.values()):
+    if status == "answered" and not exhaustive and not explicit_mode and any(value == "proposed_negative" for value in states.values()):
         raise ProposalError("omitted labels cannot become negative without the explicit exhaustive policy")
     expected_conflicts = []
     if status != "not_attempted_after_abort":
         for index, label in enumerate(ordered_labels):
             target, known = row["targets"][index], row["known_mask"][index]
-            if known and ((target == 0 and states[label] == "proposed_positive")
-                          or (target == 1 and states[label] == "proposed_negative")):
-                expected_conflicts.append(label)
+            key = _identity_token(columns[index]["field"], columns[index]["label"]) if explicit_mode else label
+            if known and ((target == 0 and states[key] == "proposed_positive")
+                          or (target == 1 and states[key] == "proposed_negative")):
+                expected_conflicts.append({"field": columns[index]["field"], "label": columns[index]["label"]}
+                                          if explicit_mode else label)
     if item.get("conflict_labels") != expected_conflicts:
         raise ProposalError("worker conflicts do not match source masks and proposal states")
     return item
 
 
 def _validate_progress_event(event: dict, index: int, row: dict, columns: list[dict],
-                             exhaustive: bool) -> dict:
+                             exhaustive: bool, teacher_identity: dict | None = None,
+                             max_extension_bytes: int = explicit_labels.MAX_EXTENSION_BYTES) -> dict:
     statuses = {"answered", "abstain", "malformed", "invalid_schema", "refusal", "truncated",
                 "incomplete", "identity_mismatch", "http_error", "timeout", "transport_error",
                 "protocol_error", "request_too_large_not_started", "not_attempted_after_abort"}
@@ -2104,13 +2612,36 @@ def _validate_progress_event(event: dict, index: int, row: dict, columns: list[d
     elapsed = event.get("elapsed_ms") if isinstance(event, dict) else None
     unknown_elapsed = {"timeout", "transport_error", "protocol_error",
                        "request_too_large_not_started", "not_attempted_after_abort"}
-    if (not isinstance(event, dict) or event.get("phase") != "progress" or event.get("index") != index
+    explicit_mode = (teacher_identity or {}).get("mode") == explicit_labels.SCHEMA_VERSION
+    expected_event_keys = {"phase", "index", "status", "elapsed_ms", "result"}
+    if explicit_mode:
+        expected_event_keys |= {"private_extensions_present", "private_extensions_sha256", "private_extensions"}
+    if (not isinstance(event, dict) or set(event) != expected_event_keys
+            or event.get("phase") != "progress" or event.get("index") != index
             or status not in statuses
             or (status in unknown_elapsed and elapsed is not None)
             or (status not in unknown_elapsed and
                 (type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0))):
         raise ProposalError("worker progress status or timing protocol is invalid")
-    return _validate_progress_result(event, index, row, columns, exhaustive)
+    if explicit_mode:
+        present = event.get("private_extensions_present")
+        extensions = event.get("private_extensions")
+        digest = event.get("private_extensions_sha256")
+        if type(present) is not bool or not isinstance(extensions, dict):
+            raise ProposalError("worker private extension envelope is invalid")
+        if present:
+            if (status not in {"answered", "abstain"}
+                    or not isinstance(digest, str) or not HEX.fullmatch(digest)):
+                raise ProposalError("private extensions are not bound to an answered or abstained response")
+            try:
+                extension_bytes = explicit_labels._canonical_bytes(extensions)
+            except explicit_labels.ContractError:
+                raise ProposalError("private extension data is invalid") from None
+            if len(extension_bytes) > max_extension_bytes or _sha(extension_bytes) != digest:
+                raise ProposalError("private extension digest or size differs from the response")
+        elif extensions or digest is not None:
+            raise ProposalError("absent extensions must remain distinguishable from present values")
+    return _validate_progress_result(event, index, row, columns, exhaustive, teacher_identity)
 
 
 def _atomic_private_publish(final_path: Path, proposals: list[dict], manifest: dict,
@@ -2370,12 +2901,13 @@ def _remote_stage_paths(comp: dict, workdir: str, unit_id: str) -> dict[str, str
     paths = {"workdir": workdir,
              "teacher": f"{workdir}/train_teacher_proposals.py",
              "comparator": f"{workdir}/compare_local_12b.py",
+             "explicit_labels": f"{workdir}/teacher_explicit_labels.py",
              "config": f"{workdir}/worker-config.json",
              "model_store": f"{workdir}/models"}
     if not comparator._within_remote_home(workdir, comp["remote_home"]):
         raise ProposalError("task staging path is outside the configured remote home")
     if any(not comparator._within_remote_home(paths[k], comp["remote_home"])
-           for k in ("teacher", "comparator", "config", "model_store")):
+           for k in ("teacher", "comparator", "explicit_labels", "config", "model_store")):
         raise ProposalError("task staging path escaped the configured remote home")
     return paths
 
@@ -2457,6 +2989,7 @@ def _worker_config(comp: dict, paths: dict, teacher_binding: dict, teacher_code_
     return {**comp, "acquisition_receipt": comp["remote_acquisition_receipt"],
             "model_store": paths["model_store"], "remote_model_store": paths["model_store"],
             "remote_adapter_path": paths["teacher"],
+            "remote_explicit_labels_path": paths["explicit_labels"],
             "endpoint_url": f"http://127.0.0.1:{comp['runtime_port']}/api/chat",
             "worker_code_sha256": teacher_code_sha,
             "comparator_code_sha256": teacher_binding["comparator_code_sha256"],
@@ -2469,8 +3002,10 @@ def _isolated_worker_bootstrap() -> str:
             "a,c,h=sys.argv[1:4]; p=pathlib.Path(c); raw=p.read_bytes(); "
             "assert hashlib.sha256(raw).hexdigest()==h; cfg=json.loads(raw); "
             "d=pathlib.Path(a).parent; q=d/'compare_local_12b.py'; "
+            "e=d/'teacher_explicit_labels.py'; "
             "assert hashlib.sha256(pathlib.Path(a).read_bytes()).hexdigest()==cfg['worker_code_sha256']; "
             "assert hashlib.sha256(q.read_bytes()).hexdigest()==cfg['comparator_code_sha256']; "
+            "assert hashlib.sha256(e.read_bytes()).hexdigest()==cfg['teacher_binding']['explicit_labels_module_sha256']; "
             "sys.path.insert(0,str(d)); sys.argv=[a,'--worker','--config',c,'--config-sha256',h]; "
             "runpy.run_path(a,run_name='__main__')")
 
@@ -2500,6 +3035,7 @@ def _validate_zero_probe_match(probe: dict, ready: dict, host_before: dict, cfg_
             or probe.get("comparison_config_sha256") != comp_sha
             or probe.get("adapter_code_sha256") != adapter_sha
             or probe.get("comparator_code_sha256") != comparator_sha
+            or probe.get("teacher_identity") != ready.get("teacher_identity")
             or probe.get("receipt_sha256") != receipt_sha
             or not isinstance(probe_host, dict)
             or probe_host.get("hostname") != host_before.get("hostname")
@@ -2550,8 +3086,9 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
 
     adapter_path = Path(__file__).resolve(strict=True)
     comparator_path = Path(comparator.__file__).resolve(strict=True)
-    adapter_raw, comparator_raw = adapter_path.read_bytes(), comparator_path.read_bytes()
-    adapter_sha, comparator_sha = _sha(adapter_raw), _sha(comparator_raw)
+    explicit_path = Path(explicit_labels.__file__).resolve(strict=True)
+    adapter_raw, comparator_raw, explicit_raw = adapter_path.read_bytes(), comparator_path.read_bytes(), explicit_path.read_bytes()
+    adapter_sha, comparator_sha, explicit_sha = _sha(adapter_raw), _sha(comparator_raw), _sha(explicit_raw)
     teacher_binding = {"export_manifest_sha256": cfg["export_manifest_sha256"],
         "train_sha256": binding["train_sha256"] if binding else cfg["export_train_sha256"],
         "taxonomy_sha256": cfg["taxonomy_sha256"],
@@ -2562,14 +3099,21 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         "max_prompt_bytes": cfg["max_prompt_bytes"], "max_output_bytes": cfg["max_output_bytes"],
         "max_protocol_bytes": cfg["max_protocol_bytes"],
         "assume_exhaustive_labels": cfg["assume_exhaustive_labels"],
+        "teacher_response_mode": cfg.get("teacher_response_mode", "legacy_positive"),
+        "teacher_prompt_contract": cfg.get("teacher_prompt_contract"),
+        "max_teacher_extension_bytes": cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES),
+        "explicit_labels_module_sha256": explicit_sha,
         "proposal_config_sha256": cfg_sha, "comparison_config_sha256": comp_sha,
         "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
         "zero_row_probe": bool(zero_rows)}
+    teacher_identity = _teacher_wire_identity(cfg, explicit_sha)
+    teacher_binding["teacher_identity"] = teacher_identity
     payload_binding = {"manifest_sha256": teacher_binding["export_manifest_sha256"],
         "train_sha256": teacher_binding["train_sha256"], "taxonomy_sha256": teacher_binding["taxonomy_sha256"],
         "config_sha256": teacher_binding["export_config_sha256"],
         "proposal_config_sha256": cfg_sha, "comparison_config_sha256": comp_sha,
-        "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha}
+        "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
+        "teacher_identity": teacher_identity}
     teacher_binding["payload_binding"] = payload_binding
     worker_config = _worker_config(comp, paths, teacher_binding, adapter_sha)
     worker_config_raw = (json.dumps(worker_config, sort_keys=True, indent=2, ensure_ascii=False,
@@ -2605,6 +3149,7 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         _diagnostic_phase("file_staging")
         for local_path, remote_path, raw in ((adapter_path, paths["teacher"], adapter_raw),
                                               (comparator_path, paths["comparator"], comparator_raw),
+                                              (explicit_path, paths["explicit_labels"], explicit_raw),
                                               (worker_config_path_local, paths["config"], worker_config_raw)):
             argv = ["scp", "-oBatchMode=yes", "-oConnectTimeout=10", "-P", str(comp["ssh_port"]),
                     str(local_path), f"{comp['remote_user']}@{comp['remote_host']}:{remote_path}"]
@@ -2614,6 +3159,7 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         _diagnostic_phase("file_verification")
         _remote_verify_files(comp, paths, {paths["teacher"]: (adapter_sha, len(adapter_raw)),
             paths["comparator"]: (comparator_sha, len(comparator_raw)),
+            paths["explicit_labels"]: (explicit_sha, len(explicit_raw)),
             paths["config"]: (worker_config_sha, len(worker_config_raw))})
         install_config["remote_adapter_path"] = paths["comparator"]
         _diagnostic_phase("model_install")
@@ -2630,7 +3176,7 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
         lines = comparator._queue_protocol(process)
         _diagnostic_phase("control_handshake")
         ready = _worker_warmup_handshake(process, lines, comp, host_before, adapter_sha,
-                                         worker_config_sha, local_receipt_sha)
+                                         worker_config_sha, local_receipt_sha, teacher_identity)
         _diagnostic_phase("warmup_readiness")
         if ready.get("model_manifest_sha256") != comp["expected_manifest_sha256"]:
             raise ProposalError("warmed model identity differs from the pinned expected manifest")
@@ -2666,7 +3212,9 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
                 raise ProposalError("durable progress is complete; publication recovery is required")
             pending_rows = [rows[i] for i in pending_indices]
             capacity_bound = _check_result_bounds(pending_rows, cfg["selected_columns"],
-                cfg["max_output_bytes"], cfg["max_protocol_bytes"])
+                cfg["max_output_bytes"], cfg["max_protocol_bytes"], teacher_identity,
+                cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES),
+                comp["model_name"])
             if (_progress_store_usage(progress_store) + capacity_bound["progress_store_bytes"]
                     > cfg["max_progress_store_bytes"]):
                 raise ProposalError("progress store capacity cannot cover a full attempted batch")
@@ -2705,7 +3253,9 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             assert progress_store is not None
             item = _checkpoint_worker_event(progress_store, progress_attempt_id, worker_index,
                 original_index, row, event, cfg["selected_columns"], cfg["assume_exhaustive_labels"],
-                cfg["max_progress_store_bytes"])
+                cfg["max_progress_store_bytes"], teacher_identity,
+                cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES),
+                checkpoint_binding)
             ack_raw = (_canonical_json(_progress_ack(progress_attempt_id, worker_index, event)))
             if len(ack_raw) > PROGRESS_ACK_MAX_BYTES:
                 raise ProposalError("progress acknowledgment exceeds protocol limit")
@@ -2805,7 +3355,8 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
                 "proposal_config_sha256": cfg_sha,
                 "proposal_config_identity_sha256": _proposal_config_identity_sha(cfg),
                 "comparison_config_sha256": comp_sha,
-                "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha}
+                "adapter_code_sha256": adapter_sha, "comparator_code_sha256": comparator_sha,
+                "teacher_identity": ready.get("teacher_identity")}
     assert manifest is not None and rows is not None and binding is not None
     assert progress_store is not None
     for original_index, item in zip(pending_indices, progress_rows):
@@ -2861,8 +3412,8 @@ def _run_transient_worker(cfg: dict, cfg_sha: str, comp: dict, comp_sha: str,
             "selected_row_count": len(rows), "selected_row_ids_sha256": _sha(json.dumps(selected_ids, separators=(",", ":")).encode()),
             "selected_text_digests_sha256": _sha(json.dumps([r["text_sha256"] for r in rows], separators=(",", ":")).encode()),
             "target_mask_sha256": _sha(json.dumps([r["known_mask"] for r in rows], separators=(",", ":")).encode()),
-            "proposal_schema_sha256": _sha(json.dumps(comparator.output_schema([f"{c['field']}:{c['label']}" for c in cfg["selected_columns"]]),
-                sort_keys=True, separators=(",", ":")).encode()),
+            "proposal_schema_sha256": _proposal_schema_digest(cfg),
+            "teacher_identity": _teacher_wire_identity(cfg),
             "prompt_contract_sha256": _sha((comp["system_prompt"] + "\0" + comp["prompt_revision"]).encode()),
             "progress_store_schema": PROGRESS_STORE_SCHEMA,
             "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
@@ -2962,7 +3513,6 @@ def _resume_published_progress(cfg: dict, cfg_sha: str, comp: dict, comp_sha: st
             "selected_columns": manifest.get("selected_columns"),
             "counts": manifest.get("counts"), "promotion_eligible": False}
         selected_ids = [row["id"] for row in rows]
-        labels = [f"{column['field']}:{column['label']}" for column in cfg["selected_columns"]]
         coverage = Counter(f"{label}:{state}" for row in latest.values()
                            for label, state in row["proposal_states"].items())
         # With no trusted terminal event, keep the recovery report entirely
@@ -2990,7 +3540,8 @@ def _resume_published_progress(cfg: dict, cfg_sha: str, comp: dict, comp_sha: st
                 "selected_row_ids_sha256": _sha(_canonical_json(selected_ids).rstrip(b"\n")),
                 "selected_text_digests_sha256": _sha(_canonical_json([r["text_sha256"] for r in rows]).rstrip(b"\n")),
                 "target_mask_sha256": _sha(_canonical_json([r["known_mask"] for r in rows]).rstrip(b"\n")),
-                "proposal_schema_sha256": _sha(_canonical_json(comparator.output_schema(labels)).rstrip(b"\n")),
+                "proposal_schema_sha256": _proposal_schema_digest(cfg),
+                "teacher_identity": _teacher_wire_identity(cfg),
                 "prompt_contract_sha256": checkpoint_binding["prompt_contract_sha256"],
                 "progress_store_schema": PROGRESS_STORE_SCHEMA,
                 "progress_store_id_sha256": _sha(_canonical_json(checkpoint_binding).rstrip(b"\n")),
@@ -3077,7 +3628,10 @@ def _run_unleased(config_path: Path, zero_rows: bool = False, resume: bool = Fal
         rows = select_rows(all_rows, cfg["selection"], cfg["max_rows"])
         if len(rows) > MAX_TRAIN_PAYLOAD_ROWS:
             raise ProposalError("selected row count exceeds hard protocol bound")
-        _check_result_bounds(rows, manifest["selected_columns"], cfg["max_output_bytes"], cfg["max_protocol_bytes"])
+        _check_result_bounds(rows, manifest["selected_columns"], cfg["max_output_bytes"],
+                             cfg["max_protocol_bytes"], _teacher_wire_identity(cfg),
+                             cfg.get("max_teacher_extension_bytes", explicit_labels.MAX_EXTENSION_BYTES),
+                             comp["model_name"])
     if zero_rows:
         if resume:
             raise ProposalError("resume cannot be combined with a zero-row probe")

@@ -34,11 +34,24 @@ logs, Git, or public reports.
 
 Pickling a `ParsedResponse` is deliberately rejected with a generic `TypeError`
 so default object-state serialization cannot copy private extension slots.
-When only a sanitized summary is needed, serialize `dict(result)`. To persist
-private extensions, retrieve them explicitly and pass them through the future
-producer's verified private storage and provenance path. This API reduces
-accidental disclosure; it cannot prevent deliberate introspection or a caller
-from explicitly exposing values returned by `private_extensions()`.
+When only a sanitized summary is needed, serialize `dict(result)`. The isolated
+teacher producer persists accepted extensions in the same owner-private,
+source-bound checkpoint record as each explicit progress event. The extension
+value and label event are fsynced together before the controller ACKs the
+worker. The record binds row/source identity, attempt and worker event digest,
+model, taxonomy, schema, prompt and parser module; the value has its own
+canonical digest and configured byte bound. The `extensions` field may be
+omitted even when its byte budget is zero or one; a present empty object uses
+two canonical bytes and must fit. Preflight includes the maximum configured
+extension bytes in both the worker event and private checkpoint record, along
+with output, acknowledgment and framing bounds. Missing extensions remain
+distinct from a present empty object. Recovery validates the binding and integrity
+before exposing values. Deliberate retrieval is available through
+`read_private_teacher_extensions` in `train_teacher_proposals.py`; its result
+keeps a redacted representation and offers explicit accessors. These values
+remain untrusted inert data and never affect labels, selection, training weight
+or trust. This API reduces accidental disclosure; it cannot prevent deliberate
+introspection or a caller from explicitly exposing retrieved values.
 
 ```python
 result = parse_response(raw_response, selected_labels, taxonomy_digest)
@@ -47,11 +60,15 @@ if result["status"] in {"answered", "abstain"}:
     private_extensions = result.private_extensions()  # handle as sensitive data
 ```
 
-The parser does not write private data to disk. A future producer must store
-any extension values it needs using verified owner-only permissions and
-hash-bound provenance, and must keep raw responses out of logs, Git and public
-reports. Forwarding extensions must preserve them as inert data: they must not
-alter labels, selection, training weight, or trust.
+The parser itself does not write private data to disk. The producer writes only
+the accepted extension object, not the raw model response, using its verified
+owner-private checkpoint and hash-bound provenance. It keeps extension values
+out of Git, stdout/stderr diagnostics, ordinary public event summaries and
+published reports. Windows process-death durability is checked by the
+checkpoint protocol, but Python cannot guarantee power-loss durability of
+Windows directory metadata or underlying storage hardware. Forwarding
+extensions must preserve them as inert data: they must not alter labels,
+selection, training weight, or trust.
 
 Ollama's current structured-output documentation accepts a JSON Schema through
 the local `format` field and recommends validating the returned JSON. This
@@ -71,7 +88,34 @@ positive/negative claims with source-bound provenance, retain their unreviewed
 origin and configured weight, detect conflicts with source labels, and leave
 unknowns out of target cells. Never interpret an omitted label as negative.
 
-Legacy positive-list mode remains unchanged until an explicitly configured,
-versioned producer mode is implemented and separately tested end to end. This
-schema module alone does not collect labels, increase training coverage, train
-weights, score heldout examples, or qualify a model.
+## Isolated teacher producer integration
+
+The isolated teacher collector has an opt-in `teacher_response_mode` equal to
+`lfg.teacher-explicit-labels.v1`. Omission retains legacy positive-list mode.
+The opt-in mode requires `assume_exhaustive_labels: false` and a bounded,
+operator-supplied `teacher_prompt_contract` containing `{identities}` and
+`{text}` slots. The producer supplies ordered atomic identity pairs and only
+the screened row text to that contract. Its generated JSON Schema is sent in
+the local runtime `format` field. The request remains subject to existing
+request/prompt/response and protocol bounds; schema support by a particular
+runtime/model is not assumed or qualified here.
+
+Only a complete HTTP response with the pinned model identity, accepted
+completion reason, and no refusal is parsed. Each positive, explicit negative,
+or unknown becomes a source-bound unreviewed claim. Omitted identities stay
+unknown. Nonanswers leave every state unknown. New-mode state keys use the
+canonical JSON serialization of `[field, label]`; conflicts are arrays of
+atomic field/label objects, so delimiter collisions cannot alias identities.
+Legacy output remains positive-list compatible and ambiguous colon-joined
+identities are rejected.
+
+The worker stages the exact parser module bytes and verifies their SHA-256 in
+its isolated `python -I` bootstrap. Mode, ordered taxonomy/schema, prompt and
+module identities bind to the worker config, empty-row probe, ready receipt,
+payload, per-row durable event, ACK/checkpoint lifecycle, terminal report and
+resume key. A changed identity rejects old progress while preserving it for
+inspection. The producer preserves inert extension values only in its
+owner-private checkpoint; public reports contain no raw responses or extension data. The collected
+labels remain teacher claims, not verified outcomes, ground truth or a quality
+qualification. This integration does not itself bridge proposals into LFG
+training or run private collection.
