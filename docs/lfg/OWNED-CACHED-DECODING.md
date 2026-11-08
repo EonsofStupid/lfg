@@ -265,6 +265,116 @@ results establish only that test path; they are not real-input evidence. No
 private example, validation/test data, deployment, or GPU work is part of this
 diagnostic implementation.
 
+### Prefill parity isolation
+
+`ml/lfg-encoder/diagnose_owned_cached_prefill_isolation.py` separates three
+read-only CPU paths for the same pinned checkpoint and prefix: the retained
+ONNX prefill graph, the pinned PyTorch `PrefillGraph`, and the incremental
+PyTorch `DecodeSession`. For logits and every cache tensor, it records the
+three pairwise comparisons independently. It preserves the exporter's original
+`atol=1e-5` and `rtol=1e-5`; a strict-tolerance mismatch is a measured result,
+not an incomplete run or a reason to change acceptance.
+
+Two independent ONNX Runtime sessions are created for each run: the explicit
+current optimization setting (`ORT_ENABLE_ALL`) and `ORT_DISABLE_ALL`. The
+selected intra-op thread count is applied to both sessions and PyTorch; the
+inter-op count is explicitly one. The report records the optimization level,
+provider, thread settings, and Python/NumPy/PyTorch/ONNX/ONNX Runtime/safetensors
+versions. The prefix-work bound counts the PyTorch full and incremental paths
+and each requested ORT variant. A different result between
+these sessions is an experiment, not proof that graph optimization caused a
+parity difference.
+
+When the configured intermediate-capture budget permits, bounded PyTorch
+module hooks compare normalized block inputs/residual boundaries, input-gate
+content, convolution and attention branches, and feed-forward operations at
+matching sequence positions. The report gives aggregate differences and the
+earliest nonzero-difference and earliest strict-tolerance-failing
+layer/operation. Intermediate values are never written. The retained ONNX graph exposes no equivalent internal tensors, so the
+tool does not claim an ONNX layer trace; it does not rewrite or instrument the
+graph. If the activation capture estimate exceeds `--max-intermediate-bytes`,
+cache/logit comparisons still run and the layer trace is marked `not_tested`.
+This byte estimate covers anticipated captured tensor payloads only; it is not a
+hard process-memory bound. The parent supervisor must independently enforce
+memory and other host resource limits.
+
+The runner reuses the v2 pinned policy, selection, screening-claim, graph,
+checkpoint, model, cache-reference, and exporter validation. It enforces the
+configured work-item, prefix-token, file-byte, intermediate-capture, thread,
+and cooperative-time bounds and writes only a bounded strict-JSON aggregate
+report. The cooperative timer cannot interrupt a single library call; a real
+input run still requires a fresh handoff and independent OS-level CPU, memory,
+PID, wall-time, privacy, authorization, and coexistence checks. The runner
+does not itself verify those host controls. Screening and data quality remain
+operator claims unless independently verified.
+
+The shared diagnostic core is loaded by reading, hashing against its reviewed
+raw SHA-256, and executing those exact captured bytes in a private module
+object; it is not resolved by import name. A launcher must provide separate,
+explicit reviewed raw-byte SHA-256 values for both the tool and shared core.
+The accepted digest depends on the exact staged bytes: Git LF and Windows CRLF
+forms each require their own separately reviewed digest. The tool does not
+normalize line endings or derive trust from a digest it computes itself. Before
+CLI use, an external bootstrap verifies both captured files and executes the
+captured tool bytes. Set `EXPECTED_TOOL` and `EXPECTED_CORE` from the reviewed
+handoff:
+
+```sh
+python - "$PWD/ml/lfg-encoder/diagnose_owned_cached_prefill_isolation.py" "$EXPECTED_TOOL" "$PWD/ml/lfg-encoder/diagnose_owned_cached_parity.py" "$EXPECTED_CORE" --checkpoint PRIVATE_CHECKPOINT ... <<'PY'
+import hashlib, os, sys
+from pathlib import Path
+tool, tool_pin, core, core_pin = map(str, sys.argv[1:5])
+tool_path, core_path = Path(tool).resolve(), Path(core).resolve()
+tool_raw, core_raw = tool_path.read_bytes(), core_path.read_bytes()
+if hashlib.sha256(tool_raw).hexdigest() != tool_pin:
+    raise SystemExit("reviewed tool digest mismatch")
+if hashlib.sha256(core_raw).hexdigest() != core_pin:
+    raise SystemExit("reviewed core digest mismatch")
+os.environ["LFG_PREFILL_ISOLATION_EXPECTED_SHA256"] = tool_pin
+os.environ["LFG_PREFILL_CORE_EXPECTED_SHA256"] = core_pin
+sys.argv = [str(tool_path), *sys.argv[5:]]
+exec(compile(tool_raw, str(tool_path), "exec"), {"__name__": "__main__", "__file__": str(tool_path)})
+PY
+```
+
+The report records tool/core digests and whether the supplied launcher pin
+matches. The bootstrap is an external trust prerequisite; a report field alone
+does not prove process origin. Work-item counts are disjoint: measured work is
+completed (including valid tolerance failures), invalid inputs/comparisons,
+incomplete work, crashes, in-progress work, and never-started `not_tested`
+work sum to requested work. A skipped optional layer trace is separately
+marked `not_tested` and is not counted as a sample work item.
+
+Run synthetic tests only with a compatible POSIX CPU environment; no private
+inference is implied by these tests:
+
+```powershell
+python -m unittest discover -s ml/lfg-encoder -p test_diagnose_owned_cached_prefill_isolation.py
+```
+
+Run the CLI only through the dual-pin bootstrap above, with the normal options
+below; direct `python diagnose_owned_cached_prefill_isolation.py ...` execution
+does not satisfy the trust prerequisite. The CLI requires both optimization
+variants:
+
+```text
+--checkpoint PRIVATE_CHECKPOINT --export-config PRIVATE_EXPORT_CONFIG.json
+--graphs PRIVATE_EXISTING_GRAPH_DIRECTORY --policy PRIVATE_PIN_POLICY.json
+--selection-manifest PRIVATE_TRAIN_SELECTION.json
+--source SOURCE_ID_SHA256=PRIVATE_SOURCE.bin
+--screening-manifest SOURCE_ID_SHA256=PRIVATE_SCREENING.json
+--output NEW_PRIVATE_ISOLATION_DIRECTORY --length 1 --length 64
+--threads 1 --max-bytes 1000000000 --max-work-items 8
+--max-prefix-tokens 100000 --max-intermediate-bytes 268435456
+--max-seconds 600 --optimization-variant current_default
+--optimization-variant disable_all
+```
+
+This diagnostic reports execution-path differences only. Greedy agreement,
+synthetic fixtures, or a passing optimization variant does not establish
+strict export parity, task quality, performance qualification, or release
+readiness. The original exporter failure remains failed.
+
 Run the local benchmark against an existing private checkpoint and an
 authorized local source prefix:
 
