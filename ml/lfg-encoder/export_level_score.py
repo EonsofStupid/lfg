@@ -27,12 +27,12 @@ import sys
 import tempfile
 
 os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
+import onnxruntime as ort  # noqa: E402
 os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_DATASETS_OFFLINE='1', DO_NOT_TRACK='1',
                   HF_HUB_DISABLE_TELEMETRY='1', TOKENIZERS_PARALLELISM='false')
 
 import numpy as np  # noqa: E402
 import onnx  # noqa: E402
-import onnxruntime as ort  # noqa: E402
 import torch  # noqa: E402
 from onnx import helper, numpy_helper  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402

@@ -426,6 +426,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
 
     def test_invalid_or_nonfinite_prefill_and_step_logits_never_feed_argmax(self):
         import numpy as np
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         original_session = ort.InferenceSession
         original_argmax = np.argmax
@@ -542,6 +543,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertNotIn(self.sentinel.encode(), report_bytes)
 
     def test_sanitized_crash_partial_and_untrusted_extensions(self):
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         original_session = ort.InferenceSession
         sentinel = self.sentinel
@@ -584,6 +586,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
                                 for row in sample['teacher_forced_decode'][1:]))
 
     def test_attention_position_axes_and_convolution_cache_contract(self):
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import owned_student
         import diagnose_owned_cached_parity as subject

@@ -341,6 +341,7 @@ def diagnose(checkpoint: Path, export_config: Path, graphs: Path, policy_path: P
         raw_inputs['shared_core'] = (_CORE_PATH, _PINNED_CORE_RAW, max_bytes)
         import numpy as np
         import onnx
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import safetensors
         import torch
