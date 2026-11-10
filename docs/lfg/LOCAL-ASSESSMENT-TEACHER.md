@@ -255,3 +255,19 @@ the engine failure. The service was not restarted and no further requests were
 sent. The pilot selection contained one screened real request; a separate
 balanced selection contains 21 requests across 11 declared project labels,
 but no teacher responses have been collected for it.
+
+## Comparing local models
+
+`compare_local_models.py` starts each configured model on loopback with a per-run key,
+sends it the same requests and instruction as a completed teacher dataset through this
+collector, and writes aggregate results with no request text. A configured suffix can name
+the teacher's answer labels so answers can be compared, and a configured `instruction`
+replaces the teacher's instruction to try new wording, in which case agreement no longer
+compares like with like. The server command is configurable,
+so vLLM or `llama-server` can be used. It reports agreement with
+the teacher on complexity and agent count, the score from always choosing the teacher's
+most common answer, and speed. The reference is unreviewed, so agreement is not accuracy.
+Only the training requests are used. A stopped job continues from its saved answers, so
+it can run under the [idle job runner](SPARK-IDLE-JOBS.md). Weights are identified by
+digest. Set paths and limits in a private copy of the
+[example configuration](../../ml/lfg-encoder/local-model-comparison.example.json).
