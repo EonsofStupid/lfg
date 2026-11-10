@@ -41,8 +41,8 @@ mod feedback_windows;
 mod embedded_node {
     include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
 }
-mod devtools;
 mod dev_model;
+mod devtools;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]
