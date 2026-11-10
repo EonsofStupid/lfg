@@ -12,7 +12,8 @@ use axum::{
 };
 use lfg_codex::{CodexRunner, CodexStatus, ExecutionResult};
 use lfg_core::assessment::{
-    AssessRequest, Assessment, AssessmentConfig, Knowledge, SubscriptionCheck, assess, with_roles,
+    AssessRequest, Assessment, AssessmentConfig, Knowledge, SubscriptionCheck, assess_with_model,
+    with_roles,
 };
 use lfg_core::{
     CategoryClassifier, ClassificationSnapshot, ClassifierConfig, ClassifyRequest,
@@ -46,6 +47,7 @@ mod embedded_ui;
 pub mod exemplar_suggest;
 mod intake;
 pub mod knowledge;
+mod level_score;
 mod local_access;
 #[cfg(feature = "onnx-shadow")]
 pub mod onnx_embedding;
@@ -70,6 +72,9 @@ pub struct AppState {
     preflight_rules: Arc<PreflightRuleConfig>,
     knowledge: Arc<std::sync::RwLock<Arc<Knowledge>>>,
     subscription_checks: Arc<std::sync::RwLock<BTreeMap<String, SubscriptionCheck>>>,
+    /// The trained model the assessment configuration binds, loaded once.
+    level_scorer: Option<Arc<dyn level_score::LevelScorer>>,
+    level_permits: Arc<tokio::sync::Semaphore>,
 }
 
 fn record_codex_check(
@@ -117,6 +122,8 @@ impl AppState {
             preflight_rules: Arc::new(CpuRuleEncoder::default().config().clone()),
             knowledge: Arc::new(std::sync::RwLock::new(Arc::new(Knowledge::disabled()))),
             subscription_checks: Arc::default(),
+            level_scorer: None,
+            level_permits: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -128,6 +135,17 @@ impl AppState {
         let assessment_config = load_assessment_config().map_err(|error| {
             RuntimeError::InvalidRequest(format!("assessment configuration: {error}"))
         })?;
+        let level_scorer = assessment_config
+            .model_score
+            .as_ref()
+            .map(level_score::load)
+            .transpose()
+            .map_err(|error| RuntimeError::InvalidRequest(format!("trained model: {error}")))?;
+        let level_permits = Arc::new(tokio::sync::Semaphore::new(
+            level_scorer
+                .as_ref()
+                .map_or(1, |scorer| scorer.max_concurrent()),
+        ));
         let classifier_config = load_classifier_config().map_err(|error| {
             RuntimeError::InvalidRequest(format!("classifier configuration: {error}"))
         })?;
@@ -179,6 +197,8 @@ impl AppState {
             preflight_rules: Arc::new(preflight_rules),
             knowledge: Arc::new(std::sync::RwLock::new(Arc::new(Knowledge::disabled()))),
             subscription_checks: Arc::default(),
+            level_scorer,
+            level_permits,
         })
     }
 
@@ -559,6 +579,47 @@ fn observation_now_ms() -> Result<u64, (StatusCode, Json<ErrorResponse>)> {
         })
 }
 
+fn observation_error(code: &'static str) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match code {
+        "configuration_changed" => StatusCode::CONFLICT,
+        "deadline_expired" => StatusCode::REQUEST_TIMEOUT,
+        "response_limit_exceeded"
+        | "serialization_failed"
+        | "nonfinite_score"
+        | "model_unavailable"
+        | "model_output_invalid"
+        | "model_busy"
+        | "model_failed" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    error_response(status, code, code)
+}
+
+/// Runs the bound model on the text the assessment scores. `Ok(None)` means no
+/// model is bound. A busy or failing model is an error, never a rules-only answer.
+async fn run_level_model(
+    state: &AppState,
+    text: &str,
+) -> Result<Option<lfg_core::assessment::ModelOutput>, &'static str> {
+    let Some(scorer) = state.level_scorer.clone() else {
+        return Ok(None);
+    };
+    let permit = state
+        .level_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "model_busy")?;
+    let text = lfg_core::assessment::scored_text(&state.assessment_config, text).into_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        scorer.score(&text)
+    })
+    .await
+    .map_err(|_| "model_failed")?
+    .map(Some)
+    .map_err(|_| "model_failed")
+}
+
 async fn lfg_observe(
     State(state): State<AppState>,
     Json(request): Json<lfg_core::observation::ObservationRequest>,
@@ -571,27 +632,37 @@ async fn lfg_observe(
 > {
     let start = state.dev_stats.start();
     let work = state.dev_stats.start();
-    let result = observation_now_ms()
-        .and_then(|now| {
-            lfg_core::observation::observe(
+    let checked = observation_now_ms().and_then(|now| {
+        lfg_core::observation::check_request(
+            &state.assessment_config,
+            &state.preflight_rules,
+            &request,
+            state.operations.max_prompt_bytes(),
+            state.operations.max_http_body_bytes(),
+            now,
+        )
+        .map_err(observation_error)
+    });
+    // The request is checked first, so a stale or invalid one never costs a model run.
+    let model = match checked {
+        Ok(()) => run_level_model(&state, &request.text)
+            .await
+            .map_err(observation_error),
+        Err(error) => Err(error),
+    };
+    let result = model
+        .and_then(|model| {
+            let now = observation_now_ms()?;
+            lfg_core::observation::observe_with_model(
                 &state.assessment_config,
                 &state.preflight_rules,
                 &request,
                 state.operations.max_prompt_bytes(),
                 state.operations.max_http_body_bytes(),
                 now,
+                model.as_ref(),
             )
-            .map_err(|code| {
-                let status = match code {
-                    "configuration_changed" => StatusCode::CONFLICT,
-                    "deadline_expired" => StatusCode::REQUEST_TIMEOUT,
-                    "response_limit_exceeded" | "serialization_failed" | "nonfinite_score" => {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    }
-                    _ => StatusCode::BAD_REQUEST,
-                };
-                error_response(status, code, code)
-            })
+            .map_err(observation_error)
         })
         .and_then(|observation| {
             if let Some(deadline) = request.deadline_unix_ms
@@ -630,9 +701,15 @@ async fn lfg_assess(
 ) -> Result<Json<Assessment>, (StatusCode, Json<ErrorResponse>)> {
     let start = state.dev_stats.start();
     let work = state.dev_stats.start();
-    let result = state
+    let valid = state
         .operations
-        .validate_prompt(&request.session_id, &request.text)
+        .validate_prompt(&request.session_id, &request.text);
+    // A busy or failing model shows as unavailable in modelScore; the rules still answer here.
+    let model = match &valid {
+        Ok(()) => run_level_model(&state, &request.text).await.ok().flatten(),
+        Err(_) => None,
+    };
+    let result = valid
         .map(|()| {
             let knowledge = state
                 .knowledge
@@ -644,12 +721,13 @@ async fn lfg_assess(
                 .read()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone();
-            assess(
+            assess_with_model(
                 &state.assessment_config,
                 &state.preflight_rules,
                 &request,
                 &knowledge,
                 &checks,
+                model.as_ref(),
             )
         })
         .map_err(lfg_error);
@@ -1717,5 +1795,225 @@ mod tests {
         assert_eq!(stats["independentGraders"], 0);
         assert_eq!(stats["meanScore"], 0.5);
         assert_eq!(stats["passRate"], 0.5);
+    }
+}
+
+#[cfg(test)]
+mod level_score_tests {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use lfg_core::assessment::{ModelOutput, ModelScoreBinding, StructuredInput};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    struct Fixed {
+        result: Result<ModelOutput, String>,
+        calls: AtomicUsize,
+        last: StdMutex<Option<String>>,
+    }
+
+    impl level_score::LevelScorer for Fixed {
+        fn score(&self, text: &str) -> Result<ModelOutput, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last.lock().unwrap() = Some(text.to_owned());
+            self.result.clone()
+        }
+        fn max_concurrent(&self) -> usize {
+            1
+        }
+    }
+
+    fn fixed(result: Result<Vec<f64>, &str>) -> Arc<Fixed> {
+        Arc::new(Fixed {
+            result: result
+                .map(|probabilities| ModelOutput {
+                    probabilities,
+                    elapsed_micros: 4200,
+                    truncated: false,
+                })
+                .map_err(str::to_owned),
+            calls: AtomicUsize::new(0),
+            last: StdMutex::new(None),
+        })
+    }
+
+    fn bound_config() -> AssessmentConfig {
+        let mut config = AssessmentConfig::default_alpha();
+        config.revision = "rrflow-dev-test".into();
+        config.structured_input = Some(StructuredInput {
+            json_fields: vec!["title".into(), "goal".into()],
+            separator: "\n".into(),
+        });
+        config.model_score = Some(ModelScoreBinding {
+            id: "lfg-dev-text-test".into(),
+            manifest_sha256: "d".repeat(64),
+            level_brackets: ["trivial", "simple", "moderate", "complex", "major"]
+                .map(String::from)
+                .to_vec(),
+            level_cut_points: vec![0.5, 1.5, 2.5, 3.5],
+        });
+        config
+    }
+
+    fn state(scorer: Option<Arc<Fixed>>, permits: usize) -> AppState {
+        let mut state = AppState::new();
+        state.assessment_config = Arc::new(bound_config());
+        state.level_scorer = scorer.map(|s| s as Arc<dyn level_score::LevelScorer>);
+        state.level_permits = Arc::new(tokio::sync::Semaphore::new(permits));
+        state
+    }
+
+    /// The task projection an RRFlow engine sends as `text`.
+    fn rrflow_task() -> String {
+        json!({"scope":"project","task_id":"task-7","title":"Fix logout",
+            "goal":"Make logout clear the session and add a regression test",
+            "task_sha256":"e".repeat(64),"known_at_cursor":12})
+        .to_string()
+    }
+
+    fn observation(state: &AppState, config: &AssessmentConfig, text: &str) -> Value {
+        let caps = lfg_core::observation::capabilities(
+            config,
+            &state.preflight_rules,
+            state.operations.max_prompt_bytes(),
+            state.operations.max_http_body_bytes(),
+        );
+        json!({"schemaVersion": lfg_core::observation::REQUEST_VERSION, "requestId": "attempt-9",
+            "revision": 12, "text": text, "inputSha256": lfg_core::digest_text(text),
+            "expectedAssessmentSha256": caps.assessment_sha256,
+            "expectedRulesSha256": caps.rules_sha256})
+    }
+
+    async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, Value) {
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn post(state: &AppState, uri: &str, body: Value) -> (StatusCode, Value) {
+        send(
+            state,
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rrflow_task_is_scored_by_the_model_after_its_checks() {
+        let scorer = fixed(Ok(vec![0.0, 0.0, 0.05, 0.9, 0.05]));
+        let state = state(Some(scorer.clone()), 1);
+        let body = observation(&state, &state.assessment_config, &rrflow_task());
+        let (status, result) = post(&state, "/api/lfg/observations", body).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["analyzer"], "rules-and-trained-model");
+        assert_eq!(result["complexity"]["bracket"], "complex");
+        assert_eq!(result["complexity"]["scoreUnit"], "configured-rule-points");
+        assert_eq!(result["modelScore"]["level"], 3);
+        assert_eq!(result["modelScore"]["id"], "lfg-dev-text-test");
+        assert!(result["confidence"].is_null() && result["advisory"] == true);
+        let complex = state
+            .assessment_config
+            .brackets
+            .iter()
+            .find(|b| b.id == "complex")
+            .unwrap();
+        assert_eq!(result["suggestedRole"], complex.role.as_str());
+        assert_eq!(result["suggestedEffort"], complex.effort.as_str());
+        assert!(
+            result["reasonIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == "input:structured")
+        );
+        // The model read the task's title and goal, not its JSON wrapper.
+        assert_eq!(
+            scorer.last.lock().unwrap().as_deref(),
+            Some("Fix logout\nMake logout clear the session and add a regression test")
+        );
+        assert_eq!(scorer.calls.load(Ordering::SeqCst), 1);
+        // A request pinned to the rules-only configuration is refused before any model run.
+        let stale = observation(&state, &AssessmentConfig::default_alpha(), &rrflow_task());
+        let (status, result) = post(&state, "/api/lfg/observations", stale).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(result["code"], "configuration_changed");
+        assert_eq!(scorer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_bound_server_never_answers_from_the_rules_alone() {
+        let task = rrflow_task();
+        for (state, code) in [
+            (state(None, 1), "model_unavailable"),
+            (state(Some(fixed(Err("boom"))), 1), "model_failed"),
+            (state(Some(fixed(Ok(vec![0.2; 5]))), 0), "model_busy"),
+            (
+                state(Some(fixed(Ok(vec![0.7, 0.7]))), 1),
+                "model_output_invalid",
+            ),
+        ] {
+            let body = observation(&state, &state.assessment_config, &task);
+            let (status, result) = post(&state, "/api/lfg/observations", body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{code}: {result}");
+            assert_eq!(result["code"], code);
+        }
+    }
+
+    #[tokio::test]
+    async fn assessment_and_capabilities_report_the_model() {
+        let state = state(Some(fixed(Ok(vec![1.0, 0.0, 0.0, 0.0, 0.0]))), 1);
+        let (status, result) = post(
+            &state,
+            "/api/lfg/assess",
+            json!({"sessionId":"s","revision":1,"text":"Migrate every service and add tests across the pipeline"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["modelScore"]["status"], "available");
+        assert_eq!(result["complexity"]["bracket"], "trivial");
+        assert_ne!(result["modelScore"]["rulesBracket"], "trivial");
+        // A failing model leaves the assessment answering, with the model marked unavailable.
+        let failing = state_with_failing();
+        let (status, result) = post(
+            &failing,
+            "/api/lfg/assess",
+            json!({"sessionId":"s","revision":1,"text":"fix typo"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["modelScore"]["status"], "unavailable");
+        let (status, caps) = send(
+            &state,
+            Request::builder()
+                .uri("/api/lfg/observations/capabilities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(caps["analyzer"], "rules-and-trained-model");
+        assert_eq!(caps["model"]["manifestSha256"], "d".repeat(64));
+    }
+
+    fn state_with_failing() -> AppState {
+        state(Some(fixed(Err("boom"))), 1)
     }
 }

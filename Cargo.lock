@@ -1007,6 +1007,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tract",
+ "tract-linalg",
  "tract-onnx",
  "uuid",
  "windows-sys",
@@ -2242,6 +2243,7 @@ dependencies = [
  "minijinja",
  "num-traits",
  "pastey",
+ "rayon",
  "tract-data",
  "walkdir",
 ]

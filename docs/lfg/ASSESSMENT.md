@@ -7,12 +7,14 @@ category classifiers remain for existing integrations and can disagree with it;
 new work should build on this one.
 
 The separately versioned [integration observation](OBSERVATION-CONTRACT.md)
-projects this deterministic analysis without consulting local subscription
-history and accepts opaque extra request fields. It is an advisory interface;
-it is not yet connected to RRFlow, SWAG or MCP.
+projects this analysis without consulting local subscription history and
+accepts opaque extra request fields. It is an advisory interface. RRFlow's
+draft engine integration calls it; SWAG and MCP don't yet.
 
 These are rule outputs, not calibrated probabilities. `confidence` stays `null`
-until a trained model and measured evidence can support a number.
+until measured evidence can support a number. An operator can bind a
+[trained model](TRAINED-LEVEL-SCORE.md) whose work level chooses the bracket;
+the response then carries a `modelScore` block beside the rule score.
 
 ## The formula
 

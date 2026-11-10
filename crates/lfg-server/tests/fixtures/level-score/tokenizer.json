@@ -1,0 +1,58 @@
+{
+ "added_tokens": [
+  {
+   "content": "[UNK]",
+   "id": 0,
+   "lstrip": false,
+   "normalized": false,
+   "rstrip": false,
+   "single_word": false,
+   "special": true
+  },
+  {
+   "content": "[SEP]",
+   "id": 1,
+   "lstrip": false,
+   "normalized": false,
+   "rstrip": false,
+   "single_word": false,
+   "special": true
+  },
+  {
+   "content": "[MASK]",
+   "id": 2,
+   "lstrip": false,
+   "normalized": false,
+   "rstrip": false,
+   "single_word": false,
+   "special": true
+  }
+ ],
+ "decoder": null,
+ "model": {
+  "type": "WordLevel",
+  "unk_token": "[UNK]",
+  "vocab": {
+   "[MASK]": 2,
+   "[SEP]": 1,
+   "[UNK]": 0,
+   "across": 7,
+   "add": 5,
+   "every": 8,
+   "fix": 3,
+   "login": 4,
+   "service": 9,
+   "tests": 6
+  }
+ },
+ "normalizer": {
+  "type": "Lowercase"
+ },
+ "padding": null,
+ "post_processor": null,
+ "pre_tokenizer": {
+  "type": "Whitespace"
+ },
+ "truncation": null,
+ "version": "1.0"
+}
