@@ -17,9 +17,10 @@ sarcastic in an angry message.
 
 ## How it runs
 
-`lfg-server prompt-hook --client claude|codex` answers a `UserPromptSubmit`
-hook. Both clients send the prompt as `prompt` on stdin and accept
-`hookSpecificOutput.additionalContext` on stdout.
+`lfg-server prompt-hook --client claude|codex|gemini|kimi` answers a
+prompt-submit hook. Claude Code and Codex (`UserPromptSubmit`) and Gemini CLI
+(`BeforeAgent`) take `hookSpecificOutput.additionalContext` as JSON on stdout;
+Kimi Code appends plain stdout.
 
 - **Never blocks:** the hook never stops a prompt. A malformed payload, an
   unknown client or any error prints nothing and exits 0. A leading UTF-8
@@ -80,6 +81,26 @@ and the transcripts to compare sessions before and after the hook is installed.
 ```
 
 Add the Codex entry to the existing `UserPromptSubmit` hooks list.
+
+**Gemini CLI** (`~/.gemini/settings.json`; `BeforeAgent` takes JSON only, and the
+timeout is in milliseconds):
+
+```json
+{"hooks": {"BeforeAgent": [{"hooks": [{"type": "command", "name": "lfg-mood", "command": "C:/path/to/lfg-server.exe prompt-hook --client gemini --journal C:/private/mood.jsonl", "timeout": 5000}]}]}}
+```
+
+**Kimi Code** (`~/.kimi-code/config.toml`; plain stdout is added as context, and
+the timeout is in seconds):
+
+```toml
+[[hooks]]
+event = "UserPromptSubmit"
+command = "C:/path/to/lfg-server.exe prompt-hook --client kimi --journal C:/private/mood.jsonl"
+timeout = 5
+```
+
+Kimi's documentation does not name the field that carries the prompt, so the
+hook reads `prompt`, `user_prompt`, `message` or `text`, whichever is present.
 
 ## Not yet established
 

@@ -94,3 +94,22 @@ fn the_journal_keeps_readings_and_digests_but_never_the_words() {
             .any(|s| s == "why-you")
     );
 }
+
+#[test]
+fn gemini_gets_before_agent_json_and_kimi_gets_plain_text() {
+    let angry = serde_json::json!({"session_id": "s", "prompt": "why did you ignore me?? fix it"});
+    let (ok, out) = hook("gemini", &angry.to_string(), None);
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
+    assert!(value["hookSpecificOutput"]["additionalContext"].is_string());
+    let (ok, out) = hook("kimi", &angry.to_string(), None);
+    assert!(ok);
+    assert!(out.starts_with("LFG operator context:") && !out.trim_start().starts_with('{'));
+    // An undocumented prompt field name is still read.
+    let other = serde_json::json!({"session_id": "s", "user_prompt": "WTF STILL BROKEN"});
+    let (ok, out) = hook("kimi", &other.to_string(), None);
+    assert!(ok && out.starts_with("LFG operator context:"));
+    let calm = serde_json::json!({"session_id": "s", "prompt": "Rename the variable."});
+    assert!(hook("gemini", &calm.to_string(), None).1.trim().is_empty());
+}

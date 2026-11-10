@@ -1,6 +1,6 @@
-//! The `UserPromptSubmit` hook for Claude Code and Codex. Both send the prompt
-//! as `prompt` on stdin and accept `hookSpecificOutput.additionalContext` on
-//! stdout. When the prompt reads as frustrated, the hook returns grounding
+//! The prompt-submit hook for Claude Code, Codex, Gemini CLI and Kimi Code. Each
+//! sends the prompt as JSON on stdin; see [`output_for`] for how each takes
+//! added context. When the prompt reads as frustrated, the hook returns grounding
 //! context for the agent; otherwise it prints nothing. It never blocks a
 //! prompt: any failure prints nothing and exits 0.
 //!
@@ -35,10 +35,27 @@ fn load_mood() -> Result<OperatorMood, Box<dyn std::error::Error>> {
     }
 }
 
-fn try_run(client: &str, journal: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    if !matches!(client, "claude" | "codex") {
-        return Ok(());
+/// How each client takes added context: Claude Code and Codex use JSON for
+/// `UserPromptSubmit`, Gemini CLI uses JSON for `BeforeAgent` and ignores plain
+/// text, and Kimi Code appends plain stdout.
+enum Output {
+    Json(&'static str),
+    Plain,
+}
+
+fn output_for(client: &str) -> Option<Output> {
+    match client {
+        "claude" | "codex" => Some(Output::Json("UserPromptSubmit")),
+        "gemini" => Some(Output::Json("BeforeAgent")),
+        "kimi" => Some(Output::Plain),
+        _ => None,
     }
+}
+
+fn try_run(client: &str, journal: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(output) = output_for(client) else {
+        return Ok(());
+    };
     let mut raw = Vec::new();
     std::io::stdin()
         .take(MAX_STDIN_BYTES + 1)
@@ -49,7 +66,11 @@ fn try_run(client: &str, journal: Option<PathBuf>) -> Result<(), Box<dyn std::er
     // Some shells prepend a UTF-8 byte-order mark when piping text.
     let body = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&raw);
     let payload: serde_json::Value = serde_json::from_slice(body)?;
-    let Some(prompt) = payload.get("prompt").and_then(serde_json::Value::as_str) else {
+    // Kimi Code does not document its prompt field, so accept the usual names.
+    let Some(prompt) = ["prompt", "user_prompt", "message", "text"]
+        .iter()
+        .find_map(|name| payload.get(*name).and_then(serde_json::Value::as_str))
+    else {
         return Ok(());
     };
     let mood = load_mood()?;
@@ -80,12 +101,17 @@ fn try_run(client: &str, journal: Option<PathBuf>) -> Result<(), Box<dyn std::er
         let _ = append(&path, &entry);
     }
     if let Some(context) = mood.guidance(&reading) {
-        let output = json!({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": context,
-        }});
         let mut stdout = std::io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &output)?;
+        match output {
+            Output::Json(event) => {
+                let value = json!({"hookSpecificOutput": {
+                    "hookEventName": event,
+                    "additionalContext": context,
+                }});
+                serde_json::to_writer(&mut stdout, &value)?;
+            }
+            Output::Plain => write!(stdout, "{context}")?,
+        }
         writeln!(stdout)?;
     }
     Ok(())

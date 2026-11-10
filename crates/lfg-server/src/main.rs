@@ -30,10 +30,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Answer a Claude Code or Codex UserPromptSubmit hook: when the prompt reads as
+    /// Answer a prompt-submit hook (Claude Code, Codex, Gemini CLI, Kimi Code): when the prompt reads as
     /// frustrated, add grounding context for the agent. Never blocks a prompt.
     PromptHook {
-        /// The hook's client, `claude` or `codex`; both use the same payload and output.
+        /// The hook's client: `claude`, `codex` or `gemini` (JSON context) or `kimi` (plain text).
         #[arg(long)]
         client: String,
         /// Append a prompt-free reading to this local JSONL journal (or set LFG_MOOD_JOURNAL).
