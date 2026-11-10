@@ -84,18 +84,19 @@ def normalize(answer):
 
 
 class Precomputed:
-    """Scores made elsewhere, such as LFG's cross-validated work levels: {id, primary} rows."""
+    """Scores made elsewhere, such as cross-validated models: {id, primary[, intent, risk]} rows."""
 
     def __init__(self, spec):
         self.scores = {}
         for line in open(spec['path'], encoding='utf-8'):
             row = json.loads(line)
-            self.scores[row['id']] = row['primary']
+            self.scores[row['id']] = row
 
     def answer(self, row, _instructions):
         if row['id'] not in self.scores:
             raise LookupError('no precomputed score for this row')
-        return dict(work_level=self.scores[row['id']]), None
+        score = self.scores[row['id']]
+        return dict(work_level=score.get('primary'), intent=score.get('intent'), clarification_risk=score.get('risk')), None
 
 
 class LfgHttp:
@@ -217,7 +218,7 @@ def run_contestant(spec, rows, out_dir, instructions_text, instructions_sha, wor
             except LookupError:
                 return  # The contestant has nothing for this row, such as later-only scores.
             record = dict(id=row['id'], ok=answer is not None, **normalize(answer if answer is not None else {}))
-            if spec['kind'] in ('precomputed', 'lfg'):
+            if spec['kind'] == 'lfg':
                 record.update({k: v for k, v in (answer or {}).items() if k in ('work_level', 'intent')})
             record['raw_chars'] = len(raw) if isinstance(raw, str) else None
         except Exception as error:  # noqa: BLE001  one failure must not stop the run
