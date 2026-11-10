@@ -7,8 +7,8 @@ import { ParticleLayer } from './ParticleLayer'
 import { AssessmentView } from './AssessmentView'
 import { FeedbackPanel } from './FeedbackPanel'
 import { ScorecardPanel } from './ScorecardPanel'
-import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
-import type { OwnedResult, OwnedStatus } from './ownedAssessmentApi'
+import { DEV_MODEL_COPY, OwnedAssessmentPanel } from './OwnedAssessmentPanel'
+import { devModelClient, type OwnedResult, type OwnedStatus } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
 import { DevtoolsView } from './DevtoolsView'
@@ -32,6 +32,7 @@ export default function App() {
   const [assessmentSubscriptions, setAssessmentSubscriptions] = useState('')
   const [ownedSnapshot, setOwnedSnapshot] = useState<{ revision: number; subscriptionKey: string; result: OwnedResult } | null>(null)
   const [ownedEngineStatus, setOwnedEngineStatus] = useState<OwnedStatus | null>(null)
+  const [comparedModel, setComparedModel] = useState<'owned' | 'dev'>('owned')
   const [classification, setClassification] = useState<ClassificationSnapshot | null>(null)
   const [activeSubscriptions, setActiveSubscriptions] = useState<string[]>([])
   const [routingNeed, setRoutingNeed] = useState<RoutingNeed | null>(null)
@@ -152,11 +153,12 @@ export default function App() {
 
         <AssessmentView assessment={assessment} prompt={prompt} declared={activeSubscriptions} onToggleSubscription={toggleSubscription} />
 
-        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel prompt={prompt} assessment={currentAssessment} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, subscriptionKey, result } : null)} onStatus={setOwnedEngineStatus} />}
+        {!publicEmbed && mode === 'inspector' && <label className="compared-model">Model to compare <select value={comparedModel} onChange={(event) => { setComparedModel(event.target.value === 'dev' ? 'dev' : 'owned'); setOwnedSnapshot(null); setOwnedEngineStatus(null) }}><option value="owned">Experimental owned model</option><option value="dev">Dev model (open model)</option></select></label>}
+        {!publicEmbed && mode === 'inspector' && <OwnedAssessmentPanel key={comparedModel} {...(comparedModel === 'dev' ? { client: devModelClient, copy: DEV_MODEL_COPY } : {})} prompt={prompt} assessment={currentAssessment} declaredSubscriptions={activeSubscriptions} onResult={(result) => setOwnedSnapshot(result ? { revision, subscriptionKey, result } : null)} onStatus={setOwnedEngineStatus} />}
         {!publicEmbed && mode === 'inspector' && <FeedbackPanel prompt={prompt} assessmentRef={`${SESSION_ID}:${revision}`} ownedResult={currentOwnedResult} assessment={currentAssessment} />}
         {!publicEmbed && mode === 'inspector' && status && <ScorecardPanel maxBytes={status.operations.maxHttpBodyBytes}
           maxFeedbackPages={status.operations.scorecardMaxFeedbackPages}
-          maxFeedbackPageSize={status.operations.scorecardMaxFeedbackPageSize} currentOwnedStatus={ownedEngineStatus} />}
+          maxFeedbackPageSize={status.operations.scorecardMaxFeedbackPageSize} currentOwnedStatus={comparedModel === 'owned' ? ownedEngineStatus : null} />}
 
         <section className="signal-strip" aria-label="Live routing tallies">
           <Metric label="Suggested agents" value={displayedTotals.predicted} detail="advisory while typing" />

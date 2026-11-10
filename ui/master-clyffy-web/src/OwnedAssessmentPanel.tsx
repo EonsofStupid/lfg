@@ -31,13 +31,53 @@ const REASON_MESSAGE: Record<string, string> = {
   provenance_mismatch: 'The model and its training or framing identities do not match.',
 }
 
+export type ModelPanelCopy = {
+  name: string
+  route: string
+  region: string
+  eyebrow: string
+  heading: string
+  intro: string
+  ready: string
+  statuses?: Partial<Record<OwnedResult['status'], string>>
+  reasons?: Record<string, string>
+}
+
+const OWNED_COPY: ModelPanelCopy = {
+  name: 'owned model',
+  route: 'owned route',
+  region: 'Experimental owned model',
+  eyebrow: 'EXPERIMENTAL OWNED MODEL',
+  heading: "Compare LFG's model",
+  intro: 'Run the current request through the experimental owned model.',
+  ready: 'Ready means the configuration and artifact identity were checked. Each run loads the model; its quality and speed are not yet qualified.',
+}
+
+export const DEV_MODEL_COPY: ModelPanelCopy = {
+  name: 'dev model',
+  route: 'dev model route',
+  region: 'Dev open model',
+  eyebrow: "DEV MODEL, NOT LFG'S OWN",
+  heading: 'Compare an open model',
+  intro: "Run the current request through the open model configured for development. It is not LFG's own model.",
+  ready: 'Ready means the configuration and instruction were checked. It does not show the model is running, and the weights digest is stated by the operator. Its quality is not yet qualified.',
+  statuses: { unavailable: 'The dev model could not be reached. Check that it is running and that its port is forwarded to this machine.' },
+  reasons: {
+    service_disabled: 'The dev model is not enabled in the local configuration.',
+    session_token_unavailable: 'Configure a private token for the dev model.',
+    invalid_configuration: 'The dev model configuration is invalid.',
+    model_key_unavailable: "The dev model's API key is not set on the local server.",
+    instruction_identity_mismatch: 'The instruction file does not match its configured identity.',
+  },
+}
+
 function display(value: unknown): string {
   if (value === null || value === undefined || value === '') return 'Unknown'
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
   return JSON.stringify(value)
 }
 
-export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, onStatus, declaredSubscriptions = [], loadKnowledge = getKnowledge }: {
+export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessmentClient, onResult, onStatus, declaredSubscriptions = [], loadKnowledge = getKnowledge, copy = OWNED_COPY }: {
   prompt: string
   assessment: Assessment | null
   client?: OwnedAssessmentClient
@@ -45,6 +85,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
   onStatus?: (status: OwnedStatus | null) => void
   declaredSubscriptions?: string[]
   loadKnowledge?: () => Promise<unknown>
+  copy?: ModelPanelCopy
 }) {
   const [tokenInput, setTokenInput] = useState('')
   const [token, setToken] = useState<string | null>(null)
@@ -116,7 +157,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     setError('')
     try { await action() } catch (value) {
       if (request === undefined || requestGeneration.current === request) {
-        setError(value instanceof Error ? value.message : 'The owned model request failed.')
+        setError(value instanceof Error ? value.message : `The ${copy.name} request failed.`)
       }
     } finally {
       if (busyGeneration.current === current) setRunning(false)
@@ -207,7 +248,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       tokenInputRef.current = ''
     } catch (value) {
       if (connectionGeneration.current === current) {
-        setError(value instanceof Error ? value.message : 'The owned model request failed.')
+        setError(value instanceof Error ? value.message : `The ${copy.name} request failed.`)
       }
     } finally {
       if (connectionGeneration.current === current) setConnecting(false)
@@ -223,7 +264,7 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     }
     const limit = status?.limits?.maxContextBytes
     if (!Number.isSafeInteger(limit) || !limit || limit < 1) {
-      setDraftError('Connect the owned model to obtain a context byte limit before building a draft.')
+      setDraftError(`Connect the ${copy.name} to obtain a context byte limit before building a draft.`)
       return
     }
     setDraftBusy(true)
@@ -246,9 +287,9 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     }
   }
 
-  return <section className="dev-panel owned-assessment" aria-label="Experimental owned model">
-    <div className="dev-heading"><div><p className="eyebrow">EXPERIMENTAL OWNED MODEL</p><h2>Compare LFG's model</h2></div></div>
-    <p>Run the current request through the experimental owned model. Its output is a proposal, not a verified assessment; the existing rules remain available above. Availability, project outcomes, and entitlement remain unknown unless separately verified. This run does not automatically include subscription settings or project profile answers.</p>
+  return <section className="dev-panel owned-assessment" aria-label={copy.region}>
+    <div className="dev-heading"><div><p className="eyebrow">{copy.eyebrow}</p><h2>{copy.heading}</h2></div></div>
+    <p>{copy.intro} Its output is a proposal, not a verified assessment; the existing rules remain available above. Availability, project outcomes, and entitlement remain unknown unless separately verified. This run does not automatically include subscription settings or project profile answers.</p>
     <div className="suggested-context">
       <button type="button" disabled={draftBusy || !!draft} onClick={() => void buildSuggestedContext()}>{draftBusy ? 'Building draft…' : 'Build suggested context'}</button>
       <p>Uses your declared subscriptions and server-reported cached model listings. These do not establish current access or entitlement. Review before applying; nothing is sent to the model until you run it.</p>
@@ -277,24 +318,24 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
     </label>
     <p>Context is sent exactly as typed only when you run the model and stays in this component's memory. The digest identifies those bytes; it does not verify their truth or remove secrets. Model output may repeat the context. Saving feedback is a separate explicit action and can save model output, including text that repeats context.</p>
     {!token ? <>
-      <label>Owned model token <input type="password" autoComplete="off" value={tokenInput} onChange={(event) => {
+      <label>{copy.name[0].toUpperCase() + copy.name.slice(1)} token <input type="password" autoComplete="off" value={tokenInput} onChange={(event) => {
         const next = event.target.value
         tokenInputRef.current = next
         connectionGeneration.current += 1
         setConnecting(false)
         setTokenInput(next)
       }} /></label>
-      <button type="button" disabled={connecting || !tokenInput} onClick={() => void connectOwnedModel()}>{connecting ? 'Connecting…' : 'Connect owned model'}</button>
+      <button type="button" disabled={connecting || !tokenInput} onClick={() => void connectOwnedModel()}>{connecting ? 'Connecting…' : `Connect ${copy.name}`}</button>
       <p>The token is held only in this browser session. Configure it and the model on the local server first.</p>
     </> : <>
-      <p role="status">Model status: {status?.status ?? 'unknown'}{status?.reason ? ` · ${REASON_MESSAGE[status.reason] ?? `Reason: ${status.reason}`}` : ''}</p>
-      {status?.status === 'ready' && <p>Ready means the configuration and artifact identity were checked. Each run loads the model; its quality and speed are not yet qualified.</p>}
-      {status?.engine && <p>Engine: {status.engine.id} · Model: {status.engine.modelSha256 ? status.engine.modelSha256.slice(0, 12) : 'identity unavailable'}</p>}
-      {status?.limits && <p>Limit: {status.limits.maxRequestBytes.toLocaleString()} request bytes{status.limits.maxContextBytes ? ` · ${status.limits.maxContextBytes.toLocaleString()} model context bytes (including framing)` : ''} · {status.limits.maxGeneratedBytes.toLocaleString()} output bytes · {status.limits.timeoutMs.toLocaleString()} ms · {status.limits.maxConcurrent} concurrent{status.limits.workerThreads ? ` · ${status.limits.workerThreads} threads requested` : ''}</p>}
+      <p role="status">Model status: {status?.status ?? 'unknown'}{status?.reason ? ` · ${copy.reasons?.[status.reason] ?? REASON_MESSAGE[status.reason] ?? `Reason: ${status.reason}`}` : ''}</p>
+      {status?.status === 'ready' && <p>{copy.ready}</p>}
+      {status?.engine && <p>Engine: {typeof status.engine.label === 'string' ? `${status.engine.label} · ` : ''}{status.engine.id} · Model: {status.engine.modelSha256 ? status.engine.modelSha256.slice(0, 12) : 'identity unavailable'}</p>}
+      {status?.limits && <p>Limit: {status.limits.maxRequestBytes.toLocaleString()} request bytes{status.limits.maxContextBytes ? ` · ${status.limits.maxContextBytes.toLocaleString()} model context bytes (including framing)` : ''} · {status.limits.maxGeneratedTokens ? `${status.limits.maxGeneratedTokens.toLocaleString()} output tokens` : `${(status.limits.maxGeneratedBytes ?? 0).toLocaleString()} output bytes`} · {status.limits.timeoutMs.toLocaleString()} ms · {status.limits.maxConcurrent} concurrent{status.limits.workerThreads ? ` · ${status.limits.workerThreads} threads requested` : ''}</p>}
       {bodyLimit !== undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} / {bodyLimit.toLocaleString()} UTF-8 bytes.</p>}
-      {bodyLimit === undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} UTF-8 bytes. The owned route HTTP body limit is not advertised; the server may reject this request.</p>}
+      {bodyLimit === undefined && <p>Serialized request body: {bodyBytes.toLocaleString()} UTF-8 bytes. The {copy.route} HTTP body limit is not advertised; the server may reject this request.</p>}
       <div className="feedback-actions">
-        <button type="button" disabled={running || appliedDraftStale || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : 'Run owned model'}</button>
+        <button type="button" disabled={running || appliedDraftStale || status?.status !== 'ready' || !prompt.trim() || tooLarge} onClick={runOwnedAssessment}>{running ? 'Running model…' : `Run ${copy.name}`}</button>
         <button type="button" disabled={running} onClick={() => { invalidate(); connectionGeneration.current += 1; draftGeneration.current += 1; setToken(null); setStatus(null); onStatusRef.current?.(null); setProjectContext(''); setAppliedDeclarations(null); setAppliedSnapshot(null); setAppliedSuperseded(false); setDraftBusy(false) }}>Disconnect</button>
       </div>
       {requestTooLarge && <p role="alert">The request exceeds the model's configured UTF-8 input limit.</p>}
@@ -306,17 +347,18 @@ export function OwnedAssessmentPanel({ prompt, assessment, client = ownedAssessm
       {contextBinding === 'missing' && <p role="alert">The response did not include the expected context digest. The result is shown but cannot be saved as linked to this context.</p>}
       {contextBinding === 'mismatch' && <p role="alert">The response context digest did not match the submitted bytes. The result is shown but cannot be saved as linked to this context.</p>}
       {visibleResult && <div className="owned-result">
-        <p role="status">{STATUS_MESSAGE[visibleResult.status] ?? 'The model returned an unrecognized status.'} · {visibleResult.elapsedMs.toFixed(0)} ms{visibleResult.stopReason ? ` · ${visibleResult.stopReason}` : ''}</p>
+        <p role="status">{copy.statuses?.[visibleResult.status] ?? STATUS_MESSAGE[visibleResult.status] ?? 'The model returned an unrecognized status.'} · {visibleResult.elapsedMs.toFixed(0)} ms{visibleResult.stopReason ? ` · ${visibleResult.stopReason}` : ''}</p>
         {visibleResult.measurement?.schemaVersion === 'lfg.owned-run-measurement.v1' && <p>Observed handler wall time: {visibleResult.measurement.handlerElapsedMs} ms (may include child startup; not CPU or model-only time). Output text: {visibleResult.measurement.outputTextUtf8Bytes === null ? 'unavailable' : `${visibleResult.measurement.outputTextUtf8Bytes.toLocaleString()} UTF-8 bytes`}. Worker started: {visibleResult.measurement.workerStarted === null ? 'unknown' : visibleResult.measurement.workerStarted ? 'yes' : 'no'}; worker completed successfully: {visibleResult.measurement.workerCompletedSuccessfully === null ? 'unknown' : visibleResult.measurement.workerCompletedSuccessfully ? 'yes' : 'no'}.</p>}
         <section aria-label="Current input comparison">
           <h3>Current input comparison</h3>
-          <p>Rules result uses the current request without this optional project context. The owned model uses the request plus {hasProjectContext ? `${contextBytes.toLocaleString()} UTF-8 bytes of supplied context` : 'no supplied context'}. This is a side-by-side proposal comparison, not an equivalent-input quality test.</p>
-          <p>Rules: {assessment ? `${assessment.intent.primary} intent, ${assessment.complexity.bracket} complexity, ${assessment.agents.total} agents` : 'unavailable for the current input'}. Owned model status: {visibleResult.status}; output: {proposal ? `${display(proposal.intent)} intent, ${display(proposal.complexity)} complexity, ${display(proposal.agent_count)} agents` : 'no structured proposal'}.</p>
+          <p>Rules result uses the current request without this optional project context. The {copy.name} uses the request plus {hasProjectContext ? `${contextBytes.toLocaleString()} UTF-8 bytes of supplied context` : 'no supplied context'}. This is a side-by-side proposal comparison, not an equivalent-input quality test.</p>
+          <p>Rules: {assessment ? `${assessment.intent.primary} intent, ${assessment.complexity.bracket} complexity, ${assessment.agents.total} agents` : 'unavailable for the current input'}. {copy.name[0].toUpperCase() + copy.name.slice(1)} status: {visibleResult.status}; output: {proposal ? `${display(proposal.intent)} intent, ${display(proposal.complexity)} complexity, ${display(proposal.agent_count)} agents` : 'no structured proposal'}.</p>
         </section>
         {proposal && <dl className="owned-fields">
           <div><dt>Intent</dt><dd>{display(proposal.intent)}</dd></div>
           <div><dt>Complexity</dt><dd>{display(proposal.complexity)}</dd></div>
           <div><dt>Suggested models</dt><dd>{Array.isArray(proposal.suggested_models) && proposal.suggested_models.length === 0 ? 'No models suggested' : display(proposal.suggested_models)}</dd></div>
+          {Array.isArray(proposal.unlisted_models) && proposal.unlisted_models.length > 0 && <div><dt>Names not on the model list</dt><dd>{display(proposal.unlisted_models)}</dd></div>}
           <div><dt>Agent count</dt><dd>{proposal.agent_count === 0 ? 'No agents suggested' : display(proposal.agent_count)}</dd></div>
           {proposal.reasons !== undefined && <div><dt>Reasons</dt><dd>{Array.isArray(proposal.reasons) ? <ul>{proposal.reasons.map((reason, index) => <li key={index}>{display(reason)}</li>)}</ul> : display(proposal.reasons)}</dd></div>}
           {proposal.reason !== undefined && <div><dt>Reason</dt><dd>{display(proposal.reason)}</dd></div>}

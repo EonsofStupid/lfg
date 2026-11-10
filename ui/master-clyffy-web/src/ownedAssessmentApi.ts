@@ -13,7 +13,7 @@ export type OwnedStatus = {
   enabled: boolean
   status: 'disabled' | 'unavailable' | 'ready'
   engine: OwnedEngine | null
-  limits?: { maxRequestBytes: number; maxHttpBodyBytes?: number; maxContextBytes?: number; maxGeneratedBytes: number; timeoutMs: number; maxConcurrent: number; workerThreads?: number }
+  limits?: { maxRequestBytes: number; maxHttpBodyBytes?: number; maxContextBytes?: number; maxGeneratedBytes?: number; maxGeneratedTokens?: number; timeoutMs: number; maxConcurrent: number; workerThreads?: number }
   reason?: string | null
 }
 
@@ -74,4 +74,9 @@ async function request<T>(path: string, token: string, body?: unknown): Promise<
 export const ownedAssessmentClient: OwnedAssessmentClient = {
   status: (token) => request('/api/lfg/assess/owned/status', token),
   assess: (text, token, context) => request('/api/lfg/assess/owned', token, ownedAssessmentBody(text, context)),
+}
+
+export const devModelClient: OwnedAssessmentClient = {
+  status: (token) => request('/api/lfg/assess/dev-model/status', token),
+  assess: (text, token, context) => request('/api/lfg/assess/dev-model', token, ownedAssessmentBody(text, context)),
 }

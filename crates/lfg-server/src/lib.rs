@@ -42,6 +42,7 @@ mod embedded_node {
     include!(concat!(env!("OUT_DIR"), "/embedded_node.rs"));
 }
 mod devtools;
+mod dev_model;
 #[cfg(feature = "embedded-ui")]
 mod embedded_ui;
 #[cfg(feature = "onnx-shadow")]
@@ -425,11 +426,21 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
     // Codex runs need the listener's identity and a local token, so they are not in `router`.
     let codex_runs = codex_runs::routes(state.clone(), listener);
+    let store = state.knowledge.clone();
+    let config = state.assessment_config.clone();
+    let known = Arc::new(move || {
+        let knowledge = store
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        lfg_core::assessment::known_models(&config, &knowledge)
+    });
     router(state)
         .merge(feedback::FeedbackApi::for_listener(listener).routes())
         .merge(devtools::DevtoolsApi::for_listener(listener).routes())
         .merge(owned_assessment::routes(listener))
         .merge(codex_runs)
+        .merge(dev_model::routes(listener, known))
 }
 
 pub fn router_with_ui_and_listener(

@@ -110,7 +110,7 @@ struct Config {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RequiredField {
+pub(crate) struct RequiredField {
     name: String,
     value_type: OutputType,
     #[serde(default)]
@@ -171,12 +171,12 @@ struct RuntimeConfig {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct InferRequest {
-    text: String,
+pub(crate) struct InferRequest {
+    pub(crate) text: String,
     #[serde(default)]
-    context: Option<String>,
+    pub(crate) context: Option<String>,
     #[serde(default)]
-    context_sha256: Option<String>,
+    pub(crate) context_sha256: Option<String>,
     #[serde(flatten)]
     _extensions: serde_json::Map<String, Value>,
 }
@@ -430,7 +430,7 @@ async fn infer(
     add_context_digest(result, verified_context_sha256.as_deref())
 }
 
-fn render_user_text(
+pub(crate) fn render_user_text(
     context: Option<&str>,
     expected_sha256: Option<&str>,
     request: &str,
@@ -682,7 +682,7 @@ async fn run_inference(
 }
 
 #[derive(Debug, PartialEq)]
-enum OutputProblem {
+pub(crate) enum OutputProblem {
     Incomplete(Value),
     Malformed,
 }
@@ -759,7 +759,10 @@ fn interpret_worker_response(
     }
 }
 
-fn validate_output(value: Value, required: &[RequiredField]) -> Result<Value, OutputProblem> {
+pub(crate) fn validate_output(
+    value: Value,
+    required: &[RequiredField],
+) -> Result<Value, OutputProblem> {
     let object = value.as_object().ok_or(OutputProblem::Malformed)?;
     let mut missing = false;
     for field in required {
@@ -802,7 +805,7 @@ fn validate_output(value: Value, required: &[RequiredField]) -> Result<Value, Ou
     }
 }
 
-fn valid_output_policy(required: &[RequiredField]) -> bool {
+pub(crate) fn valid_output_policy(required: &[RequiredField]) -> bool {
     if required.is_empty() {
         return false;
     }
@@ -1028,7 +1031,7 @@ fn add_context_digest(
     (status, Json(value))
 }
 
-fn auth_reason(code: StatusCode) -> &'static str {
+pub(crate) fn auth_reason(code: StatusCode) -> &'static str {
     if code == StatusCode::SERVICE_UNAVAILABLE {
         "session_token_unavailable"
     } else {
@@ -1036,7 +1039,7 @@ fn auth_reason(code: StatusCode) -> &'static str {
     }
 }
 
-fn list_env(name: &str, hosts: bool) -> Vec<String> {
+pub(crate) fn list_env(name: &str, hosts: bool) -> Vec<String> {
     std::env::var(name)
         .unwrap_or_default()
         .split(',')
@@ -1054,7 +1057,7 @@ fn list_env(name: &str, hosts: bool) -> Vec<String> {
         .collect()
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, &'static str> {
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, &'static str> {
     let meta = std::fs::symlink_metadata(path).map_err(|_| "asset_unavailable")?;
     if !meta.file_type().is_file() || meta.len() > limit {
         return Err("asset_unavailable");
@@ -1070,7 +1073,7 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 
-fn digest(data: &[u8]) -> String {
+pub(crate) fn digest(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
