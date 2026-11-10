@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "lfg.operator-mood.v1",
+  "revision": "baseline-1",
+  "maxTextBytes": 65536,
+  "frustration": [
+    {"id": "profanity", "pattern": "\\bf+u+c+k|\\bwtf\\b|\\bshit|\\bdamn"},
+    {"id": "why-you", "pattern": "\\bwhy (are|aren'?t|did|didn'?t|is|isn'?t|do|don'?t|would|the hell) you\\b"},
+    {"id": "told-you", "pattern": "\\bi (told|asked) you\\b|\\bnot what i (asked|said|wanted)\\b"},
+    {"id": "still-broken", "pattern": "\\bstill (not|broken|failing|doesn'?t|isn'?t)\\b"},
+    {"id": "insult", "pattern": "\\b(ridiculous|stupid|useless|seriously\\?)"},
+    {"id": "repeated-punctuation", "pattern": "!{2,}|\\?{2,}"}
+  ],
+  "positive": [
+    {"id": "thanks", "pattern": "\\bthanks?\\b|\\bthank you\\b"},
+    {"id": "praise", "pattern": "\\b(perfect|great|awesome|excellent|beautiful|nice)\\b|\\blove (it|this)\\b|\\bgood job\\b"},
+    {"id": "approval", "pattern": "\\bi approve\\b|\\bworks (now|great|perfectly)\\b"}
+  ],
+  "capsBurst": {
+    "minWords": 2,
+    "minLength": 3,
+    "ignore": ["AGENTS", "AI", "API", "CI", "CLI", "CPU", "CSS", "GPU", "HTML", "HTTP", "JSON", "LFG", "LLM", "MCP", "ONNX", "PR", "RAM", "README", "SDK", "SQL", "SSH", "SWAG", "TODO", "TOML", "UI", "URL", "USB", "WSL", "YAML"]
+  },
+  "guidance": {
+    "frustrated": "LFG operator context: this message reads as strongly frustrated, most likely after hours invested in the work. The operator has said that at moments like this they want grounded, transparent answers rather than reassurance: what has actually been verified and how, what is still assumed, exactly what information is needed from them, and one concrete next step. Replies to the tone itself, long apologies, and claims that earlier work was useful are not wanted. Frustration is not a reason to skip verification or to guess."
+  }
+}

@@ -16,6 +16,7 @@ automatically.
 | Semantic evaluation rubric | [`evaluation-rubric.v1.json`](../../crates/lfg-core/config/evaluation-rubric.v1.json) | `LFG_EVALUATION_RUBRIC` |
 | Runtime promotion thresholds | [`promotion-policy.v1.json`](../../crates/lfg-core/config/promotion-policy.v1.json) | `LFG_PROMOTION_POLICY` |
 | Request and signal limits, server defaults, event streaming, benchmark limits, and UI polling | [`operations.v1.json`](../../crates/lfg-runtime/config/operations.v1.json) | `LFG_OPERATIONS_CONFIG` |
+| [Operator mood hook](OPERATOR-MOOD-HOOK.md): frustration and praise patterns, and the grounding context added for the agent | [`operator-mood.v1.json`](../../crates/lfg-core/config/operator-mood.v1.json) | `LFG_OPERATOR_MOOD_CONFIG` |
 | [Trained level score](TRAINED-LEVEL-SCORE.md): model directory, limits and threads, when the assessment binds a model | [`model-score-runtime.example.json`](../../crates/lfg-server/config/model-score-runtime.example.json) | `LFG_MODEL_SCORE_CONFIG` |
 
 Copy a file to a project-controlled location, modify it, and set the relevant
