@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -30,6 +31,7 @@ def run(args: argparse.Namespace) -> dict:
     verifier_sha = node_review.digest(Path(node_evaluate.__file__).read_bytes())
     import numpy as np
     import onnx
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
     import onnxruntime as ort
     import torch
     encoder = node_exemplars.Encoder(args.model, config)

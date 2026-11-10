@@ -593,6 +593,7 @@ class CachedExportFailureEvidenceTests(unittest.TestCase):
                 self.assertEqual(report['comparison']['failed_element_count'], 1)
 
     def test_actual_export_call_sites_report_full_source_and_decode_failures(self):
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         from unittest import mock
         import export_owned_cached_onnx as subject
@@ -672,6 +673,7 @@ class CachedExportFailureEvidenceTests(unittest.TestCase):
                     self.assertEqual(context['state_layer'], 0)
 
     def test_nonfinite_or_shape_guard_failure_is_not_misreported_as_assertion(self):
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import numpy as np
         from unittest import mock

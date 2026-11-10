@@ -1,0 +1,26 @@
+{
+ "id": "level-score-fixture",
+ "inputSpecSha256": "7ea159a5069555824dece0cb6937ed3124ecc914b9044d7294b6dd5767d6a7c7",
+ "inputs": [
+  "input_ids",
+  "attention_mask"
+ ],
+ "levels": 5,
+ "modelFile": "model.onnx",
+ "modelSha256": "00204413dded787e03257940ae0dd7b4cd5964afcf240bc603b3d3a13c853fcc",
+ "output": "level_probabilities",
+ "promotionEligible": false,
+ "provenance": {
+  "countWeight": 0.01,
+  "kind": "synthetic test fixture; not a trained model",
+  "levelWeights": [
+   -0.1,
+   -0.05,
+   0.0,
+   0.05,
+   0.1
+  ]
+ },
+ "schemaVersion": "lfg.model-score-manifest.v1",
+ "tokenizerSha256": "5dd2eb782f905bde3f7c79b70766d141c4d4fbaeb11e63fc5c90624ca758afd8"
+}

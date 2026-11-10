@@ -499,6 +499,7 @@ def diagnose(checkpoint: Path, export_config: Path, graphs: Path, policy_path: P
     report_error = None
     try:
         import numpy as np
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import torch
         from safetensors.torch import load as load_safetensors

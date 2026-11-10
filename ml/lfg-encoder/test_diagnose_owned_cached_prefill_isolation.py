@@ -249,6 +249,7 @@ class IsolationRunnerTests(unittest.TestCase):
 
     def test_original_tolerance_failure_is_measured_not_mislabeled_incomplete(self):
         import numpy as np
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         original_session = ort.InferenceSession
 
@@ -278,6 +279,7 @@ class IsolationRunnerTests(unittest.TestCase):
 
     def test_invalid_onnx_and_torch_outputs_never_claim_original_tolerance_success(self):
         import numpy as np
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import diagnose_owned_cached_prefill_isolation as subject
         original_session = ort.InferenceSession
@@ -458,6 +460,7 @@ class IsolationRunnerTests(unittest.TestCase):
 
     @REQUIRES_STACK
     def test_explicit_optimization_and_thread_settings_reach_sessions(self):
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         original_session = ort.InferenceSession
         observed = []

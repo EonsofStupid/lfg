@@ -32,6 +32,9 @@ jobs:
           cargo test --locked -p lfg-server --features owned-byte-onnx --bin lfg-server owned_byte::tests
           cargo test --locked -p lfg-server --features owned-byte-onnx --test owned_byte_process
 
+      - name: Test the trained-model scorer
+        run: cargo test --locked -p lfg-server --features onnx-shadow --lib level_score
+
   python-ml:
     runs-on: ubuntu-latest
     steps:

@@ -170,6 +170,18 @@ test('uses the configured UTF-8 byte limit for multibyte input', async () => {
   expect(screen.getByRole('button', { name: 'COMMIT ROUTE' })).not.toBeDisabled()
 })
 
+test('the inspector shows one comparison model at a time and starts with the owned model', async () => {
+  render(<App />)
+  enterPrompt()
+  await screen.findByRole('button', { name: 'project-seat' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspector' }))
+  expect(screen.getByLabelText('Owned model token')).toBeInTheDocument()
+  expect(screen.queryByLabelText('Dev model token')).toBeNull()
+  fireEvent.change(screen.getByLabelText('Model to compare'), { target: { value: 'dev' } })
+  expect(screen.getByLabelText('Dev model token')).toBeInTheDocument()
+  expect(screen.queryByLabelText('Owned model token')).toBeNull()
+})
+
 test('uses the owned route body cap even when it differs from the app operations cap', async () => {
   const contextDigest = '09'.repeat(32)
   vi.stubGlobal('crypto', { randomUUID: () => 'test-session', subtle: { digest: vi.fn(async () => new Uint8Array(32).fill(9).buffer) } })

@@ -1,0 +1,32 @@
+{
+ "levels": [
+  "0-2",
+  "3-9",
+  "10-30",
+  "31-100",
+  ">100"
+ ],
+ "marker_positions": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "mask_token": "[MASK]",
+ "max_tokens": 11,
+ "output": "level_probabilities[5]; score = sum(p[i] * i)",
+ "pad_id": 0,
+ "prefix_ids": [
+  2,
+  2,
+  2,
+  2,
+  2,
+  1
+ ],
+ "room": 4,
+ "schema": "lfg.dev-model-input.v1",
+ "sep_id": 1,
+ "tokenizer_sha256": "5dd2eb782f905bde3f7c79b70766d141c4d4fbaeb11e63fc5c90624ca758afd8"
+}
