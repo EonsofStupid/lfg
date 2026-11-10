@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 mod boundary_questions;
+mod codex_runs;
 mod dev_stats;
 mod devpulse_context;
 mod feedback;
@@ -352,7 +353,6 @@ pub fn router(state: AppState) -> Router {
             post(lfg_preflight),
         )
         .route("/api/shippin/intelligence/lfg/plans", post(lfg_commit_plan))
-        .route("/api/shippin/intelligence/lfg/runs", post(lfg_run_codex))
         .route("/api/shippin/intelligence/lfg/signals", get(lfg_signals))
         .route(
             "/api/shippin/intelligence/lfg/signals/replay",
@@ -402,9 +402,12 @@ pub fn router(state: AppState) -> Router {
 
 /// Adds the private feedback API only after the actual listener identity is known.
 pub fn router_with_listener(state: AppState, listener: std::net::SocketAddr) -> Router {
+    // Codex runs need the listener's identity and a local token, so they are not in `router`.
+    let codex_runs = codex_runs::routes(state.clone(), listener);
     router(state)
         .merge(feedback::FeedbackApi::for_listener(listener).routes())
         .merge(owned_assessment::routes(listener))
+        .merge(codex_runs)
 }
 
 pub fn router_with_ui_and_listener(
