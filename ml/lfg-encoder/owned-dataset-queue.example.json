@@ -1,0 +1,22 @@
+{
+  "schema_version": "lfg.owned-dataset-queue.v1",
+  "python": "/PATH/TO/PYTHON",
+  "supervisor": "/PATH/TO/owned_training_service.py",
+  "trainer": "/PATH/TO/train_owned_assessment_sft.py",
+  "sft_config": "/PATH/TO/PRIVATE_SFT_CONFIG.json",
+  "initial_state": "/PATH/TO/INITIAL_ASSESSMENT_STATE",
+  "baseline_dataset": "/PATH/TO/INITIAL_PRIVATE_TRAIN_DATASET",
+  "inbox": "/PATH/TO/PRIVATE_DATASET_INBOX",
+  "queue_state": "/PATH/TO/NEW_PRIVATE_QUEUE_STATE",
+  "segment_steps": 200,
+  "poll_seconds": 30,
+  "progress_poll_seconds": 5,
+  "max_manifest_bytes": 33554432,
+  "max_dataset_bytes": 16777216,
+  "max_checkpoint_bytes": 268435456,
+  "max_datasets": 1000,
+  "allow_record_revisions": false,
+  "fit_context_to_data": true,
+  "max_context": 6144,
+  "context_multiple": 256
+}

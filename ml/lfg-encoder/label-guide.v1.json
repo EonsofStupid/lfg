@@ -1,0 +1,26 @@
+{
+  "schema_version": "lfg.review-label-guide.v1",
+  "revision": "draft-1",
+  "notice": "Draft guidance: an unchecked label is a negative. If the request, source, privacy or any label is uncertain, skip or reject it. Labels do not grant permission.",
+  "labels": {
+    "intents": {
+      "respond.general": {"apply": "Explain, summarize, or answer without a more specific supported intent.", "boundary": "Do not add merely because another action will receive a response."},
+      "build.software": {"apply": "Create or modify software, configuration, or code-bearing tooling.", "boundary": "Discussion or a read-only explanation of software is not enough."},
+      "verify.outcome": {"apply": "Test, reproduce, or check a concrete behavior or result.", "boundary": "Discussing tests without asking for verification is not enough."},
+      "research.web": {"apply": "Seek information that requires external web sources.", "boundary": "A local document or a mentioned URL alone does not establish web access."},
+      "create.image": {"apply": "Produce or edit an image.", "boundary": "Mentioning an image, interface, or visualization as a topic is not enough."},
+      "evaluate.semantic": {"apply": "Compare or grade quality against criteria.", "boundary": "A simple pass/fail check alone is not semantic grading."}
+    },
+    "capabilities": {
+      "text.generate": {"apply": "A general explanatory or summary response is required.", "boundary": "Do not add automatically to every task."},
+      "filesystem.write": {"apply": "Creating or modifying project files is required.", "boundary": "Do not infer writes from a read-only investigation or explanation."},
+      "test.execute": {"apply": "Running tests, experiments, or commands is needed to check behavior.", "boundary": "Explaining a test conceptually does not require executing it."},
+      "web.access": {"apply": "Accessing external web sources is needed.", "boundary": "Reading local documents alone is not web access."},
+      "image.generate": {"apply": "Generating or editing an image is needed.", "boundary": "Discussing an image alone does not require it."},
+      "evaluation.grade": {"apply": "Assessing candidate quality against criteria is needed.", "boundary": "An ordinary boolean check is verification, not semantic grading."}
+    },
+    "risks": {
+      "sensitive-data": {"apply": "The request contains or asks to expose or manipulate secret or private data requiring special handling.", "boundary": "Mentioning authentication, prompt injection, or a token budget alone is insufficient; an empty risk list does not mean a task is safe."}
+    }
+  }
+}

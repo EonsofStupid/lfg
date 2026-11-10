@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "lfg.project-attunement.v1",
+  "revision": "rrflow-local-example-v1",
+  "sourceApp": "rrflow-local-project",
+  "selections": [
+    {"bankId": "core"},
+    {"bankId": "rust"}
+  ],
+  "limits": {"maxEntries": 5000, "maxDepth": 12, "maxFileBytes": 1048576},
+  "sources": [
+    {"kind": "inventory", "binding": "module inventory", "path": "crates/kernel/rrd-core/src", "recursive": true, "extensions": ["rs"]},
+    {"kind": "inventory", "binding": "file tree", "path": "crates/kernel", "recursive": true, "extensions": []},
+    {"kind": "text", "binding": "workspace layout", "path": "Cargo.toml"}
+  ]
+}

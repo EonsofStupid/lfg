@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clyffy Grounded Delivery"
+  short_description: "Ground, route, and verify Clyffy implementation handoffs"
+  default_prompt: "Ground this project task, create a verifiable handoff, and route bounded execution using the configured models."

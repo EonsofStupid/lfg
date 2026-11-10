@@ -1,0 +1,110 @@
+name: Verify and merge completed work
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge') && github.event.repository.private && vars.LFG_CHECKED_MERGE_RUNNER) || '"ubuntu-latest"') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Test and build UI
+        working-directory: ui/master-clyffy-web
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test Rust and embedded UI
+        run: cargo test --locked --workspace --features lfg-server/embedded-ui
+      - name: Record the deterministic kernel golden
+        shell: bash
+        run: |
+          cargo run --locked -q -p lfg-server -- classify "logout doesn't clear the session" > target/kernel-logout.actual.json
+          cmp crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
+          sha256sum crates/lfg-server/tests/fixtures/kernel-logout.v1.json target/kernel-logout.actual.json
+      - name: Keep the kernel golden output
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kernel-logout-golden
+          path: target/kernel-logout.actual.json
+          if-no-files-found: warn
+      - name: Check optional native inference
+        run: cargo check --locked --workspace --all-targets --features lfg-server/embedded-ui,lfg-server/onnx-shadow
+      - name: Install classifier comparison test dependencies
+        run: python -m pip install -r ml/lfg-encoder/requirements-classifier-comparison.txt
+      - name: Install CPU PyTorch for masked supervision tests
+        run: python -m pip install 'torch==2.14.1+cpu' --index-url https://download.pytorch.org/whl/cpu
+      - name: Test dataset and evaluation tools
+        run: python -m unittest discover -s ml/lfg-encoder -p 'test_*.py'
+
+  merge:
+    needs: verify
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'ready-to-auto-merge')
+    runs-on: ${{ fromJSON((github.event.repository.private && vars.LFG_CHECKED_MERGE_RUNNER) || '"ubuntu-latest"') }}
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Wait for the matching full CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TESTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          TESTED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 ci/check_ci_run.py --repository "$REPOSITORY" --pull-request "$PR_NUMBER"
+          --head "$TESTED_HEAD" --base "$TESTED_BASE" --timeout-seconds 2100 --poll-seconds 20
+          --required-job rust --required-job python-ml --required-job ui --required-job container
+      - name: Merge only the tested head against the tested base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TESTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          TESTED_BASE: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
+          live_head=$(jq -r '.head.sha' <<< "$pr")
+          live_base=$(gh api "repos/$REPOSITORY/branches/main" --jq '.commit.sha')
+          jq -e --arg repo "$REPOSITORY" '
+            .state == "open" and .draft == false and .base.ref == "main" and
+            .head.repo.full_name == $repo and
+            any(.labels[]; .name == "ready-to-auto-merge")
+          ' <<< "$pr" >/dev/null
+          if [[ "$live_head" != "$TESTED_HEAD" || "$live_base" != "$TESTED_BASE" ]]; then
+            echo 'Head or base changed after this run started; a new verification run is required.' >&2
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --merge --match-head-commit "$TESTED_HEAD"

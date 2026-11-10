@@ -1,6 +1,6 @@
 {
   "schemaVersion": "lfg.intake-template.v1",
-  "revision": "baseline-1",
+  "revision": "baseline-2",
   "blockedKeys": ["password", "secret", "apiKey", "api_key", "accessToken", "access_token", "refreshToken", "refresh_token", "authorization", "cookie", "privateKey", "private_key", "credential"],
   "blockedValuePrefixes": ["sk-", "ghp_", "gho_", "AKIA", "AIza", "ya29.", "-----BEGIN"],
   "questions": [
@@ -11,6 +11,11 @@
     {"id": "model_capabilities", "question": "What models, strengths, and effort settings are available through those connections?", "sourcePath": "/models", "kind": "array", "required": true},
     {"id": "tools", "question": "Which tools and MCP connections may this project use?", "sourcePath": "/tools", "kind": "array", "required": false},
     {"id": "integration", "question": "Which orchestration integrations are configured?", "sourcePath": "/integrations", "kind": "array", "required": false},
+    {"id": "deployment", "question": "Where should LFG run, and which local, hosted, or cloud connections are configured?", "sourcePath": "/deployment", "kind": "object", "required": false},
+    {"id": "analysis_input", "question": "Which prompt inputs and modalities may LFG analyze, and what input limits apply?", "sourcePath": "/analysis/input", "kind": "object", "required": false},
+    {"id": "analysis_output", "question": "Which datapoints does the app need, including their units, provenance, and handling of unknown or inconclusive results?", "sourcePath": "/analysis/output", "kind": "object", "required": false},
+    {"id": "observability", "question": "Which timing, CPU, resource, and debugging measurements should be collected and shown?", "sourcePath": "/observability", "kind": "object", "required": false},
+    {"id": "updates", "question": "How should configuration, model, and weight updates be verified and delivered?", "sourcePath": "/updates", "kind": "object", "required": false},
     {"id": "verification", "question": "How should the result be checked?", "sourcePath": "/request/verification", "kind": "string", "required": false},
     {"id": "limits", "question": "What time, cost, resource, and privacy limits apply?", "sourcePath": "/limits", "kind": "object", "required": false},
     {"id": "training_sources", "question": "Which project data sources are authorized for training?", "sourcePath": "/training/sources", "kind": "array", "required": false}

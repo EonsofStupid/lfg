@@ -8,6 +8,10 @@ use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+pub mod assessment;
+pub mod kernel;
+pub mod observation;
+
 pub const PROTOCOL_VERSION: &str = "lfg.payload-signal.v0.3.0";
 pub const CLOUD_EVENTS_VERSION: &str = "1.0";
 pub const CONTROL_DATA_SCHEMA: &str = "urn:clyffy:schema:lfg:control-data:v1";
@@ -544,6 +548,10 @@ pub fn grade_request(
 pub struct VariantStatistics {
     pub variant_id: String,
     pub samples: usize,
+    /// Grader-run IDs are caller-supplied; distinct runs do not prove independence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grader_runs: Option<usize>,
+    /// Number whose independence is verified. The current grade protocol cannot verify it.
     pub independent_graders: usize,
     pub mean_score: f64,
     pub pass_rate: f64,
@@ -575,33 +583,48 @@ pub fn experiment_statistics(
     let variants = grouped
         .into_iter()
         .map(|(variant_id, values)| {
-            let outcomes = values
-                .iter()
-                .map(|grade| grade.outcome_id.as_str())
-                .collect::<BTreeSet<_>>();
+            let mut outcomes = BTreeMap::<&str, Vec<&SemanticGrade>>::new();
+            for grade in &values {
+                outcomes.entry(&grade.outcome_id).or_default().push(grade);
+            }
             let graders = values
                 .iter()
                 .map(|grade| grade.grader_run_id.as_str())
                 .collect::<BTreeSet<_>>();
             let samples = outcomes.len();
-            let mean_score = if values.is_empty() {
+            let mean_score = if outcomes.is_empty() {
                 0.0
             } else {
-                values.iter().map(|grade| grade.overall_score).sum::<f64>() / values.len() as f64
+                outcomes
+                    .values()
+                    .map(|grades| {
+                        grades.iter().map(|grade| grade.overall_score).sum::<f64>()
+                            / grades.len() as f64
+                    })
+                    .sum::<f64>()
+                    / samples as f64
             };
-            let pass_rate = if values.is_empty() {
+            let pass_rate = if outcomes.is_empty() {
                 0.0
             } else {
-                values
-                    .iter()
-                    .filter(|grade| grade.verdict == "pass")
-                    .count() as f64
-                    / values.len() as f64
+                outcomes
+                    .values()
+                    .map(|grades| {
+                        grades
+                            .iter()
+                            .filter(|grade| grade.verdict == "pass")
+                            .count() as f64
+                            / grades.len() as f64
+                    })
+                    .sum::<f64>()
+                    / samples as f64
             };
             VariantStatistics {
                 variant_id,
                 samples,
-                independent_graders: graders.len(),
+                grader_runs: Some(graders.len()),
+                // Run IDs do not identify graders or provide evidence of independence.
+                independent_graders: 0,
                 mean_score,
                 pass_rate,
                 failure_rate: 1.0 - pass_rate,
@@ -651,6 +674,9 @@ pub fn promotion_recommendation(
     candidate: &str,
     policy: &PromotionPolicy,
 ) -> String {
+    if baseline.trim().is_empty() || candidate.trim().is_empty() || baseline == candidate {
+        return "invalid-comparison".into();
+    }
     let baseline = statistics
         .variants
         .iter()
@@ -662,11 +688,17 @@ pub fn promotion_recommendation(
     let (Some(baseline), Some(candidate)) = (baseline, candidate) else {
         return "insufficient-sample".into();
     };
-    if [baseline, candidate].iter().any(|variant| {
-        variant.samples < policy.minimum_samples_per_arm
-            || variant.independent_graders < policy.min_independent_graders
-    }) {
+    if [baseline, candidate]
+        .iter()
+        .any(|variant| variant.samples < policy.minimum_samples_per_arm)
+    {
         return "insufficient-sample".into();
+    }
+    if [baseline, candidate]
+        .iter()
+        .any(|variant| variant.independent_graders < policy.min_independent_graders)
+    {
+        return "insufficient-independent-evidence".into();
     }
     if candidate.pass_rate < policy.minimum_pass_rate
         || candidate.failure_rate > policy.maximum_failure_rate
@@ -836,6 +868,10 @@ impl CpuRuleEncoder {
         let config = PreflightRuleConfig::from_json_str(&encoded)?;
         let manifest = ManifestRef::new("lfg-cpu-rule-baseline", &config.revision, &encoded);
         Ok(Self { config, manifest })
+    }
+
+    pub fn config(&self) -> &PreflightRuleConfig {
+        &self.config
     }
 }
 
@@ -1847,6 +1883,71 @@ mod tests {
             grade_request(request, &rubric),
             Err(ProtocolError::InvalidPlan(_))
         ));
+    }
+
+    #[test]
+    fn semantic_statistics_weight_outcomes_equally_and_do_not_infer_independence() {
+        let rubric = EvaluationRubric::default_alpha();
+        let make_grade = |variant: &str, outcome: &str, grader: String, score: f64| {
+            grade_request(
+                SemanticGradeRequest {
+                    experiment_id: "exp".into(),
+                    variant_id: variant.into(),
+                    outcome_id: outcome.into(),
+                    grader_run_id: grader,
+                    scores: rubric
+                        .criteria
+                        .keys()
+                        .map(|key| (key.clone(), score))
+                        .collect(),
+                },
+                &rubric,
+            )
+            .unwrap()
+        };
+        let mut grades = (0..9)
+            .map(|i| make_grade("candidate", "one", format!("run-{i}"), 1.0))
+            .collect::<Vec<_>>();
+        grades.push(make_grade("candidate", "two", "run-other".into(), 0.0));
+        grades.push(make_grade(
+            "baseline",
+            "baseline-outcome",
+            "baseline-grader".into(),
+            0.4,
+        ));
+        let stats = experiment_statistics("exp", &grades);
+        let candidate = stats
+            .variants
+            .iter()
+            .find(|v| v.variant_id == "candidate")
+            .unwrap();
+        assert_eq!(candidate.samples, 2);
+        assert_eq!(candidate.grader_runs, Some(10));
+        assert_eq!(candidate.independent_graders, 0);
+        assert!((candidate.mean_score - 0.5).abs() < 1e-12);
+        assert!((candidate.pass_rate - 0.5).abs() < 1e-12);
+        let mut policy = PromotionPolicy::default_alpha();
+        policy.minimum_samples_per_arm = 1;
+        policy.min_independent_graders = 1;
+        assert_eq!(
+            promotion_recommendation(&stats, "baseline", "candidate", &policy),
+            "insufficient-independent-evidence"
+        );
+        assert_eq!(
+            promotion_recommendation(&stats, "candidate", "candidate", &policy),
+            "invalid-comparison"
+        );
+    }
+
+    #[test]
+    fn legacy_statistics_deserialize_without_inventing_grader_run_counts() {
+        let historical = json!({
+            "variantId":"historical", "samples":1, "independentGraders":2,
+            "meanScore":0.5, "passRate":0.5, "failureRate":0.5
+        });
+        let stats: VariantStatistics = serde_json::from_value(historical.clone()).unwrap();
+        assert_eq!(stats.grader_runs, None);
+        assert_eq!(serde_json::to_value(stats).unwrap(), historical);
     }
 
     #[test]

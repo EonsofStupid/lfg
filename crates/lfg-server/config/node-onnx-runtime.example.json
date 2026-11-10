@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "lfg.node-onnx-runtime.v1",
+  "revision": "local-example-v1",
+  "cpuThreads": 1,
+  "maxManifestBytes": 131072,
+  "maxTokenizerBytes": 8388608,
+  "maxModelBytes": 1500000000,
+  "maxSequenceTokens": 2048,
+  "maxDimensions": 4096,
+  "maxExamples": 100000,
+  "maxPromptBytes": 65536,
+  "unitNormTolerance": 0.001
+}

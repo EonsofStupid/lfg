@@ -1,0 +1,14 @@
+{
+  "schema_version": "lfg.owned-evaluation-chain.v1",
+  "python": "/PATH/TO/PYTHON",
+  "evaluator": "/PATH/TO/evaluate_owned_torch_format.py",
+  "source_state": "/PATH/TO/PRIVATE_ASSESSMENT_STATE",
+  "dataset": "/PATH/TO/PRIVATE_DEVELOPMENT_DATASET",
+  "policy": "/PATH/TO/PRIVATE_SCREEN_POLICY.json",
+  "evaluation_config": "/PATH/TO/PRIVATE_EVALUATION_CONFIG.json",
+  "output": "/PATH/TO/NEW_PRIVATE_REPORT_DIRECTORY",
+  "device": "cuda",
+  "threads": 2,
+  "poll_seconds": 30,
+  "max_checkpoint_bytes": 268435456
+}

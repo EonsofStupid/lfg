@@ -1,0 +1,18 @@
+{
+  "schema_version": "lfg.owned-training-service.v1",
+  "python": "/PATH/TO/PYTHON",
+  "trainer": "/PATH/TO/train_owned_distill_resumable.py",
+  "student_config": "/PATH/TO/PRIVATE_STUDENT_CONFIG.json",
+  "distillation_config": "/PATH/TO/PRIVATE_DISTILLATION_CONFIG.json",
+  "runtime_config": "/PATH/TO/PRIVATE_RUNTIME_CONFIG.json",
+  "corpus_plan": "/PATH/TO/PRIVATE_TRAIN_PLAN.json",
+  "screen_policy": "/PATH/TO/PRIVATE_SCREEN_POLICY.json",
+  "teacher_manifest": "/PATH/TO/PRIVATE_TEACHER_MANIFEST.json",
+  "teacher_weights": "/PATH/TO/PRIVATE_TEACHER_SNAPSHOT",
+  "teacher_format": "gpt2-byte",
+  "teacher_revision": "REPLACE_WITH_PINNED_REVISION",
+  "state_dir": "/PATH/TO/NEW_PRIVATE_STATE_DIRECTORY",
+  "segment_steps": 250,
+  "status_poll_seconds": 30,
+  "max_checkpoint_state_bytes": 67108864
+}

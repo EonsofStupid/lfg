@@ -1,0 +1,3530 @@
+{
+  "schemaVersion": "lfg.boundary-question-banks.v1",
+  "revision": "source-drafts-2026-09-30",
+  "sourceNotice": "Transcribed from owner-authored draft question banks; publication here does not imply ratification, execution, or verified technical claims.",
+  "banks": [
+    {
+      "id": "core",
+      "title": "Core Predicates (Draft v0.2)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "core.a.1",
+          "section": "A",
+          "number": 1,
+          "question": "Does this module have one cohesive responsibility?",
+          "sourceTerm": "Cohesion",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.2",
+          "section": "A",
+          "number": 2,
+          "question": "Is coupling to other modules limited to their explicit interfaces (no reaching into internals)?",
+          "sourceTerm": "Coupling",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.3",
+          "section": "A",
+          "number": 3,
+          "question": "Is the internal representation hidden behind an interface?",
+          "sourceTerm": "Encapsulation and information hiding",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.4",
+          "section": "A",
+          "number": 4,
+          "question": "Can the implementation change without changing callers?",
+          "sourceTerm": "Separation of interface and implementation",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.5",
+          "section": "A",
+          "number": 5,
+          "question": "Is each concern (domain logic, persistence, presentation, cross-cutting) handled in exactly one place?",
+          "sourceTerm": "Separation of concerns",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.6",
+          "section": "A",
+          "number": 6,
+          "question": "Does every responsibility in this change have a home module, with none left floating?",
+          "sourceTerm": "Decomposition and modularization",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.7",
+          "section": "A",
+          "number": 7,
+          "question": "Does the abstraction expose only what callers need, and everything they need?",
+          "sourceTerm": "Sufficiency, completeness, primitiveness",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.a.8",
+          "section": "A",
+          "number": 8,
+          "question": "Does this reinvent something the codebase already provides?",
+          "sourceTerm": "Abstraction / reuse",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": "module inventory"
+        },
+        {
+          "id": "core.a.9",
+          "section": "A",
+          "number": 9,
+          "question": "Is an established design pattern applied where one fits, rather than reinvented?",
+          "sourceTerm": "Design patterns",
+          "domain": "SWEBOK Software Design / SE2014 DES / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.b.1",
+          "section": "B",
+          "number": 1,
+          "question": "Is shared state and its synchronization explicit?",
+          "sourceTerm": "Concurrency",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.b.2",
+          "section": "B",
+          "number": 2,
+          "question": "For each failure this code can produce, is the handler identified?",
+          "sourceTerm": "Error and exception handling and fault tolerance",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.b.3",
+          "section": "B",
+          "number": 3,
+          "question": "Is persistence isolated from domain logic?",
+          "sourceTerm": "Data persistence",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.b.4",
+          "section": "B",
+          "number": 4,
+          "question": "Is control flow explicit rather than hidden in side effects?",
+          "sourceTerm": "Control and handling of events",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.b.5",
+          "section": "B",
+          "number": 5,
+          "question": "Is there exactly one source of truth for this piece of state?",
+          "sourceTerm": "Data persistence / data management",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.b.6",
+          "section": "B",
+          "number": 6,
+          "question": "Where components are distributed, is the boundary between them explicit?",
+          "sourceTerm": "Distribution of components",
+          "domain": "SWEBOK Software Design (Key Issues) / SE2014 DES",
+          "binding": null
+        },
+        {
+          "id": "core.c.1",
+          "section": "C",
+          "number": 1,
+          "question": "Does this change respect the existing layer and boundary rules?",
+          "sourceTerm": "Architectural style / structure",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": "boundary map"
+        },
+        {
+          "id": "core.c.2",
+          "section": "C",
+          "number": 2,
+          "question": "Does this introduce a new dependency direction (a lower layer now depending on a higher one)?",
+          "sourceTerm": "Dependency structure",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.c.3",
+          "section": "C",
+          "number": 3,
+          "question": "Is the architectural decision recorded with its rationale?",
+          "sourceTerm": "Architecture description / design rationale",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": "ADR store"
+        },
+        {
+          "id": "core.c.4",
+          "section": "C",
+          "number": 4,
+          "question": "Does this make anything harder to delete or replace?",
+          "sourceTerm": "Modifiability",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.c.5",
+          "section": "C",
+          "number": 5,
+          "question": "Does this introduce a circular dependency?",
+          "sourceTerm": "Dependency structure",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": null
+        },
+        {
+          "id": "core.c.6",
+          "section": "C",
+          "number": 6,
+          "question": "Is this consistent with decisions already ratified in the ADR store, and does it contradict none of them?",
+          "sourceTerm": "Design rationale; settled decisions",
+          "domain": "SWEBOK Software Architecture / SE2014 DES (architectural design) / CS2023 SE: Software Design",
+          "binding": "ADR store"
+        },
+        {
+          "id": "core.d.1",
+          "section": "D",
+          "number": 1,
+          "question": "Is this the simplest construction that satisfies the requirement?",
+          "sourceTerm": "Minimizing complexity",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": null
+        },
+        {
+          "id": "core.d.2",
+          "section": "D",
+          "number": 2,
+          "question": "Is the expected change localized to one place?",
+          "sourceTerm": "Anticipating change",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": null
+        },
+        {
+          "id": "core.d.3",
+          "section": "D",
+          "number": 3,
+          "question": "Can this be verified without modifying it?",
+          "sourceTerm": "Constructing for verification",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": null
+        },
+        {
+          "id": "core.d.4",
+          "section": "D",
+          "number": 4,
+          "question": "Does this reuse existing code or library rather than duplicate it?",
+          "sourceTerm": "Reuse",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": null
+        },
+        {
+          "id": "core.d.5",
+          "section": "D",
+          "number": 5,
+          "question": "Does this follow the project coding standard?",
+          "sourceTerm": "Standards in construction",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": "style guide / linter config"
+        },
+        {
+          "id": "core.d.6",
+          "section": "D",
+          "number": 6,
+          "question": "Is this configurable because a stated need requires it, not speculative generality?",
+          "sourceTerm": "Anticipating change",
+          "domain": "SWEBOK Software Construction (Fundamentals) / SE2014 CMP, DES / CS2023 SE: Software Construction",
+          "binding": null
+        },
+        {
+          "id": "core.e.1",
+          "section": "E",
+          "number": 1,
+          "question": "Are identifiers the same canonical names used elsewhere for the same thing?",
+          "sourceTerm": "Naming conventions",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "core.e.2",
+          "section": "E",
+          "number": 2,
+          "question": "Is the folder and file placement consistent with the existing structure?",
+          "sourceTerm": "Source code organization",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": "file tree"
+        },
+        {
+          "id": "core.e.3",
+          "section": "E",
+          "number": 3,
+          "question": "Are inputs at boundaries validated or asserted?",
+          "sourceTerm": "Defensive programming",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.4",
+          "section": "E",
+          "number": 4,
+          "question": "Are acquired resources (files, connections, memory, handles) bounded and released?",
+          "sourceTerm": "Resource management",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.5",
+          "section": "E",
+          "number": 5,
+          "question": "Are literal values replaced by named constants or configuration?",
+          "sourceTerm": "Coding practices",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.6",
+          "section": "E",
+          "number": 6,
+          "question": "Does the code express its intent without needing an external explanation?",
+          "sourceTerm": "Code documentation",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.7",
+          "section": "E",
+          "number": 7,
+          "question": "Is dead or unreachable code removed?",
+          "sourceTerm": "Code quality",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.8",
+          "section": "E",
+          "number": 8,
+          "question": "Is the operation safe to run twice?",
+          "sourceTerm": "Idempotence",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.e.9",
+          "section": "E",
+          "number": 9,
+          "question": "Does this introduce a dead name — a term retired elsewhere in the system?",
+          "sourceTerm": "Naming conventions",
+          "domain": "SWEBOK Software Construction (Practical Considerations) / SE2014 CMP",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "core.f.1",
+          "section": "F",
+          "number": 1,
+          "question": "Is the requirement stated as what, not how, before construction?",
+          "sourceTerm": "Requirements specification",
+          "domain": "SWEBOK Software Requirements / SE2014 REQ / CS2023 SE: Requirements Engineering",
+          "binding": null
+        },
+        {
+          "id": "core.f.2",
+          "section": "F",
+          "number": 2,
+          "question": "Is there an acceptance criterion that can be checked?",
+          "sourceTerm": "Verifiable requirements",
+          "domain": "SWEBOK Software Requirements / SE2014 REQ / CS2023 SE: Requirements Engineering",
+          "binding": null
+        },
+        {
+          "id": "core.f.3",
+          "section": "F",
+          "number": 3,
+          "question": "Are non-functional requirements (performance, security, reliability) explicit?",
+          "sourceTerm": "Quality attributes / non-functional requirements",
+          "domain": "SWEBOK Software Requirements / SE2014 REQ / CS2023 SE: Requirements Engineering",
+          "binding": null
+        },
+        {
+          "id": "core.f.4",
+          "section": "F",
+          "number": 4,
+          "question": "Is this change traceable to a requirement or decision?",
+          "sourceTerm": "Requirements tracing",
+          "domain": "SWEBOK Software Requirements / SE2014 REQ / CS2023 SE: Requirements Engineering",
+          "binding": "task / ADR reference"
+        },
+        {
+          "id": "core.f.5",
+          "section": "F",
+          "number": 5,
+          "question": "Is the scope bounded to the stated requirement and not a speculative future one?",
+          "sourceTerm": "Requirements validation / scope",
+          "domain": "SWEBOK Software Requirements / SE2014 REQ / CS2023 SE: Requirements Engineering",
+          "binding": null
+        },
+        {
+          "id": "core.g.1",
+          "section": "G",
+          "number": 1,
+          "question": "Is there a unit test that exercises this change?",
+          "sourceTerm": "Unit testing",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.g.2",
+          "section": "G",
+          "number": 2,
+          "question": "Is the touched boundary covered by an integration test?",
+          "sourceTerm": "Integration testing",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.g.3",
+          "section": "G",
+          "number": 3,
+          "question": "Does the existing suite still pass?",
+          "sourceTerm": "Regression testing",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.g.4",
+          "section": "G",
+          "number": 4,
+          "question": "Are failure paths and edge cases tested, not only the happy path?",
+          "sourceTerm": "Boundary-value analysis, error guessing",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.g.5",
+          "section": "G",
+          "number": 5,
+          "question": "Is static analysis / lint clean?",
+          "sourceTerm": "Static analysis",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.g.6",
+          "section": "G",
+          "number": 6,
+          "question": "Has the change been reviewed or inspected?",
+          "sourceTerm": "Reviews and inspections",
+          "domain": "SWEBOK Software Testing, Software Quality / SE2014 VAV / CS2023 SE: Software Verification and Validation",
+          "binding": null
+        },
+        {
+          "id": "core.h.1",
+          "section": "H",
+          "number": 1,
+          "question": "Does this preserve or improve maintainability (analyzability, modifiability, testability)?",
+          "sourceTerm": "Maintainability quality attributes",
+          "domain": "SWEBOK Software Quality, Software Maintenance / SE2014 QUA / CS2023 SE: Refactoring and Code Evolution",
+          "binding": null
+        },
+        {
+          "id": "core.h.2",
+          "section": "H",
+          "number": 2,
+          "question": "If technical debt is introduced, is it recorded?",
+          "sourceTerm": "Technical debt",
+          "domain": "SWEBOK Software Quality, Software Maintenance / SE2014 QUA / CS2023 SE: Refactoring and Code Evolution",
+          "binding": "debt register"
+        },
+        {
+          "id": "core.h.3",
+          "section": "H",
+          "number": 3,
+          "question": "If this is a refactoring, is it behavior-preserving?",
+          "sourceTerm": "Refactoring",
+          "domain": "SWEBOK Software Quality, Software Maintenance / SE2014 QUA / CS2023 SE: Refactoring and Code Evolution",
+          "binding": null
+        },
+        {
+          "id": "core.h.4",
+          "section": "H",
+          "number": 4,
+          "question": "Is the change's blast radius identified (what else depends on this)?",
+          "sourceTerm": "Impact analysis",
+          "domain": "SWEBOK Software Quality, Software Maintenance / SE2014 QUA / CS2023 SE: Refactoring and Code Evolution",
+          "binding": null
+        },
+        {
+          "id": "core.i.1",
+          "section": "I",
+          "number": 1,
+          "question": "Is the change on a version-controlled branch with a descriptive commit?",
+          "sourceTerm": "Configuration control",
+          "domain": "SWEBOK Software Configuration Management / SE2014 PRO, PRF",
+          "binding": null
+        },
+        {
+          "id": "core.i.2",
+          "section": "I",
+          "number": 2,
+          "question": "Are dependencies and toolchain versions identified and pinned?",
+          "sourceTerm": "Configuration identification",
+          "domain": "SWEBOK Software Configuration Management / SE2014 PRO, PRF",
+          "binding": null
+        },
+        {
+          "id": "core.i.3",
+          "section": "I",
+          "number": 3,
+          "question": "Is the build reproducible from a clean checkout?",
+          "sourceTerm": "Build management",
+          "domain": "SWEBOK Software Configuration Management / SE2014 PRO, PRF",
+          "binding": null
+        },
+        {
+          "id": "core.i.4",
+          "section": "I",
+          "number": 4,
+          "question": "Is the version bumped where the public surface changed?",
+          "sourceTerm": "Release management",
+          "domain": "SWEBOK Software Configuration Management / SE2014 PRO, PRF",
+          "binding": null
+        },
+        {
+          "id": "core.j.1",
+          "section": "J",
+          "number": 1,
+          "question": "Is the definition of done for this task explicit?",
+          "sourceTerm": "Process definition",
+          "domain": "SWEBOK Software Engineering Process / SE2014 PRO / CS2023 SE: Software Project Management",
+          "binding": null
+        },
+        {
+          "id": "core.j.2",
+          "section": "J",
+          "number": 2,
+          "question": "Is the work sized as a small, reviewable increment?",
+          "sourceTerm": "Incremental process",
+          "domain": "SWEBOK Software Engineering Process / SE2014 PRO / CS2023 SE: Software Project Management",
+          "binding": null
+        },
+        {
+          "id": "core.j.3",
+          "section": "J",
+          "number": 3,
+          "question": "Is the project mature enough that the existing file tree must be read before anything is written?",
+          "sourceTerm": "Maturity gate",
+          "domain": "SWEBOK Software Engineering Process / SE2014 PRO / CS2023 SE: Software Project Management",
+          "binding": null
+        },
+        {
+          "id": "core.j.4",
+          "section": "J",
+          "number": 4,
+          "question": "Is the operator expected to be involved at this decision point?",
+          "sourceTerm": "Operator involvement",
+          "domain": "SWEBOK Software Engineering Process / SE2014 PRO / CS2023 SE: Software Project Management",
+          "binding": null
+        },
+        {
+          "id": "core.k.1",
+          "section": "K",
+          "number": 1,
+          "question": "Is input validated at the trust boundary?",
+          "sourceTerm": "Input validation",
+          "domain": "SWEBOK Software Security / SE2014 SEC / CS2023 SEC",
+          "binding": null
+        },
+        {
+          "id": "core.k.2",
+          "section": "K",
+          "number": 2,
+          "question": "Are secrets kept out of source and logs?",
+          "sourceTerm": "Secure coding practices",
+          "domain": "SWEBOK Software Security / SE2014 SEC / CS2023 SEC",
+          "binding": null
+        },
+        {
+          "id": "core.k.3",
+          "section": "K",
+          "number": 3,
+          "question": "Is least privilege applied to any new access?",
+          "sourceTerm": "Least privilege",
+          "domain": "SWEBOK Software Security / SE2014 SEC / CS2023 SEC",
+          "binding": null
+        },
+        {
+          "id": "core.k.4",
+          "section": "K",
+          "number": 4,
+          "question": "Does this change widen the attack surface — new endpoints, inputs, permissions, or dependencies exposed?",
+          "sourceTerm": "Attack surface",
+          "domain": "SWEBOK Software Security / SE2014 SEC / CS2023 SEC",
+          "binding": null
+        },
+        {
+          "id": "core.l.1",
+          "section": "L",
+          "number": 1,
+          "question": "Is the rationale for this decision recorded where the next person will find it?",
+          "sourceTerm": "Documentation and communication",
+          "domain": "SWEBOK Software Engineering Professional Practice / SE2014 PRF",
+          "binding": null
+        },
+        {
+          "id": "core.l.2",
+          "section": "L",
+          "number": 2,
+          "question": "Would a new contributor find this discoverable without being told where to look?",
+          "sourceTerm": "Documentation and communication",
+          "domain": "SWEBOK Software Engineering Professional Practice / SE2014 PRF",
+          "binding": null
+        },
+        {
+          "id": "core.m.1",
+          "section": "M",
+          "number": 1,
+          "question": "Is the time and space complexity acceptable for the expected input size?",
+          "sourceTerm": "Complexity analysis",
+          "domain": "CS2023 Algorithmic Foundations (AL) / SE2014 CMP",
+          "binding": null
+        },
+        {
+          "id": "core.m.2",
+          "section": "M",
+          "number": 2,
+          "question": "Is the chosen data structure right for the dominant access pattern?",
+          "sourceTerm": "Data structure selection",
+          "domain": "CS2023 Algorithmic Foundations (AL) / SE2014 CMP",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "rust",
+      "title": "Stack — Rust (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "rust.ownership-borrowing-lifetimes-ch-4-10.1",
+          "section": "Ownership, Borrowing, Lifetimes (Ch 4, 10)",
+          "number": 1,
+          "question": "Is the owner of every value clear, and is each borrow scoped no longer than the data it references?",
+          "sourceTerm": "Ownership; borrowing (Ch 4)",
+          "binding": null
+        },
+        {
+          "id": "rust.ownership-borrowing-lifetimes-ch-4-10.2",
+          "section": "Ownership, Borrowing, Lifetimes (Ch 4, 10)",
+          "number": 2,
+          "question": "Are clone calls deliberate for semantics rather than used to silence the borrow checker?",
+          "sourceTerm": "Move vs clone (Ch 4)",
+          "binding": null
+        },
+        {
+          "id": "rust.ownership-borrowing-lifetimes-ch-4-10.3",
+          "section": "Ownership, Borrowing, Lifetimes (Ch 4, 10)",
+          "number": 3,
+          "question": "Are references preferred over owned copies in function parameters where the callee does not need ownership?",
+          "sourceTerm": "Borrowing in signatures (Ch 4)",
+          "binding": null
+        },
+        {
+          "id": "rust.ownership-borrowing-lifetimes-ch-4-10.4",
+          "section": "Ownership, Borrowing, Lifetimes (Ch 4, 10)",
+          "number": 4,
+          "question": "Are lifetimes elided where the rules allow and named only where the compiler requires them?",
+          "sourceTerm": "Lifetime elision (Ch 10)",
+          "binding": null
+        },
+        {
+          "id": "rust.ownership-borrowing-lifetimes-ch-4-10.5",
+          "section": "Ownership, Borrowing, Lifetimes (Ch 4, 10)",
+          "number": 5,
+          "question": "Is 'static avoided as a workaround for a lifetime the design should express?",
+          "sourceTerm": "'static lifetime (Ch 10)",
+          "binding": null
+        },
+        {
+          "id": "rust.types-structs-enums-patterns-ch-5-6-19-api-guidelines.1",
+          "section": "Types, Structs, Enums, Patterns (Ch 5, 6, 19; API Guidelines)",
+          "number": 1,
+          "question": "Are domain states modelled as enums with exhaustive match rather than booleans, strings, or sentinel values?",
+          "sourceTerm": "Enums; exhaustiveness (Ch 6, 19)",
+          "binding": null
+        },
+        {
+          "id": "rust.types-structs-enums-patterns-ch-5-6-19-api-guidelines.2",
+          "section": "Types, Structs, Enums, Patterns (Ch 5, 6, 19; API Guidelines)",
+          "number": 2,
+          "question": "Are domain identifiers and units wrapped in newtypes rather than passed as raw primitives?",
+          "sourceTerm": "Newtype (C-NEWTYPE; Ch 20)",
+          "binding": null
+        },
+        {
+          "id": "rust.types-structs-enums-patterns-ch-5-6-19-api-guidelines.3",
+          "section": "Types, Structs, Enums, Patterns (Ch 5, 6, 19; API Guidelines)",
+          "number": 3,
+          "question": "Are invariants enforced by construction — private fields, constructors that validate — so an invalid value cannot exist?",
+          "sourceTerm": "Validation; private fields (C-VALIDATE, C-STRUCT-PRIVATE)",
+          "binding": null
+        },
+        {
+          "id": "rust.types-structs-enums-patterns-ch-5-6-19-api-guidelines.4",
+          "section": "Types, Structs, Enums, Patterns (Ch 5, 6, 19; API Guidelines)",
+          "number": 4,
+          "question": "Is absence expressed with Option and never with a sentinel or a panic?",
+          "sourceTerm": "Option (Ch 6)",
+          "binding": null
+        },
+        {
+          "id": "rust.types-structs-enums-patterns-ch-5-6-19-api-guidelines.5",
+          "section": "Types, Structs, Enums, Patterns (Ch 5, 6, 19; API Guidelines)",
+          "number": 5,
+          "question": "Is destructuring used at the boundary so field access is explicit and checked?",
+          "sourceTerm": "Patterns (Ch 19)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.1",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 1,
+          "question": "Is the module tree explicit, with pub(crate) by default and pub only on the intended public surface?",
+          "sourceTerm": "Module privacy (Ch 7)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.2",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 2,
+          "question": "Does the crate and workspace split align with the boundary — one crate per boundary, not one crate for everything?",
+          "sourceTerm": "Workspaces; crate boundaries (Ch 14)",
+          "binding": "workspace layout"
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.3",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 3,
+          "question": "Is the public API re-exported from a deliberate root rather than exposing internal paths?",
+          "sourceTerm": "Re-exports (Ch 7; C-REEXPORT)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.4",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 4,
+          "question": "Are dependencies pinned by Cargo.lock, minimal in count, and audited (cargo audit or cargo deny)?",
+          "sourceTerm": "Dependencies (Cargo Book)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.5",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 5,
+          "question": "Are optional dependencies behind Cargo features rather than runtime flags?",
+          "sourceTerm": "Features (Cargo Book; C-FEATURE)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.6",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 6,
+          "question": "Is the edition current (2024) or pinned deliberately, and is rust-version declared for a library?",
+          "sourceTerm": "Edition; MSRV (Cargo Book)",
+          "binding": null
+        },
+        {
+          "id": "rust.packages-crates-modules-workspace-ch-7-14-cargo-book.7",
+          "section": "Packages, Crates, Modules, Workspace (Ch 7, 14; Cargo Book)",
+          "number": 7,
+          "question": "Is the placement of the new code consistent with the project's existing crate and module layout?",
+          "sourceTerm": "Project organization",
+          "binding": "file tree"
+        },
+        {
+          "id": "rust.error-handling-ch-9-api-guidelines.1",
+          "section": "Error Handling (Ch 9; API Guidelines)",
+          "number": 1,
+          "question": "Do fallible functions return Result with a typed error rather than panicking?",
+          "sourceTerm": "Recoverable errors (Ch 9)",
+          "binding": null
+        },
+        {
+          "id": "rust.error-handling-ch-9-api-guidelines.2",
+          "section": "Error Handling (Ch 9; API Guidelines)",
+          "number": 2,
+          "question": "Is unwrap or expect confined to tests, prototypes, and cases proven infallible with a comment?",
+          "sourceTerm": "Unwrap discipline (Ch 9)",
+          "binding": null
+        },
+        {
+          "id": "rust.error-handling-ch-9-api-guidelines.3",
+          "section": "Error Handling (Ch 9; API Guidelines)",
+          "number": 3,
+          "question": "Do error types implement Error, Debug, and Display, with structured variants at library boundaries and a catch-all only at the binary edge?",
+          "sourceTerm": "Meaningful error types (C-GOOD-ERR)",
+          "binding": null
+        },
+        {
+          "id": "rust.error-handling-ch-9-api-guidelines.4",
+          "section": "Error Handling (Ch 9; API Guidelines)",
+          "number": 4,
+          "question": "Is the ? operator used with From conversions rather than manual match-and-return?",
+          "sourceTerm": "Error propagation (Ch 9)",
+          "binding": null
+        },
+        {
+          "id": "rust.error-handling-ch-9-api-guidelines.5",
+          "section": "Error Handling (Ch 9; API Guidelines)",
+          "number": 5,
+          "question": "Are panics and error conditions documented in Panics and Errors sections?",
+          "sourceTerm": "Failure documentation (C-FAILURE)",
+          "binding": null
+        },
+        {
+          "id": "rust.traits-and-generics-ch-10-18-api-guidelines.1",
+          "section": "Traits and Generics (Ch 10, 18; API Guidelines)",
+          "number": 1,
+          "question": "Is behavior abstracted through a trait with the smallest useful surface, not a trait per struct?",
+          "sourceTerm": "Traits (Ch 10)",
+          "binding": null
+        },
+        {
+          "id": "rust.traits-and-generics-ch-10-18-api-guidelines.2",
+          "section": "Traits and Generics (Ch 10, 18; API Guidelines)",
+          "number": 2,
+          "question": "Is static dispatch (generics, impl Trait) versus dynamic dispatch (dyn Trait) chosen deliberately, with the reason recorded?",
+          "sourceTerm": "Dispatch (Ch 18)",
+          "binding": null
+        },
+        {
+          "id": "rust.traits-and-generics-ch-10-18-api-guidelines.3",
+          "section": "Traits and Generics (Ch 10, 18; API Guidelines)",
+          "number": 3,
+          "question": "Do public types eagerly implement the common traits that apply — Debug, Clone, PartialEq, Eq, Hash, Default, Send, Sync?",
+          "sourceTerm": "Common traits (C-COMMON-TRAITS, C-SEND-SYNC, C-DEBUG)",
+          "binding": null
+        },
+        {
+          "id": "rust.traits-and-generics-ch-10-18-api-guidelines.4",
+          "section": "Traits and Generics (Ch 10, 18; API Guidelines)",
+          "number": 4,
+          "question": "Are traits meant to be closed sealed against downstream implementation?",
+          "sourceTerm": "Sealed traits (C-SEALED)",
+          "binding": null
+        },
+        {
+          "id": "rust.traits-and-generics-ch-10-18-api-guidelines.5",
+          "section": "Traits and Generics (Ch 10, 18; API Guidelines)",
+          "number": 5,
+          "question": "Do conversions follow the standard traits (From, Into, TryFrom, AsRef) rather than bespoke methods?",
+          "sourceTerm": "Conversion traits (C-CONV-TRAITS)",
+          "binding": null
+        },
+        {
+          "id": "rust.naming-api-guidelines.1",
+          "section": "Naming (API Guidelines)",
+          "number": 1,
+          "question": "Do identifiers follow RFC 430 casing — UpperCamelCase types and traits, snake_case functions and modules, SCREAMING_SNAKE_CASE constants?",
+          "sourceTerm": "Casing (C-CASE)",
+          "binding": null
+        },
+        {
+          "id": "rust.naming-api-guidelines.2",
+          "section": "Naming (API Guidelines)",
+          "number": 2,
+          "question": "Do conversion methods follow as_, to_, into_ semantics by cost and ownership?",
+          "sourceTerm": "Conversion naming (C-CONV)",
+          "binding": null
+        },
+        {
+          "id": "rust.naming-api-guidelines.3",
+          "section": "Naming (API Guidelines)",
+          "number": 3,
+          "question": "Do getters omit the get_ prefix, and do collections expose iter, iter_mut, into_iter?",
+          "sourceTerm": "Getter and iterator naming (C-GETTER, C-ITER)",
+          "binding": null
+        },
+        {
+          "id": "rust.naming-api-guidelines.4",
+          "section": "Naming (API Guidelines)",
+          "number": 4,
+          "question": "Are names the same canonical names used elsewhere in this project for the same thing?",
+          "sourceTerm": "Canonical naming",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "rust.testing-and-documentation-ch-11-14-api-guidelines.1",
+          "section": "Testing and Documentation (Ch 11, 14; API Guidelines)",
+          "number": 1,
+          "question": "Are unit tests in #[cfg(test)] modules beside the code and integration tests in tests/?",
+          "sourceTerm": "Test organization (Ch 11)",
+          "binding": null
+        },
+        {
+          "id": "rust.testing-and-documentation-ch-11-14-api-guidelines.2",
+          "section": "Testing and Documentation (Ch 11, 14; API Guidelines)",
+          "number": 2,
+          "question": "Does the public API carry documentation comments with runnable examples (doc tests)?",
+          "sourceTerm": "Crate documentation; examples (C-CRATE-DOC, C-EXAMPLE)",
+          "binding": null
+        },
+        {
+          "id": "rust.testing-and-documentation-ch-11-14-api-guidelines.3",
+          "section": "Testing and Documentation (Ch 11, 14; API Guidelines)",
+          "number": 3,
+          "question": "Is the crate metadata (description, license, repository, keywords) complete for anything published?",
+          "sourceTerm": "Metadata (C-METADATA)",
+          "binding": null
+        },
+        {
+          "id": "rust.iterators-closures-performance-ch-13-performance-book.1",
+          "section": "Iterators, Closures, Performance (Ch 13; Performance Book)",
+          "number": 1,
+          "question": "Are iterator adapters used where they are clearer than index loops, with collect only when a collection is actually needed?",
+          "sourceTerm": "Iterators (Ch 13)",
+          "binding": null
+        },
+        {
+          "id": "rust.iterators-closures-performance-ch-13-performance-book.2",
+          "section": "Iterators, Closures, Performance (Ch 13; Performance Book)",
+          "number": 2,
+          "question": "Are allocations in hot paths measured before being optimized, with a benchmark for performance-sensitive code?",
+          "sourceTerm": "Measurement (Performance Book)",
+          "binding": null
+        },
+        {
+          "id": "rust.iterators-closures-performance-ch-13-performance-book.3",
+          "section": "Iterators, Closures, Performance (Ch 13; Performance Book)",
+          "number": 3,
+          "question": "Is the release profile configured deliberately (opt-level, LTO, debug symbols)?",
+          "sourceTerm": "Release profiles (Ch 14)",
+          "binding": null
+        },
+        {
+          "id": "rust.smart-pointers-and-concurrency-ch-15-16.1",
+          "section": "Smart Pointers and Concurrency (Ch 15, 16)",
+          "number": 1,
+          "question": "Is shared ownership (Rc, Arc) justified by the design rather than used by default?",
+          "sourceTerm": "Reference counting (Ch 15)",
+          "binding": null
+        },
+        {
+          "id": "rust.smart-pointers-and-concurrency-ch-15-16.2",
+          "section": "Smart Pointers and Concurrency (Ch 15, 16)",
+          "number": 2,
+          "question": "Is interior mutability (RefCell, Mutex, RwLock) minimal, and is each lock's scope kept short and documented?",
+          "sourceTerm": "Interior mutability; shared state (Ch 15, 16)",
+          "binding": null
+        },
+        {
+          "id": "rust.smart-pointers-and-concurrency-ch-15-16.3",
+          "section": "Smart Pointers and Concurrency (Ch 15, 16)",
+          "number": 3,
+          "question": "Are reference cycles impossible or broken with Weak?",
+          "sourceTerm": "Reference cycles (Ch 15)",
+          "binding": null
+        },
+        {
+          "id": "rust.smart-pointers-and-concurrency-ch-15-16.4",
+          "section": "Smart Pointers and Concurrency (Ch 15, 16)",
+          "number": 4,
+          "question": "Is message passing chosen over shared state where the design allows?",
+          "sourceTerm": "Message passing (Ch 16)",
+          "binding": null
+        },
+        {
+          "id": "rust.smart-pointers-and-concurrency-ch-15-16.5",
+          "section": "Smart Pointers and Concurrency (Ch 15, 16)",
+          "number": 5,
+          "question": "Are types that cross thread boundaries Send and Sync by design, not by unsafe impl?",
+          "sourceTerm": "Send and Sync (Ch 16; C-SEND-SYNC)",
+          "binding": null
+        },
+        {
+          "id": "rust.async-ch-17.1",
+          "section": "Async (Ch 17)",
+          "number": 1,
+          "question": "Is async used only where I/O-bound concurrency demands it, with compute-bound work on threads?",
+          "sourceTerm": "Futures, tasks, and threads (Ch 17)",
+          "binding": null
+        },
+        {
+          "id": "rust.async-ch-17.2",
+          "section": "Async (Ch 17)",
+          "number": 2,
+          "question": "Is the async runtime chosen once for the project and not mixed?",
+          "sourceTerm": "Runtime (Ch 17)",
+          "binding": "runtime choice"
+        },
+        {
+          "id": "rust.async-ch-17.3",
+          "section": "Async (Ch 17)",
+          "number": 3,
+          "question": "Are blocking calls kept off the executor (spawn_blocking or a dedicated thread)?",
+          "sourceTerm": "Blocking in async (Ch 17)",
+          "binding": null
+        },
+        {
+          "id": "rust.async-ch-17.4",
+          "section": "Async (Ch 17)",
+          "number": 4,
+          "question": "Are futures that hold resources cancellation-safe, and are timeouts explicit?",
+          "sourceTerm": "Cancellation (Ch 17)",
+          "binding": null
+        },
+        {
+          "id": "rust.async-ch-17.5",
+          "section": "Async (Ch 17)",
+          "number": 5,
+          "question": "Are Streams used for sequences of async values rather than hand-rolled loops over channels?",
+          "sourceTerm": "Streams (Ch 17)",
+          "binding": null
+        },
+        {
+          "id": "rust.unsafe-and-ffi-ch-20-rustonomicon.1",
+          "section": "Unsafe and FFI (Ch 20; Rustonomicon)",
+          "number": 1,
+          "question": "Is unsafe absent, or isolated in a minimal module with a SAFETY comment stating the invariant upheld?",
+          "sourceTerm": "Unsafe Rust (Ch 20; Rustonomicon)",
+          "binding": null
+        },
+        {
+          "id": "rust.unsafe-and-ffi-ch-20-rustonomicon.2",
+          "section": "Unsafe and FFI (Ch 20; Rustonomicon)",
+          "number": 2,
+          "question": "Is every FFI boundary wrapped in a safe API that owns the invariants?",
+          "sourceTerm": "FFI (Ch 20)",
+          "binding": null
+        },
+        {
+          "id": "rust.unsafe-and-ffi-ch-20-rustonomicon.3",
+          "section": "Unsafe and FFI (Ch 20; Rustonomicon)",
+          "number": 3,
+          "question": "Is unsafe code checked under Miri?",
+          "sourceTerm": "Miri (Book, 3rd edition)",
+          "binding": null
+        },
+        {
+          "id": "rust.unsafe-and-ffi-ch-20-rustonomicon.4",
+          "section": "Unsafe and FFI (Ch 20; Rustonomicon)",
+          "number": 4,
+          "question": "Are macros used only where functions and generics cannot express the abstraction?",
+          "sourceTerm": "Macros (Ch 20)",
+          "binding": null
+        },
+        {
+          "id": "rust.tooling-and-style.1",
+          "section": "Tooling and Style",
+          "number": 1,
+          "question": "Does the change pass cargo fmt and cargo clippy with this project's lint configuration and no new warnings?",
+          "sourceTerm": "rustfmt; Clippy",
+          "binding": "clippy and rustfmt config"
+        },
+        {
+          "id": "rust.tooling-and-style.2",
+          "section": "Tooling and Style",
+          "number": 2,
+          "question": "Is the toolchain pinned (rust-toolchain.toml) where reproducibility matters?",
+          "sourceTerm": "Toolchain (Cargo Book)",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "go",
+      "title": "Stack — Go (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "go.packages-modules-layout.1",
+          "section": "Packages, Modules, Layout",
+          "number": 1,
+          "question": "Is the code inside a module with a go.mod naming the module path, and is go.sum committed?",
+          "sourceTerm": "Modules (Modules Reference)",
+          "binding": null
+        },
+        {
+          "id": "go.packages-modules-layout.2",
+          "section": "Packages, Modules, Layout",
+          "number": 2,
+          "question": "Is each package one directory with a short, lowercase, singular name that does not stutter with its identifiers and is not util, common, or misc?",
+          "sourceTerm": "Package names (Effective Go; Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.packages-modules-layout.3",
+          "section": "Packages, Modules, Layout",
+          "number": 3,
+          "question": "Are binaries under cmd/ and non-public packages under internal/, so privacy is enforced by the toolchain?",
+          "sourceTerm": "Organizing a Go module; internal packages",
+          "binding": null
+        },
+        {
+          "id": "go.packages-modules-layout.4",
+          "section": "Packages, Modules, Layout",
+          "number": 4,
+          "question": "Is the placement consistent with this project's existing module layout?",
+          "sourceTerm": "Project organization",
+          "binding": "file tree"
+        },
+        {
+          "id": "go.packages-modules-layout.5",
+          "section": "Packages, Modules, Layout",
+          "number": 5,
+          "question": "Is the go directive set deliberately, with a toolchain directive where reproducibility matters?",
+          "sourceTerm": "Go toolchains",
+          "binding": null
+        },
+        {
+          "id": "go.packages-modules-layout.6",
+          "section": "Packages, Modules, Layout",
+          "number": 6,
+          "question": "Is the dependency set minimal, go mod tidy clean, and govulncheck run?",
+          "sourceTerm": "A little copying is better than a little dependency (Go Proverbs); Vulnerability management",
+          "binding": null
+        },
+        {
+          "id": "go.packages-modules-layout.7",
+          "section": "Packages, Modules, Layout",
+          "number": 7,
+          "question": "Are executable tool dependencies tracked with tool directives rather than a tools file workaround?",
+          "sourceTerm": "Tool directives (Go 1.24)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.1",
+          "section": "Names, Formatting, Documentation",
+          "number": 1,
+          "question": "Is all code gofmt-formatted, with imports grouped standard library first?",
+          "sourceTerm": "gofmt; imports (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.2",
+          "section": "Names, Formatting, Documentation",
+          "number": 2,
+          "question": "Are identifiers MixedCaps with consistent initialisms (URL, ID, HTTP) and no underscores?",
+          "sourceTerm": "Mixed caps; initialisms (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.3",
+          "section": "Names, Formatting, Documentation",
+          "number": 3,
+          "question": "Do getters omit the Get prefix, and do single-method interfaces end in -er?",
+          "sourceTerm": "Getters; interface names (Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.4",
+          "section": "Names, Formatting, Documentation",
+          "number": 4,
+          "question": "Are receiver names short, consistent across a type's methods, and never this or self?",
+          "sourceTerm": "Receiver names (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.5",
+          "section": "Names, Formatting, Documentation",
+          "number": 5,
+          "question": "Does every exported identifier carry a doc comment beginning with its name, and every package a package comment?",
+          "sourceTerm": "Doc comments; package comments (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.6",
+          "section": "Names, Formatting, Documentation",
+          "number": 6,
+          "question": "Are variable names short in small scopes and descriptive in large ones?",
+          "sourceTerm": "Variable names (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.names-formatting-documentation.7",
+          "section": "Names, Formatting, Documentation",
+          "number": 7,
+          "question": "Are names the same canonical names used elsewhere in this project for the same thing?",
+          "sourceTerm": "Canonical naming",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.1",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 1,
+          "question": "Are interfaces defined on the consumer side and kept to one or two methods?",
+          "sourceTerm": "Interfaces (Code Review Comments); The bigger the interface, the weaker the abstraction (Go Proverbs)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.2",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 2,
+          "question": "Do functions accept interfaces and return concrete types?",
+          "sourceTerm": "Accept interfaces, return structs (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.3",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 3,
+          "question": "Is composition via embedding used rather than simulated inheritance?",
+          "sourceTerm": "Embedding (Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.4",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 4,
+          "question": "Is the zero value of each type useful, with a constructor only where invariants require one?",
+          "sourceTerm": "Make the zero value useful (Go Proverbs; Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.5",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 5,
+          "question": "Is the receiver kind (pointer or value) chosen once per type and applied to all its methods?",
+          "sourceTerm": "Receiver type (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.6",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 6,
+          "question": "Where a type is intended to satisfy an interface, is a compile-time interface check present?",
+          "sourceTerm": "Interface checks (Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.7",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 7,
+          "question": "Are type parameters used only where they remove real duplication, with named constraints?",
+          "sourceTerm": "Generics (Tour; Go 1.18, generic methods 1.27)",
+          "binding": null
+        },
+        {
+          "id": "go.types-interfaces-embedding-generics.8",
+          "section": "Types, Interfaces, Embedding, Generics",
+          "number": 8,
+          "question": "Is any interface{} or any justified, rather than used to avoid a type?",
+          "sourceTerm": "interface{} says nothing (Go Proverbs)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.1",
+          "section": "Errors",
+          "number": 1,
+          "question": "Is every returned error checked, never discarded with the blank identifier?",
+          "sourceTerm": "Handle errors (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.2",
+          "section": "Errors",
+          "number": 2,
+          "question": "Are errors returned rather than panicked, with panic reserved for unrecoverable programmer errors?",
+          "sourceTerm": "Don't panic (Code Review Comments; Go Proverbs)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.3",
+          "section": "Errors",
+          "number": 3,
+          "question": "Are error strings lowercase without trailing punctuation?",
+          "sourceTerm": "Error strings (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.4",
+          "section": "Errors",
+          "number": 4,
+          "question": "Are errors wrapped with %w and inspected with errors.Is or errors.As, never by string matching?",
+          "sourceTerm": "Error wrapping (errors package, Go 1.13)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.5",
+          "section": "Errors",
+          "number": 5,
+          "question": "Are sentinel errors and custom error types exported deliberately as part of the API?",
+          "sourceTerm": "Errors are values (Go Proverbs)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.6",
+          "section": "Errors",
+          "number": 6,
+          "question": "Is the error path handled and returned early so the happy path stays unindented?",
+          "sourceTerm": "Indent error flow (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.errors.7",
+          "section": "Errors",
+          "number": 7,
+          "question": "Are in-band error values (-1, empty string, nil) replaced by a second return value?",
+          "sourceTerm": "In-band errors (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.functions-and-control-flow.1",
+          "section": "Functions and Control Flow",
+          "number": 1,
+          "question": "Are named result parameters used only where they document meaning, and naked returns avoided?",
+          "sourceTerm": "Named result parameters; naked returns (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.functions-and-control-flow.2",
+          "section": "Functions and Control Flow",
+          "number": 2,
+          "question": "Is cleanup deferred immediately after acquisition?",
+          "sourceTerm": "defer (Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.functions-and-control-flow.3",
+          "section": "Functions and Control Flow",
+          "number": 3,
+          "question": "Are functions synchronous by default, leaving concurrency to the caller?",
+          "sourceTerm": "Synchronous functions (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.functions-and-control-flow.4",
+          "section": "Functions and Control Flow",
+          "number": 4,
+          "question": "Are small values passed by value rather than by pointer for the sake of it?",
+          "sourceTerm": "Pass values (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.context.1",
+          "section": "Context",
+          "number": 1,
+          "question": "Is context.Context the first parameter, named ctx, passed explicitly and never stored in a struct?",
+          "sourceTerm": "Contexts (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.context.2",
+          "section": "Context",
+          "number": 2,
+          "question": "Are cancellation and deadlines propagated and honored (select on ctx.Done, or ctx-aware APIs)?",
+          "sourceTerm": "Cancellation (context package)",
+          "binding": null
+        },
+        {
+          "id": "go.context.3",
+          "section": "Context",
+          "number": 3,
+          "question": "Are context values limited to request-scoped data and never used to pass required parameters?",
+          "sourceTerm": "Context values (context package)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.1",
+          "section": "Concurrency",
+          "number": 1,
+          "question": "Does every goroutine have a known lifetime — who stops it, when, and how it exits?",
+          "sourceTerm": "Goroutine lifetimes (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.2",
+          "section": "Concurrency",
+          "number": 2,
+          "question": "Is channel ownership clear, with the sender the only party that closes?",
+          "sourceTerm": "Channels (Effective Go; Tour)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.3",
+          "section": "Concurrency",
+          "number": 3,
+          "question": "Is shared state either protected by a mutex or avoided by passing data over channels?",
+          "sourceTerm": "Share memory by communicating; channels orchestrate, mutexes serialize (Go Proverbs; Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.4",
+          "section": "Concurrency",
+          "number": 4,
+          "question": "Are goroutines coordinated with sync.WaitGroup (WaitGroup.Go) or errgroup, never time.Sleep?",
+          "sourceTerm": "WaitGroup (sync package, Go 1.25)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.5",
+          "section": "Concurrency",
+          "number": 5,
+          "question": "Is go test -race part of the test run?",
+          "sourceTerm": "Race detector",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.6",
+          "section": "Concurrency",
+          "number": 6,
+          "question": "Is any leftover loop-variable capture workaround removed now that loop variables are per-iteration?",
+          "sourceTerm": "Loop variable semantics (Go 1.22)",
+          "binding": null
+        },
+        {
+          "id": "go.concurrency.7",
+          "section": "Concurrency",
+          "number": 7,
+          "question": "Is concurrency introduced for a measured reason, not by default?",
+          "sourceTerm": "Concurrency is not parallelism (Go Proverbs)",
+          "binding": null
+        },
+        {
+          "id": "go.data.1",
+          "section": "Data",
+          "number": 1,
+          "question": "Is slice and map aliasing understood, with copies made deliberately where the caller may mutate?",
+          "sourceTerm": "Slices; copying (Tour; Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.data.2",
+          "section": "Data",
+          "number": 2,
+          "question": "Are empty slices declared as var s []T rather than []T{} unless a non-nil value is required (JSON)?",
+          "sourceTerm": "Declaring empty slices (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.data.3",
+          "section": "Data",
+          "number": 3,
+          "question": "Is make used to preallocate where the size is known?",
+          "sourceTerm": "make; append (Effective Go)",
+          "binding": null
+        },
+        {
+          "id": "go.data.4",
+          "section": "Data",
+          "number": 4,
+          "question": "Are time.Time and time.Duration used for time, never bare integers?",
+          "sourceTerm": "time package",
+          "binding": null
+        },
+        {
+          "id": "go.data.5",
+          "section": "Data",
+          "number": 5,
+          "question": "Are sequences exposed as iterators (iter.Seq) where range-over-func fits?",
+          "sourceTerm": "Range over func (Go 1.23)",
+          "binding": null
+        },
+        {
+          "id": "go.testing.1",
+          "section": "Testing",
+          "number": 1,
+          "question": "Are tests table-driven with t.Run subtests, in _test.go files beside the code?",
+          "sourceTerm": "Table-driven tests (Go Test Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.testing.2",
+          "section": "Testing",
+          "number": 2,
+          "question": "Do failures report got and want with context via t.Errorf, not panics?",
+          "sourceTerm": "Useful test failures (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.testing.3",
+          "section": "Testing",
+          "number": 3,
+          "question": "Are testable Examples provided for exported API?",
+          "sourceTerm": "Examples (Code Review Comments)",
+          "binding": null
+        },
+        {
+          "id": "go.testing.4",
+          "section": "Testing",
+          "number": 4,
+          "question": "Are benchmarks present for performance-sensitive code and fuzz tests where input is parsed?",
+          "sourceTerm": "Benchmarks; fuzzing (testing package, Go 1.18)",
+          "binding": null
+        },
+        {
+          "id": "go.testing.5",
+          "section": "Testing",
+          "number": 5,
+          "question": "Is coverage measured against this project's threshold?",
+          "sourceTerm": "go test -cover",
+          "binding": "coverage threshold"
+        },
+        {
+          "id": "go.tooling-logging-runtime.1",
+          "section": "Tooling, Logging, Runtime",
+          "number": 1,
+          "question": "Do go vet and this project's linter pass, and has go fix been run for modernizers?",
+          "sourceTerm": "go vet; go fix (Go 1.26)",
+          "binding": "lint config"
+        },
+        {
+          "id": "go.tooling-logging-runtime.2",
+          "section": "Tooling, Logging, Runtime",
+          "number": 2,
+          "question": "Is logging structured with log/slog rather than fmt.Println or the legacy log package?",
+          "sourceTerm": "log/slog (Go 1.21)",
+          "binding": null
+        },
+        {
+          "id": "go.tooling-logging-runtime.3",
+          "section": "Tooling, Logging, Runtime",
+          "number": 3,
+          "question": "Is an HTTP server built on net/http with routing patterns and explicit timeouts before a framework is reached for?",
+          "sourceTerm": "net/http (Go 1.22 patterns)",
+          "binding": null
+        },
+        {
+          "id": "go.tooling-logging-runtime.4",
+          "section": "Tooling, Logging, Runtime",
+          "number": 4,
+          "question": "Is the binary static where deployment expects one file (CGO_ENABLED=0 when cgo is not needed)?",
+          "sourceTerm": "Static binaries",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "nextjs",
+      "title": "Stack — Next.js App Router (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "nextjs.project-structure-and-installation.1",
+          "section": "Project Structure and Installation",
+          "number": 1,
+          "question": "Do route files use the App Router file conventions (layout, page, loading, error, not-found, route) rather than ad-hoc names?",
+          "sourceTerm": "File conventions (Project Structure)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.project-structure-and-installation.2",
+          "section": "Project Structure and Installation",
+          "number": 2,
+          "question": "Is non-route code colocated in private folders or outside app, and are route groups used only for organization and shared layouts?",
+          "sourceTerm": "Route groups; private folders; colocation (Project Structure)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.project-structure-and-installation.3",
+          "section": "Project Structure and Installation",
+          "number": 3,
+          "question": "Is the placement consistent with this project's existing structure (app, ui or components, lib)?",
+          "sourceTerm": "Project organization (Project Structure)",
+          "binding": "file tree"
+        },
+        {
+          "id": "nextjs.project-structure-and-installation.4",
+          "section": "Project Structure and Installation",
+          "number": 4,
+          "question": "Are secrets only in server-side environment variables, with NEXT_PUBLIC_ reserved for values that are safe to ship to the browser?",
+          "sourceTerm": "Environment variables (Installation); Configuration (ASVS V13)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.project-structure-and-installation.5",
+          "section": "Project Structure and Installation",
+          "number": 5,
+          "question": "Are module path aliases used instead of deep relative imports?",
+          "sourceTerm": "Module path aliases (Installation)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.layouts-pages-navigation.1",
+          "section": "Layouts, Pages, Navigation",
+          "number": 1,
+          "question": "Is shared UI in a layout and page-specific UI in a page, with exactly one root layout?",
+          "sourceTerm": "Root layout; nested layouts (Layouts and Pages)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.layouts-pages-navigation.2",
+          "section": "Layouts, Pages, Navigation",
+          "number": 2,
+          "question": "Are internal links rendered with the Link component so prefetching and client-side navigation apply?",
+          "sourceTerm": "Link; prefetching (Linking and Navigating)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.layouts-pages-navigation.3",
+          "section": "Layouts, Pages, Navigation",
+          "number": 3,
+          "question": "Are params and searchParams awaited and typed for dynamic segments?",
+          "sourceTerm": "Dynamic segments; params (Layouts and Pages)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.layouts-pages-navigation.4",
+          "section": "Layouts, Pages, Navigation",
+          "number": 4,
+          "question": "Are redirects performed with redirect on the server rather than client-side effects where possible?",
+          "sourceTerm": "Redirect (Linking and Navigating)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.server-and-client-components.1",
+          "section": "Server and Client Components",
+          "number": 1,
+          "question": "Is 'use client' applied only where interactivity or browser APIs are required, at the leaves of the tree?",
+          "sourceTerm": "Server-client boundary (Server and Client Components)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.server-and-client-components.2",
+          "section": "Server and Client Components",
+          "number": 2,
+          "question": "Are all props crossing the server-to-client boundary serializable?",
+          "sourceTerm": "Serializable props (Server and Client Components)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.server-and-client-components.3",
+          "section": "Server and Client Components",
+          "number": 3,
+          "question": "Are server-only modules (database client, secrets) never imported into Client Components, with server-only marking where it matters?",
+          "sourceTerm": "server-only (Server and Client Components)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.server-and-client-components.4",
+          "section": "Server and Client Components",
+          "number": 4,
+          "question": "Are Server Components passed into Client Components as children rather than imported by them?",
+          "sourceTerm": "Composition (Server and Client Components)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.fetching-data.1",
+          "section": "Fetching Data",
+          "number": 1,
+          "question": "Is data fetched in Server Components (or through Route Handlers for client consumers), not in client effects by default?",
+          "sourceTerm": "Server-side data fetching (Fetching Data)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.fetching-data.2",
+          "section": "Fetching Data",
+          "number": 2,
+          "question": "Is slow or non-critical data wrapped in Suspense or loading.js so the shell streams?",
+          "sourceTerm": "Streaming; Suspense (Fetching Data)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.fetching-data.3",
+          "section": "Fetching Data",
+          "number": 3,
+          "question": "Are independent requests fetched in parallel rather than as a sequential waterfall?",
+          "sourceTerm": "Parallel data fetching (Fetching Data)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.fetching-data.4",
+          "section": "Fetching Data",
+          "number": 4,
+          "question": "Is database access isolated in a data layer (lib/data) rather than inline in components?",
+          "sourceTerm": "Data Access Layer (Authentication guide; Foundations course)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.mutating-data.1",
+          "section": "Mutating Data",
+          "number": 1,
+          "question": "Are mutations implemented as Server Functions or Server Actions under 'use server' rather than client-side fetches to hand-rolled endpoints?",
+          "sourceTerm": "Server Functions (Mutating Data)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.mutating-data.2",
+          "section": "Mutating Data",
+          "number": 2,
+          "question": "Does every Server Function validate its input and check authorization server-side, since it is a public endpoint?",
+          "sourceTerm": "Input validation; authorization (Mutating Data; ASVS V4)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.mutating-data.3",
+          "section": "Mutating Data",
+          "number": 3,
+          "question": "After a mutation, is the affected cache revalidated with revalidatePath or revalidateTag before redirecting?",
+          "sourceTerm": "Revalidation after mutation (Mutating Data; Revalidating)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.mutating-data.4",
+          "section": "Mutating Data",
+          "number": 4,
+          "question": "Are pending and error states surfaced with useActionState or useFormStatus?",
+          "sourceTerm": "Form state (Mutating Data)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.caching-and-revalidating.1",
+          "section": "Caching and Revalidating",
+          "number": 1,
+          "question": "Is the caching strategy for each route and data source explicit (static, dynamic, or Cache Components with 'use cache') rather than assumed from defaults?",
+          "sourceTerm": "Caching (Caching)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.caching-and-revalidating.2",
+          "section": "Caching and Revalidating",
+          "number": 2,
+          "question": "Is revalidation chosen deliberately — time-based or on-demand — and are cache tags named canonically?",
+          "sourceTerm": "Revalidation strategy (Revalidating)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.caching-and-revalidating.3",
+          "section": "Caching and Revalidating",
+          "number": 3,
+          "question": "Is user-specific or session-specific data excluded from shared caches?",
+          "sourceTerm": "Cache scope (Caching)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.error-handling.1",
+          "section": "Error Handling",
+          "number": 1,
+          "question": "Are expected errors returned as values to the UI, and only uncaught exceptions left to error.js boundaries?",
+          "sourceTerm": "Expected errors; error boundaries (Error Handling)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.error-handling.2",
+          "section": "Error Handling",
+          "number": 2,
+          "question": "Is not-found handled with notFound and a not-found.js at the right segment?",
+          "sourceTerm": "Not found (Error Handling)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.error-handling.3",
+          "section": "Error Handling",
+          "number": 3,
+          "question": "Is a global-error.js present to catch root layout failures?",
+          "sourceTerm": "Global error (Error Handling)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.css-images-fonts.1",
+          "section": "CSS, Images, Fonts",
+          "number": 1,
+          "question": "Is styling done with this project's chosen method (Tailwind or CSS Modules) rather than mixed ad hoc?",
+          "sourceTerm": "Styling method (CSS)",
+          "binding": "style choice"
+        },
+        {
+          "id": "nextjs.css-images-fonts.2",
+          "section": "CSS, Images, Fonts",
+          "number": 2,
+          "question": "Are images rendered with next/image with dimensions or fill and sizes set?",
+          "sourceTerm": "Image optimization (Image Optimization)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.css-images-fonts.3",
+          "section": "CSS, Images, Fonts",
+          "number": 3,
+          "question": "Are fonts loaded with next/font rather than external stylesheet links?",
+          "sourceTerm": "Font optimization (Font Optimization)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.metadata.1",
+          "section": "Metadata",
+          "number": 1,
+          "question": "Is metadata defined through the Metadata API — static or generateMetadata — including Open Graph images for public pages?",
+          "sourceTerm": "Metadata API (Metadata and OG images)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.metadata.2",
+          "section": "Metadata",
+          "number": 2,
+          "question": "Are sitemap and robots generated through the file conventions where the site is public?",
+          "sourceTerm": "Sitemap; robots (Metadata and OG images)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.route-handlers-and-proxy.1",
+          "section": "Route Handlers and Proxy",
+          "number": 1,
+          "question": "Is a Route Handler used only where a Server Function does not fit (webhooks, external clients), with correct HTTP method exports and Web Response objects?",
+          "sourceTerm": "Route Handlers (Route Handlers)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.route-handlers-and-proxy.2",
+          "section": "Route Handlers and Proxy",
+          "number": 2,
+          "question": "Is Proxy limited to rewrites, redirects, headers, and optimistic checks — never the sole authorization gate?",
+          "sourceTerm": "Proxy (Proxy; Authentication guide)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.route-handlers-and-proxy.3",
+          "section": "Route Handlers and Proxy",
+          "number": 3,
+          "question": "Is authorization enforced in the Data Access Layer next to the data it protects?",
+          "sourceTerm": "Data Access Layer (Authentication guide)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.deploying-and-upgrading.1",
+          "section": "Deploying and Upgrading",
+          "number": 1,
+          "question": "Is the deployment target (Vercel, self-hosted Node, static export) chosen, and are the features used supported on that target?",
+          "sourceTerm": "Deployment targets (Deploying)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.deploying-and-upgrading.2",
+          "section": "Deploying and Upgrading",
+          "number": 2,
+          "question": "Is the Next.js version current or pinned deliberately, with upgrade codemods applied when moving?",
+          "sourceTerm": "Upgrading (Upgrading)",
+          "binding": null
+        },
+        {
+          "id": "nextjs.deploying-and-upgrading.3",
+          "section": "Deploying and Upgrading",
+          "number": 3,
+          "question": "Does the plan honor the React Foundations prerequisite — components, props, state, hooks, Suspense — before introducing Server Component patterns?",
+          "sourceTerm": "Prerequisite (React Foundations course)",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "react",
+      "title": "Stack — React (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "react.describing-the-ui.1",
+          "section": "Describing the UI",
+          "number": 1,
+          "question": "Is each component a pure function of its props and state, with no side effects during render?",
+          "sourceTerm": "Keeping Components Pure (Learn); Rules of React",
+          "binding": null
+        },
+        {
+          "id": "react.describing-the-ui.2",
+          "section": "Describing the UI",
+          "number": 2,
+          "question": "Does the component tree map to a UI hierarchy identified before coding, with a static version buildable first?",
+          "sourceTerm": "Thinking in React, steps 1–2",
+          "binding": null
+        },
+        {
+          "id": "react.describing-the-ui.3",
+          "section": "Describing the UI",
+          "number": 3,
+          "question": "Is each component small enough to name by one responsibility, and exported consistently with this project's convention?",
+          "sourceTerm": "Importing and Exporting Components",
+          "binding": "export convention"
+        },
+        {
+          "id": "react.describing-the-ui.4",
+          "section": "Describing the UI",
+          "number": 4,
+          "question": "Are list items keyed by stable, unique data identifiers — never the array index when items can reorder or be inserted?",
+          "sourceTerm": "Rendering Lists; key",
+          "binding": null
+        },
+        {
+          "id": "react.describing-the-ui.5",
+          "section": "Describing the UI",
+          "number": 5,
+          "question": "Is conditional rendering expressed in JSX (ternary, &&, or early return of null) rather than imperative branches building markup?",
+          "sourceTerm": "Conditional Rendering",
+          "binding": null
+        },
+        {
+          "id": "react.describing-the-ui.6",
+          "section": "Describing the UI",
+          "number": 6,
+          "question": "Are props treated as read-only, with children used for composition rather than render-prop workarounds?",
+          "sourceTerm": "Passing Props to a Component",
+          "binding": null
+        },
+        {
+          "id": "react.adding-interactivity.1",
+          "section": "Adding Interactivity",
+          "number": 1,
+          "question": "Are event handlers passed as functions and named handleX on the component, onX on the prop?",
+          "sourceTerm": "Responding to Events",
+          "binding": null
+        },
+        {
+          "id": "react.adding-interactivity.2",
+          "section": "Adding Interactivity",
+          "number": 2,
+          "question": "Is state reserved for values that change over time and drive rendering, with derived values computed during render?",
+          "sourceTerm": "State: A Component's Memory; Choosing the State Structure",
+          "binding": null
+        },
+        {
+          "id": "react.adding-interactivity.3",
+          "section": "Adding Interactivity",
+          "number": 3,
+          "question": "Are state updates treated as snapshots, using an updater function whenever the next value depends on the previous?",
+          "sourceTerm": "State as a Snapshot; Queueing a Series of State Updates",
+          "binding": null
+        },
+        {
+          "id": "react.adding-interactivity.4",
+          "section": "Adding Interactivity",
+          "number": 4,
+          "question": "Are objects and arrays in state replaced immutably, never mutated in place?",
+          "sourceTerm": "Updating Objects in State; Updating Arrays in State",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.1",
+          "section": "Managing State",
+          "number": 1,
+          "question": "Is the state structure minimal — no redundant, duplicated, contradictory, or deeply nested state?",
+          "sourceTerm": "Choosing the State Structure; Thinking in React, step 3",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.2",
+          "section": "Managing State",
+          "number": 2,
+          "question": "Is shared state lifted to the closest common parent, and otherwise kept local?",
+          "sourceTerm": "Sharing State Between Components; Thinking in React, step 4",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.3",
+          "section": "Managing State",
+          "number": 3,
+          "question": "Where a component must reset, is the reset done with a key change rather than an Effect?",
+          "sourceTerm": "Preserving and Resetting State",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.4",
+          "section": "Managing State",
+          "number": 4,
+          "question": "Are many related state transitions consolidated in a reducer rather than scattered across setters?",
+          "sourceTerm": "Extracting State Logic into a Reducer",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.5",
+          "section": "Managing State",
+          "number": 5,
+          "question": "Is Context used only for data needed deep in the tree (theme, current user, locale), not to avoid passing a prop one level?",
+          "sourceTerm": "Passing Data Deeply with Context",
+          "binding": null
+        },
+        {
+          "id": "react.managing-state.6",
+          "section": "Managing State",
+          "number": 6,
+          "question": "Is an external state library introduced only after reducer plus Context is shown insufficient, and is the choice recorded?",
+          "sourceTerm": "Scaling Up with Reducer and Context",
+          "binding": "state-management choice"
+        },
+        {
+          "id": "react.managing-state.7",
+          "section": "Managing State",
+          "number": 7,
+          "question": "Does data flow down through props and up through callbacks, with no hidden channels?",
+          "sourceTerm": "Thinking in React, step 5 (inverse data flow)",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.1",
+          "section": "Escape Hatches",
+          "number": 1,
+          "question": "Is every Effect synchronizing with an external system, and is no Effect transforming data for render or responding to a user event?",
+          "sourceTerm": "Synchronizing with Effects; You Might Not Need an Effect",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.2",
+          "section": "Escape Hatches",
+          "number": 2,
+          "question": "Does each Effect declare its reactive dependencies honestly, with the lint rule enforced and no suppression comments?",
+          "sourceTerm": "Lifecycle of Reactive Effects; Removing Effect Dependencies",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.3",
+          "section": "Escape Hatches",
+          "number": 3,
+          "question": "Does every Effect that subscribes, connects, or starts something return a cleanup?",
+          "sourceTerm": "Lifecycle of Reactive Effects",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.4",
+          "section": "Escape Hatches",
+          "number": 4,
+          "question": "Are non-reactive reads inside Effects separated with useEffectEvent?",
+          "sourceTerm": "Separating Events from Effects (19.2)",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.5",
+          "section": "Escape Hatches",
+          "number": 5,
+          "question": "Are refs used only for values that do not affect rendering and for DOM access, never read or written during render?",
+          "sourceTerm": "Referencing Values with Refs; Manipulating the DOM with Refs",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.6",
+          "section": "Escape Hatches",
+          "number": 6,
+          "question": "Is reusable stateful logic extracted into a custom Hook named useX, with a clear input and return contract?",
+          "sourceTerm": "Reusing Logic with Custom Hooks",
+          "binding": null
+        },
+        {
+          "id": "react.escape-hatches.7",
+          "section": "Escape Hatches",
+          "number": 7,
+          "question": "Are Hooks called only at the top level of a component or custom Hook, never conditionally or in loops?",
+          "sourceTerm": "Rules of Hooks",
+          "binding": null
+        },
+        {
+          "id": "react.rules-of-react-and-strictness.1",
+          "section": "Rules of React and Strictness",
+          "number": 1,
+          "question": "Are components and Hooks idempotent, so double-invocation under StrictMode produces the same result?",
+          "sourceTerm": "Components and Hooks must be pure; StrictMode",
+          "binding": null
+        },
+        {
+          "id": "react.rules-of-react-and-strictness.2",
+          "section": "Rules of React and Strictness",
+          "number": 2,
+          "question": "Are props, state, and Hook return values never mutated?",
+          "sourceTerm": "Rules of React",
+          "binding": null
+        },
+        {
+          "id": "react.rules-of-react-and-strictness.3",
+          "section": "Rules of React and Strictness",
+          "number": 3,
+          "question": "Is StrictMode enabled at the root in development?",
+          "sourceTerm": "StrictMode",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.1",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 1,
+          "question": "Is data fetched through the framework or a Suspense-enabled data library rather than raw useEffect plus fetch?",
+          "sourceTerm": "You Might Not Need an Effect; Suspense",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.2",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 2,
+          "question": "Are form submissions implemented as Actions with useActionState and useFormStatus, surfacing pending and error state?",
+          "sourceTerm": "Actions (React 19)",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.3",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 3,
+          "question": "Is optimistic UI implemented with useOptimistic where perceived latency matters?",
+          "sourceTerm": "useOptimistic",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.4",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 4,
+          "question": "Is the use API used to read promises or Context in render where it simplifies the code, and never called conditionally?",
+          "sourceTerm": "use (React 19; 19.3 warning)",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.5",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 5,
+          "question": "Are Suspense boundaries placed around slow subtrees with fallbacks at the level the design intends?",
+          "sourceTerm": "Suspense",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.6",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 6,
+          "question": "Are non-urgent updates wrapped in transitions to keep input responsive?",
+          "sourceTerm": "useTransition; useDeferredValue (19.3 independent transitions)",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.7",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 7,
+          "question": "Is ref passed as an ordinary prop, with forwardRef removed?",
+          "sourceTerm": "ref as a prop (React 19)",
+          "binding": null
+        },
+        {
+          "id": "react.data-actions-suspense-react-19.8",
+          "section": "Data, Actions, Suspense (React 19)",
+          "number": 8,
+          "question": "Are generated ids for accessibility attributes produced with useId, never Math.random?",
+          "sourceTerm": "useId",
+          "binding": null
+        },
+        {
+          "id": "react.performance.1",
+          "section": "Performance",
+          "number": 1,
+          "question": "Is the React Compiler enabled; and if not, is manual memoization (memo, useMemo, useCallback) added only after profiling shows a need?",
+          "sourceTerm": "React Compiler 1.0; Profiler; Performance Tracks",
+          "binding": null
+        },
+        {
+          "id": "react.performance.2",
+          "section": "Performance",
+          "number": 2,
+          "question": "Is hidden-but-preserved UI implemented with Activity rather than conditional unmounting where state must survive?",
+          "sourceTerm": "Activity (19.2)",
+          "binding": null
+        },
+        {
+          "id": "react.performance.3",
+          "section": "Performance",
+          "number": 3,
+          "question": "Are long lists virtualized, and are large components split so a keystroke does not re-render the page?",
+          "sourceTerm": "Render and Commit; community best practice",
+          "binding": null
+        },
+        {
+          "id": "react.accessibility-and-errors.1",
+          "section": "Accessibility and Errors",
+          "number": 1,
+          "question": "Are semantic elements, labels, keyboard operability, and ARIA used per the Authoring Practices Guide rather than div-and-onClick?",
+          "sourceTerm": "Accessibility (react.dev; WAI-ARIA APG)",
+          "binding": null
+        },
+        {
+          "id": "react.accessibility-and-errors.2",
+          "section": "Accessibility and Errors",
+          "number": 2,
+          "question": "Are error boundaries placed around risky subtrees so one failure does not blank the app?",
+          "sourceTerm": "Error boundaries",
+          "binding": null
+        },
+        {
+          "id": "react.tooling-structure-testing.1",
+          "section": "Tooling, Structure, Testing",
+          "number": 1,
+          "question": "Was the project created with a framework or Vite per current guidance, never Create React App?",
+          "sourceTerm": "Creating a React App (CRA sunset, February 2025)",
+          "binding": null
+        },
+        {
+          "id": "react.tooling-structure-testing.2",
+          "section": "Tooling, Structure, Testing",
+          "number": 2,
+          "question": "Is eslint-plugin-react-hooks active (rules-of-hooks, exhaustive-deps) together with the compiler's lint rules?",
+          "sourceTerm": "Tooling",
+          "binding": null
+        },
+        {
+          "id": "react.tooling-structure-testing.3",
+          "section": "Tooling, Structure, Testing",
+          "number": 3,
+          "question": "Is React pinned at a current 19.x release, with the react-server-dom security advisories accounted for?",
+          "sourceTerm": "Versions (patched releases 19.0.4, 19.1.5, 19.2.4)",
+          "binding": null
+        },
+        {
+          "id": "react.tooling-structure-testing.4",
+          "section": "Tooling, Structure, Testing",
+          "number": 4,
+          "question": "Is the placement consistent with this project's existing component and feature structure?",
+          "sourceTerm": "Project organization",
+          "binding": "file tree"
+        },
+        {
+          "id": "react.tooling-structure-testing.5",
+          "section": "Tooling, Structure, Testing",
+          "number": 5,
+          "question": "Are component props typed as interfaces where the project uses TypeScript?",
+          "sourceTerm": "Typing",
+          "binding": "typescript stack value"
+        },
+        {
+          "id": "react.tooling-structure-testing.6",
+          "section": "Tooling, Structure, Testing",
+          "number": 6,
+          "question": "Do tests query by role, label, and text rather than implementation details?",
+          "sourceTerm": "Testing Library query priorities",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "typescript",
+      "title": "Stack — TypeScript (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "typescript.configuration-and-toolchain.1",
+          "section": "Configuration and Toolchain",
+          "number": 1,
+          "question": "Is strict enabled, with this project's additional strictness flags (noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitOverride) applied consistently?",
+          "sourceTerm": "strict (tsconfig reference)",
+          "binding": "tsconfig"
+        },
+        {
+          "id": "typescript.configuration-and-toolchain.2",
+          "section": "Configuration and Toolchain",
+          "number": 2,
+          "question": "Do module and moduleResolution match the runtime or bundler (nodenext, bundler), with verbatimModuleSyntax on?",
+          "sourceTerm": "Modules reference (5.0)",
+          "binding": null
+        },
+        {
+          "id": "typescript.configuration-and-toolchain.3",
+          "section": "Configuration and Toolchain",
+          "number": 3,
+          "question": "Is type-checking run as tsc --noEmit in CI, separate from the bundler's transpile, so transpile-only tools cannot hide type errors?",
+          "sourceTerm": "Compiler; project configuration",
+          "binding": null
+        },
+        {
+          "id": "typescript.configuration-and-toolchain.4",
+          "section": "Configuration and Toolchain",
+          "number": 4,
+          "question": "In a multi-package repository, are project references used with a single root configuration?",
+          "sourceTerm": "Project References",
+          "binding": null
+        },
+        {
+          "id": "typescript.configuration-and-toolchain.5",
+          "section": "Configuration and Toolchain",
+          "number": 5,
+          "question": "Is TypeScript on a current 7.x release, with any tool that imports the compiler as a library moved to @typescript/typescript6 or an updated version?",
+          "sourceTerm": "TypeScript 7.0 (no legacy compiler API)",
+          "binding": null
+        },
+        {
+          "id": "typescript.configuration-and-toolchain.6",
+          "section": "Configuration and Toolchain",
+          "number": 6,
+          "question": "If Node executes .ts files directly, is erasableSyntaxOnly enabled — no enums, namespaces, or parameter properties?",
+          "sourceTerm": "erasableSyntaxOnly (5.8); Node type stripping",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.1",
+          "section": "Everyday Types",
+          "number": 1,
+          "question": "Is any absent, with unknown plus narrowing at every boundary where the type is not known?",
+          "sourceTerm": "any; unknown (Everyday Types; Do's and Don'ts)",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.2",
+          "section": "Everyday Types",
+          "number": 2,
+          "question": "Are the wrapper types Number, String, Boolean, Object, and the bare Function type never used?",
+          "sourceTerm": "Do's and Don'ts: General Types",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.3",
+          "section": "Everyday Types",
+          "number": 3,
+          "question": "Are unions of string literals preferred over enums; where enums remain, is that a recorded project decision?",
+          "sourceTerm": "Literal Types; Enums",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.4",
+          "section": "Everyday Types",
+          "number": 4,
+          "question": "Are null and undefined handled explicitly with optional chaining and nullish coalescing, with no non-null assertions outside a commented boundary?",
+          "sourceTerm": "strictNullChecks; non-null assertion",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.5",
+          "section": "Everyday Types",
+          "number": 5,
+          "question": "Are type assertions confined to boundaries the compiler cannot see, and is satisfies used to check a value without widening it?",
+          "sourceTerm": "Type Assertions; satisfies (4.9)",
+          "binding": null
+        },
+        {
+          "id": "typescript.everyday-types.6",
+          "section": "Everyday Types",
+          "number": 6,
+          "question": "Are tuples and as const used where positional or literal structure matters?",
+          "sourceTerm": "Tuple Types; as const",
+          "binding": null
+        },
+        {
+          "id": "typescript.narrowing.1",
+          "section": "Narrowing",
+          "number": 1,
+          "question": "Are unions narrowed with typeof, instanceof, in, and discriminant checks rather than assertions?",
+          "sourceTerm": "Narrowing",
+          "binding": null
+        },
+        {
+          "id": "typescript.narrowing.2",
+          "section": "Narrowing",
+          "number": 2,
+          "question": "Do discriminated unions carry a literal discriminant, with exhaustiveness enforced through never in the default branch?",
+          "sourceTerm": "Discriminated unions; exhaustiveness checking",
+          "binding": null
+        },
+        {
+          "id": "typescript.narrowing.3",
+          "section": "Narrowing",
+          "number": 3,
+          "question": "Are custom guards written as type predicates, relying on inferred predicates where 5.5+ allows?",
+          "sourceTerm": "Type predicates (5.5)",
+          "binding": null
+        },
+        {
+          "id": "typescript.functions.1",
+          "section": "Functions",
+          "number": 1,
+          "question": "Are parameter and return types explicit on exported functions and inferred inside modules?",
+          "sourceTerm": "More on Functions; isolatedDeclarations (5.5)",
+          "binding": null
+        },
+        {
+          "id": "typescript.functions.2",
+          "section": "Functions",
+          "number": 2,
+          "question": "Are overloads avoided where a union parameter or optional parameter suffices, and ordered specific-to-general where kept?",
+          "sourceTerm": "Do's and Don'ts: Overloads",
+          "binding": null
+        },
+        {
+          "id": "typescript.functions.3",
+          "section": "Functions",
+          "number": 3,
+          "question": "Is void the return type of callbacks whose result is ignored?",
+          "sourceTerm": "Do's and Don'ts: Callback Types",
+          "binding": null
+        },
+        {
+          "id": "typescript.functions.4",
+          "section": "Functions",
+          "number": 4,
+          "question": "Are promises always awaited or returned, with catch variables typed unknown?",
+          "sourceTerm": "useUnknownInCatchVariables (4.4); no-floating-promises",
+          "binding": null
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.1",
+          "section": "Object Types and Type Manipulation",
+          "number": 1,
+          "question": "Is interface versus type alias chosen per this project's convention and applied consistently?",
+          "sourceTerm": "Object Types",
+          "binding": "declaration convention"
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.2",
+          "section": "Object Types and Type Manipulation",
+          "number": 2,
+          "question": "Are readonly properties and Readonly applied to data that must not be mutated?",
+          "sourceTerm": "readonly",
+          "binding": null
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.3",
+          "section": "Object Types and Type Manipulation",
+          "number": 3,
+          "question": "Is a generic introduced only when a type relationship must be preserved, with a constraint and a meaningful name?",
+          "sourceTerm": "Generics; constraints",
+          "binding": null
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.4",
+          "section": "Object Types and Type Manipulation",
+          "number": 4,
+          "question": "Are utility types used instead of hand-duplicated shapes derived from an existing type?",
+          "sourceTerm": "Utility Types",
+          "binding": null
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.5",
+          "section": "Object Types and Type Manipulation",
+          "number": 5,
+          "question": "Are mapped, conditional, and template literal types used only where they remove duplication, with a comment stating the derivation?",
+          "sourceTerm": "Type Manipulation",
+          "binding": null
+        },
+        {
+          "id": "typescript.object-types-and-type-manipulation.6",
+          "section": "Object Types and Type Manipulation",
+          "number": 6,
+          "question": "Is a const type parameter used where a literal must be preserved through a generic call?",
+          "sourceTerm": "const type parameters (5.0)",
+          "binding": null
+        },
+        {
+          "id": "typescript.classes-and-compatibility.1",
+          "section": "Classes and Compatibility",
+          "number": 1,
+          "question": "Are classes used only where identity, encapsulated state, or lifecycle justify them, with plain objects and functions otherwise?",
+          "sourceTerm": "Classes",
+          "binding": null
+        },
+        {
+          "id": "typescript.classes-and-compatibility.2",
+          "section": "Classes and Compatibility",
+          "number": 2,
+          "question": "Is structural compatibility understood, with branded types where nominal identity is genuinely required?",
+          "sourceTerm": "Type Compatibility; branded types",
+          "binding": null
+        },
+        {
+          "id": "typescript.modules-and-declarations.1",
+          "section": "Modules and Declarations",
+          "number": 1,
+          "question": "Are ES modules used with import type for type-only imports and no namespaces?",
+          "sourceTerm": "Modules; import type",
+          "binding": null
+        },
+        {
+          "id": "typescript.modules-and-declarations.2",
+          "section": "Modules and Declarations",
+          "number": 2,
+          "question": "Are barrel files used deliberately, with circular imports checked?",
+          "sourceTerm": "Modules; community best practice",
+          "binding": null
+        },
+        {
+          "id": "typescript.modules-and-declarations.3",
+          "section": "Modules and Declarations",
+          "number": 3,
+          "question": "Are tsconfig path aliases mirrored in the bundler and runtime configuration?",
+          "sourceTerm": "paths",
+          "binding": null
+        },
+        {
+          "id": "typescript.modules-and-declarations.4",
+          "section": "Modules and Declarations",
+          "number": 4,
+          "question": "Do third-party types come from @types or bundled declarations, with local gaps filled by a declared .d.ts rather than any?",
+          "sourceTerm": "Declaration Files",
+          "binding": null
+        },
+        {
+          "id": "typescript.modules-and-declarations.5",
+          "section": "Modules and Declarations",
+          "number": 5,
+          "question": "Does a published library emit declarations (declaration, isolatedDeclarations)?",
+          "sourceTerm": "Declaration emit",
+          "binding": null
+        },
+        {
+          "id": "typescript.runtime-boundaries.1",
+          "section": "Runtime Boundaries",
+          "number": 1,
+          "question": "Is every value crossing a runtime edge — JSON.parse, HTTP response, environment variable, IPC message, form data — validated with a schema, with the static type derived from the schema?",
+          "sourceTerm": "Type erasure; runtime validation",
+          "binding": null
+        },
+        {
+          "id": "typescript.runtime-boundaries.2",
+          "section": "Runtime Boundaries",
+          "number": 2,
+          "question": "Are environment variables typed through a validated config module rather than read as any?",
+          "sourceTerm": "Runtime validation",
+          "binding": null
+        },
+        {
+          "id": "typescript.cross-stack-contract-boundaries-composition-set.1",
+          "section": "Cross-Stack Contract Boundaries (composition set)",
+          "number": 1,
+          "question": "Where types are generated from another stack (Specta, ts-rs, typeshare, openapi-typescript, protobuf, GraphQL codegen), is the source stack the single source of truth, and is the .ts output never hand-edited?",
+          "sourceTerm": "Contract boundary; single source of truth",
+          "binding": null
+        },
+        {
+          "id": "typescript.cross-stack-contract-boundaries-composition-set.2",
+          "section": "Cross-Stack Contract Boundaries (composition set)",
+          "number": 2,
+          "question": "Are generated files marked as generated, excluded from lint and formatting, and regenerated in the build so that drift fails CI?",
+          "sourceTerm": "Codegen discipline",
+          "binding": null
+        },
+        {
+          "id": "typescript.cross-stack-contract-boundaries-composition-set.3",
+          "section": "Cross-Stack Contract Boundaries (composition set)",
+          "number": 3,
+          "question": "Is the contract versioned so a source-type change surfaces as a visible boundary change on the TypeScript side?",
+          "sourceTerm": "Contract versioning",
+          "binding": null
+        },
+        {
+          "id": "typescript.cross-stack-contract-boundaries-composition-set.4",
+          "section": "Cross-Stack Contract Boundaries (composition set)",
+          "number": 4,
+          "question": "Is the IPC or HTTP edge still runtime-validated, since generated types are erased like any other?",
+          "sourceTerm": "Type erasure at the contract edge",
+          "binding": null
+        },
+        {
+          "id": "typescript.cross-stack-contract-boundaries-composition-set.5",
+          "section": "Cross-Stack Contract Boundaries (composition set)",
+          "number": 5,
+          "question": "Do generated type names match the source stack's canonical names under the codegen tool's casing rule?",
+          "sourceTerm": "Canonical naming across stacks",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "typescript.lint-structure-naming.1",
+          "section": "Lint, Structure, Naming",
+          "number": 1,
+          "question": "Is typescript-eslint active with the type-checked rule set — no-explicit-any, no-floating-promises, consistent-type-imports?",
+          "sourceTerm": "typescript-eslint",
+          "binding": "lint config"
+        },
+        {
+          "id": "typescript.lint-structure-naming.2",
+          "section": "Lint, Structure, Naming",
+          "number": 2,
+          "question": "Are @ts-ignore comments absent, with @ts-expect-error used only with a stated reason?",
+          "sourceTerm": "Compiler directives",
+          "binding": null
+        },
+        {
+          "id": "typescript.lint-structure-naming.3",
+          "section": "Lint, Structure, Naming",
+          "number": 3,
+          "question": "Is the placement consistent with this project's existing structure?",
+          "sourceTerm": "Project organization",
+          "binding": "file tree"
+        },
+        {
+          "id": "typescript.lint-structure-naming.4",
+          "section": "Lint, Structure, Naming",
+          "number": 4,
+          "question": "Are names the same canonical names used elsewhere in this project for the same thing?",
+          "sourceTerm": "Canonical naming",
+          "binding": "canonical name registry"
+        }
+      ]
+    },
+    {
+      "id": "vanilla-js",
+      "title": "Stack — JavaScript (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "vanilla-js.language-fundamentals.1",
+          "section": "Language Fundamentals",
+          "number": 1,
+          "question": "Are variables declared with const by default and let only when reassigned, never var?",
+          "sourceTerm": "Grammar and types; Variables (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.2",
+          "section": "Language Fundamentals",
+          "number": 2,
+          "question": "Is strict equality used, with coercion and sameness semantics understood where loose comparison appears?",
+          "sourceTerm": "Equality comparisons and sameness (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.3",
+          "section": "Language Fundamentals",
+          "number": 3,
+          "question": "Does the code run as a module (type=\"module\", or \"type\": \"module\" in Node), so strict mode is on and nothing leaks into global scope?",
+          "sourceTerm": "JavaScript modules (MDN Guide)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.4",
+          "section": "Language Fundamentals",
+          "number": 4,
+          "question": "Is this binding handled deliberately — arrow functions for lexical this, bound or wrapped methods when passed as callbacks?",
+          "sourceTerm": "Functions; this (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.5",
+          "section": "Language Fundamentals",
+          "number": 5,
+          "question": "Are template literals, destructuring, optional chaining, and nullish coalescing used for clarity rather than concatenation and nested guards?",
+          "sourceTerm": "Expressions and operators (MDN Guide)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.6",
+          "section": "Language Fundamentals",
+          "number": 6,
+          "question": "Are dates and times handled with Temporal or explicit time-zone-aware formatting via Intl, never Date arithmetic?",
+          "sourceTerm": "Representing dates and times (MDN Guide); ECMA-402",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.language-fundamentals.7",
+          "section": "Language Fundamentals",
+          "number": 7,
+          "question": "Is floating-point handled deliberately — Math.sumPrecise for sums, integer arithmetic or BigInt where exactness matters?",
+          "sourceTerm": "Numbers and strings (MDN Guide); ES2026",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.objects-collections-classes.1",
+          "section": "Objects, Collections, Classes",
+          "number": 1,
+          "question": "Is the collection chosen for the access pattern — Array for ordered lists, Map and Set for keyed or unique data, plain objects for fixed-shape records — with getOrInsert for the upsert pattern?",
+          "sourceTerm": "Indexed collections; Keyed collections (MDN Guide); ES2026",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.objects-collections-classes.2",
+          "section": "Objects, Collections, Classes",
+          "number": 2,
+          "question": "Is shared data treated immutably — spread, toSorted, toReversed, with, structuredClone — rather than mutated in place?",
+          "sourceTerm": "Indexed collections (ES2023 change-by-copy)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.objects-collections-classes.3",
+          "section": "Objects, Collections, Classes",
+          "number": 3,
+          "question": "Are classes used only where identity or prototype semantics are needed, with private fields for encapsulation and composition preferred over deep inheritance?",
+          "sourceTerm": "Using classes; Classes in JavaScript (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.objects-collections-classes.4",
+          "section": "Objects, Collections, Classes",
+          "number": 4,
+          "question": "Are iterators and generators used for lazy sequences, with Iterator helpers instead of intermediate arrays?",
+          "sourceTerm": "Iterators and generators (MDN Guide); ES2025",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.1",
+          "section": "Asynchronous JavaScript",
+          "number": 1,
+          "question": "Is asynchronous work written with async and await, and is every promise awaited, returned, or explicitly handled?",
+          "sourceTerm": "Asynchronous JavaScript: promises, async and await (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.2",
+          "section": "Asynchronous JavaScript",
+          "number": 2,
+          "question": "Are errors caught at the boundary, chained with cause, and identified with Error.isError rather than instanceof across realms?",
+          "sourceTerm": "Control flow and error handling (MDN Guide); ES2022, ES2026",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.3",
+          "section": "Asynchronous JavaScript",
+          "number": 3,
+          "question": "Are independent asynchronous operations run in parallel with Promise.all or allSettled rather than awaited in sequence?",
+          "sourceTerm": "Sequencing asynchronous operations (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.4",
+          "section": "Asynchronous JavaScript",
+          "number": 4,
+          "question": "Is CPU-heavy or long-running work moved to a Web Worker or worker_threads so the main thread stays responsive?",
+          "sourceTerm": "Introducing workers (MDN); Web Workers",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.5",
+          "section": "Asynchronous JavaScript",
+          "number": 5,
+          "question": "Is cancellation implemented with AbortController for fetch, listeners, and timers?",
+          "sourceTerm": "Fetch; AbortController (WHATWG)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.asynchronous-javascript.6",
+          "section": "Asynchronous JavaScript",
+          "number": 6,
+          "question": "Is deterministic cleanup done with try/finally or using declarations?",
+          "sourceTerm": "Resource management (MDN Guide)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.1",
+          "section": "DOM Scripting and Events",
+          "number": 1,
+          "question": "Are DOM references queried once and cached, and are DOM writes batched or built in a DocumentFragment to avoid layout thrash?",
+          "sourceTerm": "DOM scripting (MDN); Performant JavaScript",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.2",
+          "section": "DOM Scripting and Events",
+          "number": 2,
+          "question": "Are listeners attached with addEventListener, removed when no longer needed, and delegated to a parent for dynamic lists?",
+          "sourceTerm": "Events (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.3",
+          "section": "DOM Scripting and Events",
+          "number": 3,
+          "question": "Is form submission intercepted with preventDefault only where the page must not reload, and does the form still function without JavaScript where feasible?",
+          "sourceTerm": "Web forms; Events (MDN); progressive enhancement",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.4",
+          "section": "DOM Scripting and Events",
+          "number": 4,
+          "question": "Is untrusted content inserted with textContent or createElement, never innerHTML?",
+          "sourceTerm": "Security and privacy (MDN Curriculum); ASVS V3",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.5",
+          "section": "DOM Scripting and Events",
+          "number": 5,
+          "question": "Are reusable UI pieces built as Web Components — custom elements, shadow DOM, template — rather than a framework added for one widget?",
+          "sourceTerm": "Web Components (W3C; MDN Client-side web APIs)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.dom-scripting-and-events.6",
+          "section": "DOM Scripting and Events",
+          "number": 6,
+          "question": "Are observers (Mutation, Intersection, Resize) used instead of polling, and disconnected when done?",
+          "sourceTerm": "Client-side web APIs (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.modules-and-dependencies.1",
+          "section": "Modules and Dependencies",
+          "number": 1,
+          "question": "Are ES modules used with explicit imports and exports, bare specifiers resolved by an import map or bundler, and no shared globals between scripts?",
+          "sourceTerm": "JavaScript modules (MDN Guide); import maps (WHATWG HTML)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.modules-and-dependencies.2",
+          "section": "Modules and Dependencies",
+          "number": 2,
+          "question": "Is the module graph free of circular dependencies, with one responsibility per module?",
+          "sourceTerm": "JavaScript modules",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.modules-and-dependencies.3",
+          "section": "Modules and Dependencies",
+          "number": 3,
+          "question": "Does the standard library cover the need before a dependency is added — Temporal over a date library, Uint8Array base64 methods over a polyfill, Iterator helpers over a utility library?",
+          "sourceTerm": "ECMAScript 2025–2026 additions",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.modules-and-dependencies.4",
+          "section": "Modules and Dependencies",
+          "number": 4,
+          "question": "Are dependencies minimal, pinned by lockfile, and audited?",
+          "sourceTerm": "Client-side tooling (MDN); npm audit",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.modules-and-dependencies.5",
+          "section": "Modules and Dependencies",
+          "number": 5,
+          "question": "Is the placement consistent with this project's existing structure?",
+          "sourceTerm": "Project organization",
+          "binding": "file tree"
+        },
+        {
+          "id": "vanilla-js.network-and-data.1",
+          "section": "Network and Data",
+          "number": 1,
+          "question": "Is fetch used with response.ok checked, a timeout via AbortSignal.timeout, and JSON parsing wrapped in error handling?",
+          "sourceTerm": "Network requests; Fetching data (MDN); Fetch standard",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.network-and-data.2",
+          "section": "Network and Data",
+          "number": 2,
+          "question": "Is data arriving from JSON, URLs, or storage validated for shape before use?",
+          "sourceTerm": "JSON (MDN); Security and privacy",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.network-and-data.3",
+          "section": "Network and Data",
+          "number": 3,
+          "question": "Is client-side storage chosen deliberately — localStorage for small synchronous values, IndexedDB for structured or large data, cookies only for what the server needs — with quota and failure handled?",
+          "sourceTerm": "Client-side storage (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.compatibility-and-runtime-target.1",
+          "section": "Compatibility and Runtime Target",
+          "number": 1,
+          "question": "Is every web feature checked against Web Platform Baseline or this project's browserslist before use, with polyfills only where the target requires them?",
+          "sourceTerm": "Baseline (web.dev); Web standards and semantics (MDN Curriculum)",
+          "binding": "browser support target"
+        },
+        {
+          "id": "vanilla-js.compatibility-and-runtime-target.2",
+          "section": "Compatibility and Runtime Target",
+          "number": 2,
+          "question": "Is feature detection used rather than user-agent sniffing?",
+          "sourceTerm": "Cross-browser testing; feature detection (MDN Testing)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.compatibility-and-runtime-target.3",
+          "section": "Compatibility and Runtime Target",
+          "number": 3,
+          "question": "Is the runtime target explicit — browser, Node 24 LTS (26 when it enters LTS), or both — and is the code free of the other runtime's globals?",
+          "sourceTerm": "Runtime target",
+          "binding": "runtime"
+        },
+        {
+          "id": "vanilla-js.security.1",
+          "section": "Security",
+          "number": 1,
+          "question": "Is a Content Security Policy in place, with no inline scripts and no eval or new Function?",
+          "sourceTerm": "Content Security Policy (W3C); ASVS V3",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.security.2",
+          "section": "Security",
+          "number": 2,
+          "question": "Are DOM XSS sinks — innerHTML, insertAdjacentHTML, document.write, javascript: URLs — avoided, or guarded by Trusted Types or the Sanitizer API?",
+          "sourceTerm": "DOM sinks; Trusted Types; ASVS V3, V1",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.security.3",
+          "section": "Security",
+          "number": 3,
+          "question": "Are tokens and secrets kept out of client code and out of localStorage where an HttpOnly cookie serves?",
+          "sourceTerm": "Security and privacy (MDN Curriculum); ASVS V3",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.security.4",
+          "section": "Security",
+          "number": 4,
+          "question": "Are third-party scripts loaded with Subresource Integrity and reviewed for the permissions they take?",
+          "sourceTerm": "Subresource Integrity (W3C)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.accessibility.1",
+          "section": "Accessibility",
+          "number": 1,
+          "question": "Are native semantic elements used before ARIA, with ARIA only where no native element exists?",
+          "sourceTerm": "First rule of ARIA use (W3C); Accessibility (MDN core module)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.accessibility.2",
+          "section": "Accessibility",
+          "number": 2,
+          "question": "Is every interactive element keyboard operable with visible focus, and is dynamic content announced through live regions where needed?",
+          "sourceTerm": "Accessibility (MDN); WCAG 2.2; ARIA Authoring Practices Guide",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.performance.1",
+          "section": "Performance",
+          "number": 1,
+          "question": "Is script loading non-blocking (module or defer), split by route, and is bundle size measured?",
+          "sourceTerm": "Performant JavaScript (MDN Web performance)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.performance.2",
+          "section": "Performance",
+          "number": 2,
+          "question": "Are Core Web Vitals measured, with long tasks broken up using scheduler.yield or requestAnimationFrame?",
+          "sourceTerm": "Web performance (MDN); web.dev",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.performance.3",
+          "section": "Performance",
+          "number": 3,
+          "question": "Are timers, intervals, listeners, and observers released so nothing leaks across navigations or component lifetimes?",
+          "sourceTerm": "Performant JavaScript (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.testing-and-debugging.1",
+          "section": "Testing and Debugging",
+          "number": 1,
+          "question": "Are unit tests present (node:test or this project's runner) and end-to-end tests for critical flows?",
+          "sourceTerm": "Testing (MDN extension module); node:test",
+          "binding": "test runner"
+        },
+        {
+          "id": "vanilla-js.testing-and-debugging.2",
+          "section": "Testing and Debugging",
+          "number": 2,
+          "question": "Are console.log statements removed, with structured error reporting in their place?",
+          "sourceTerm": "Debugging JavaScript (MDN)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.style-and-naming.1",
+          "section": "Style and Naming",
+          "number": 1,
+          "question": "Does the code pass ESLint recommended rules plus this project's rules, and Prettier?",
+          "sourceTerm": "ESLint; Google JavaScript Style Guide",
+          "binding": "lint config"
+        },
+        {
+          "id": "vanilla-js.style-and-naming.2",
+          "section": "Style and Naming",
+          "number": 2,
+          "question": "Are exported functions documented with JSDoc types where TypeScript is not in use, so editors can type-check?",
+          "sourceTerm": "JSDoc",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.style-and-naming.3",
+          "section": "Style and Naming",
+          "number": 3,
+          "question": "Are names the same canonical names used elsewhere in this project for the same thing?",
+          "sourceTerm": "Canonical naming",
+          "binding": "canonical name registry"
+        },
+        {
+          "id": "vanilla-js.node-js-fires-when-the-runtime-target-is-node.1",
+          "section": "Node.js (fires when the runtime target is Node)",
+          "number": 1,
+          "question": "Are built-in modules imported with the node: prefix, and are promise-based APIs (fs/promises) used over callbacks and sync calls on hot paths?",
+          "sourceTerm": "Node.js documentation",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.node-js-fires-when-the-runtime-target-is-node.2",
+          "section": "Node.js (fires when the runtime target is Node)",
+          "number": 2,
+          "question": "Are unhandled rejections and process signals handled for graceful shutdown?",
+          "sourceTerm": "process (Node.js)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.node-js-fires-when-the-runtime-target-is-node.3",
+          "section": "Node.js (fires when the runtime target is Node)",
+          "number": 3,
+          "question": "If .ts files run directly under Node, is only erasable syntax used?",
+          "sourceTerm": "Type stripping (Node 24 stable)",
+          "binding": null
+        },
+        {
+          "id": "vanilla-js.node-js-fires-when-the-runtime-target-is-node.4",
+          "section": "Node.js (fires when the runtime target is Node)",
+          "number": 4,
+          "question": "Is the Node version pinned to Active LTS in package.json engines and CI?",
+          "sourceTerm": "Release schedule (Node.js)",
+          "binding": null
+        }
+      ]
+    },
+    {
+      "id": "boundaries",
+      "title": "Domain Boundaries — user, admin, chat, AI (Draft v0.1)",
+      "status": "draft",
+      "questions": [
+        {
+          "id": "boundaries.user.1",
+          "section": "user",
+          "number": 1,
+          "question": "Are identity (who the subject is), authentication (proving it), and authorization (what they may do) separated in the design?",
+          "sourceTerm": "Digital identity model (800-63-4); ASVS V6, V8",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.2",
+          "section": "user",
+          "number": 2,
+          "question": "Is the authenticator type and its assurance level (AAL) chosen deliberately and documented?",
+          "sourceTerm": "Authenticator assurance level (800-63B-4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.3",
+          "section": "user",
+          "number": 3,
+          "question": "Are memorized secrets stored with an approved hashing method and checked against known-compromised lists?",
+          "sourceTerm": "Password security (ASVS V6.2; 800-63B-4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.4",
+          "section": "user",
+          "number": 4,
+          "question": "Is multi-factor or phishing-resistant authentication available where the risk requires it?",
+          "sourceTerm": "Multi-factor authentication (800-63B-4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.5",
+          "section": "user",
+          "number": 5,
+          "question": "Are syncable authenticators (passkeys) supported or explicitly deferred with a reason?",
+          "sourceTerm": "Syncable authenticators (800-63B-4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.6",
+          "section": "user",
+          "number": 6,
+          "question": "Is a new session token generated on authentication, with sufficient entropy?",
+          "sourceTerm": "Session token lifecycle (ASVS V7.2)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.7",
+          "section": "user",
+          "number": 7,
+          "question": "Are sessions invalidated on logout and bounded by idle and absolute timeouts?",
+          "sourceTerm": "Session logout and timeout (ASVS V7.3; AC-12)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.8",
+          "section": "user",
+          "number": 8,
+          "question": "Are cookie-based sessions set Secure, HttpOnly, and SameSite?",
+          "sourceTerm": "Cookie-based session management (ASVS V7.4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.9",
+          "section": "user",
+          "number": 9,
+          "question": "Is re-authentication required before sensitive account changes (email, password, authenticator)?",
+          "sourceTerm": "Re-authentication (ASVS V6, V7)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.10",
+          "section": "user",
+          "number": 10,
+          "question": "Are unsuccessful login attempts limited and monitored?",
+          "sourceTerm": "Unsuccessful logon attempts (AC-7; ASVS V6)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.11",
+          "section": "user",
+          "number": 11,
+          "question": "Is account recovery treated as an authentication event with its own assurance, not a bypass?",
+          "sourceTerm": "Account recovery (800-63B-4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.12",
+          "section": "user",
+          "number": 12,
+          "question": "Is the account lifecycle defined — creation, disable, removal, inactivity?",
+          "sourceTerm": "Account management (AC-2)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.13",
+          "section": "user",
+          "number": 13,
+          "question": "If federated login is used, are assertions validated and the FAL documented?",
+          "sourceTerm": "Federation and assertions (800-63C-4; ASVS V10)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.14",
+          "section": "user",
+          "number": 14,
+          "question": "Are self-contained tokens validated for signature, issuer, audience, and expiry?",
+          "sourceTerm": "Self-contained tokens (ASVS V9)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.15",
+          "section": "user",
+          "number": 15,
+          "question": "Is authorization enforced server-side at function, data, and field level?",
+          "sourceTerm": "Authorization (ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.16",
+          "section": "user",
+          "number": 16,
+          "question": "Are changes to the values authorization decisions depend on applied immediately?",
+          "sourceTerm": "Authorization (ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.17",
+          "section": "user",
+          "number": 17,
+          "question": "Is personal data in identity records minimized and its retention defined?",
+          "sourceTerm": "Data protection (ASVS V14; 800-63-4 privacy considerations)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.user.18",
+          "section": "user",
+          "number": 18,
+          "question": "Are authentication and authorization failures logged as security events?",
+          "sourceTerm": "Security logging (ASVS V16)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.1",
+          "section": "admin",
+          "number": 1,
+          "question": "Is the administrative surface separated from the end-user surface (route, deployment, or process)?",
+          "sourceTerm": "Administrative interfaces (ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.2",
+          "section": "admin",
+          "number": 2,
+          "question": "Are administrative roles defined explicitly with non-overlapping duties?",
+          "sourceTerm": "Role-based access control; separation of duties (AC-3(7), AC-5; INCITS 359)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.3",
+          "section": "admin",
+          "number": 3,
+          "question": "Does each administrative role hold only the functions it needs?",
+          "sourceTerm": "Least privilege (AC-6)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.4",
+          "section": "admin",
+          "number": 4,
+          "question": "Are privileged accounts distinct from the same person's ordinary account?",
+          "sourceTerm": "Privileged user accounts (AC-2(7), AC-6(2))",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.5",
+          "section": "admin",
+          "number": 5,
+          "question": "Is every privileged action audit-logged with actor, target, time, and outcome?",
+          "sourceTerm": "Log use of privileged functions (AC-6(9); AU)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.6",
+          "section": "admin",
+          "number": 6,
+          "question": "Are audit records protected from modification by the administrators they record?",
+          "sourceTerm": "Audit protection (AU; ASVS V16)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.7",
+          "section": "admin",
+          "number": 7,
+          "question": "Do destructive or irreversible administrative actions require confirmation or a second approver?",
+          "sourceTerm": "Dual authorization (AC-3(2))",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.8",
+          "section": "admin",
+          "number": 8,
+          "question": "Is there an audited break-glass or override path rather than an undocumented one?",
+          "sourceTerm": "Audited override (AC-3(10))",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.9",
+          "section": "admin",
+          "number": 9,
+          "question": "Are privileges reviewed periodically and is revocation applied immediately?",
+          "sourceTerm": "Review of user privileges; revocation (AC-6(7), AC-3(8); ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.10",
+          "section": "admin",
+          "number": 10,
+          "question": "Are shared or group administrative accounts prohibited?",
+          "sourceTerm": "Shared and group accounts (AC-2(9))",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.11",
+          "section": "admin",
+          "number": 11,
+          "question": "In a multi-tenant system, is tenant isolation enforced on every administrative query?",
+          "sourceTerm": "Multi-tenant authorization (ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.12",
+          "section": "admin",
+          "number": 12,
+          "question": "Is system configuration changed through a controlled, versioned path rather than live edits?",
+          "sourceTerm": "Configuration management (CM; ASVS V13)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.13",
+          "section": "admin",
+          "number": 13,
+          "question": "Is impersonation (\"log in as user\") logged, consented where required, and time-bounded?",
+          "sourceTerm": "Privileged functions logging (AC-6(9); AU)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.14",
+          "section": "admin",
+          "number": 14,
+          "question": "Are administrative sessions shorter-lived and re-authenticated for sensitive functions?",
+          "sourceTerm": "Session termination; re-authentication (AC-12; ASVS V7)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.15",
+          "section": "admin",
+          "number": 15,
+          "question": "Do bulk operations carry scope and rate limits?",
+          "sourceTerm": "Business logic (ASVS V2)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.admin.16",
+          "section": "admin",
+          "number": 16,
+          "question": "Is content moderation separated from account administration as a distinct role?",
+          "sourceTerm": "Separation of duties (AC-5)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.1",
+          "section": "chat",
+          "number": 1,
+          "question": "Is the delivery guarantee (at-most-once, at-least-once, effectively-once) chosen and documented?",
+          "sourceTerm": "Reliable delivery (CS2023 NC, PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.2",
+          "section": "chat",
+          "number": 2,
+          "question": "Does every message carry a client-generated idempotency key so retries do not duplicate?",
+          "sourceTerm": "Idempotence under at-least-once delivery (PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.3",
+          "section": "chat",
+          "number": 3,
+          "question": "Is ordering within a conversation defined (sequence number or logical clock) and enforced on display?",
+          "sourceTerm": "Ordering; causal order (PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.4",
+          "section": "chat",
+          "number": 4,
+          "question": "Is a message durably persisted before it is acknowledged to the sender?",
+          "sourceTerm": "Atomicity; data persistence (PDC; SWEBOK)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.5",
+          "section": "chat",
+          "number": 5,
+          "question": "Is the transport chosen deliberately (WebSocket, SSE, polling) with reconnect and resume from a last-seen cursor?",
+          "sourceTerm": "Reliable delivery; fault tolerance (NC, PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.6",
+          "section": "chat",
+          "number": 6,
+          "question": "Is the WebSocket connection authenticated, with the token re-validated on reconnect?",
+          "sourceTerm": "WebSocket authentication (ASVS V4.4)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.7",
+          "section": "chat",
+          "number": 7,
+          "question": "Is authorization checked per message and per channel membership, not only at connect?",
+          "sourceTerm": "Authorization (ASVS V8)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.8",
+          "section": "chat",
+          "number": 8,
+          "question": "Is presence (online, typing) modelled as ephemeral state separate from durable messages?",
+          "sourceTerm": "Replicated state (PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.9",
+          "section": "chat",
+          "number": 9,
+          "question": "Is backpressure or rate limiting applied per connection and per user?",
+          "sourceTerm": "Business logic limits (ASVS V2)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.10",
+          "section": "chat",
+          "number": 10,
+          "question": "Is fan-out to group members bounded and asynchronous?",
+          "sourceTerm": "Distribution of components (SWEBOK)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.11",
+          "section": "chat",
+          "number": 11,
+          "question": "Are retention, deletion, and \"delete for everyone\" semantics defined?",
+          "sourceTerm": "Data persistence (SWEBOK; DM)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.12",
+          "section": "chat",
+          "number": 12,
+          "question": "Are attachments handled through the file-handling boundary rather than inline in the message model?",
+          "sourceTerm": "File handling (ASVS V5)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.13",
+          "section": "chat",
+          "number": 13,
+          "question": "Is message content sanitized before rendering?",
+          "sourceTerm": "Encoding and sanitization (ASVS V1)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.14",
+          "section": "chat",
+          "number": 14,
+          "question": "Is there a report and moderation path with an audit record?",
+          "sourceTerm": "Audit and accountability (AU; boundary 2)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.15",
+          "section": "chat",
+          "number": 15,
+          "question": "If end-to-end encryption is claimed, is the key model documented and the server unable to read content?",
+          "sourceTerm": "Cryptography (ASVS V11)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.16",
+          "section": "chat",
+          "number": 16,
+          "question": "Are offline delivery (queue while disconnected) and read-receipt semantics defined?",
+          "sourceTerm": "Fault tolerance (PDC)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.chat.17",
+          "section": "chat",
+          "number": 17,
+          "question": "Is the conversation model (one-to-one, group, channel, thread) chosen once and named canonically?",
+          "sourceTerm": "Data modelling (CS2023 DM)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.1",
+          "section": "ai",
+          "number": 1,
+          "question": "Is the model provider behind an adapter so the provider or model can change without touching callers?",
+          "sourceTerm": "Separation of interface and implementation (SWEBOK); Supply chain (LLM03)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.2",
+          "section": "ai",
+          "number": 2,
+          "question": "Is untrusted content (user input, retrieved documents, tool output) kept distinct from instructions when the prompt is assembled?",
+          "sourceTerm": "Prompt injection, direct and indirect (LLM01)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.3",
+          "section": "ai",
+          "number": 3,
+          "question": "Is model output treated as untrusted data before it is rendered, executed, or stored?",
+          "sourceTerm": "Improper output handling (LLM05)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.4",
+          "section": "ai",
+          "number": 4,
+          "question": "Is the system prompt free of secrets and not relied on as a security control?",
+          "sourceTerm": "System prompt leakage (LLM07)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.5",
+          "section": "ai",
+          "number": 5,
+          "question": "Are the tools the model can call minimal in functionality, permission, and autonomy?",
+          "sourceTerm": "Excessive agency (LLM06)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.6",
+          "section": "ai",
+          "number": 6,
+          "question": "Do consequential actions require human confirmation before execution?",
+          "sourceTerm": "Excessive agency (LLM06); Manage (AI RMF)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.7",
+          "section": "ai",
+          "number": 7,
+          "question": "Is sensitive data filtered before it enters the prompt and before output is returned?",
+          "sourceTerm": "Sensitive information disclosure (LLM02)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.8",
+          "section": "ai",
+          "number": 8,
+          "question": "Are retrieval sources access-controlled so a user cannot retrieve documents they may not read?",
+          "sourceTerm": "Vector and embedding weaknesses (LLM08)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.9",
+          "section": "ai",
+          "number": 9,
+          "question": "Are token, request, and cost budgets enforced per user and per tenant?",
+          "sourceTerm": "Unbounded consumption (LLM10)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.10",
+          "section": "ai",
+          "number": 10,
+          "question": "Are prompts versioned and tested against an evaluation set before release?",
+          "sourceTerm": "Measure (AI RMF)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.11",
+          "section": "ai",
+          "number": 11,
+          "question": "Is there a regression harness with defined quality metrics?",
+          "sourceTerm": "Measure (AI RMF)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.12",
+          "section": "ai",
+          "number": 12,
+          "question": "Are model, provider, and prompt version recorded per request?",
+          "sourceTerm": "Govern; traceability (AI RMF; ISO/IEC 42001)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.13",
+          "section": "ai",
+          "number": 13,
+          "question": "Is there a fallback or degraded mode when the provider fails or times out?",
+          "sourceTerm": "Fault tolerance (SWEBOK)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.14",
+          "section": "ai",
+          "number": 14,
+          "question": "Is training or fine-tuning data provenance recorded and separated from user data?",
+          "sourceTerm": "Data and model poisoning (LLM04)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.15",
+          "section": "ai",
+          "number": 15,
+          "question": "Is AI-generated output labelled where required, with known limitations disclosed?",
+          "sourceTerm": "Misinformation (LLM09); Map (AI RMF)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.16",
+          "section": "ai",
+          "number": 16,
+          "question": "Are third-party models, plugins, and embedding models pinned and verified?",
+          "sourceTerm": "Supply chain (LLM03)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.17",
+          "section": "ai",
+          "number": 17,
+          "question": "Are retention and secondary use of prompts and completions defined and disclosed?",
+          "sourceTerm": "Data governance (ISO/IEC 42001)",
+          "binding": null
+        },
+        {
+          "id": "boundaries.ai.18",
+          "section": "ai",
+          "number": 18,
+          "question": "Does \"train it on my data\" resolve to retrieval unless fine-tuning is explicitly justified?",
+          "sourceTerm": "Lexicon disambiguation rule",
+          "binding": null
+        }
+      ]
+    }
+  ]
+}

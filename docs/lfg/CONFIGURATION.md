@@ -9,12 +9,14 @@ automatically.
 
 | Setting | Bundled file | Override |
 | --- | --- | --- |
+| [One assessment](ASSESSMENT.md): formula, brackets, how fit and habit combine | [`assessment.v1.json`](../../crates/lfg-core/config/assessment.v1.json) | `LFG_ASSESSMENT_CONFIG` |
 | Preflight rules, categories and agent/branch bounds | [`preflight.v1.json`](../../crates/lfg-core/config/preflight.v1.json) | `LFG_PREFLIGHT_CONFIG` |
 | Classification taxonomy, scoring, thresholds and model catalog | [`classifier.v2.json`](../../crates/lfg-core/config/classifier.v2.json) | `LFG_CLASSIFIER_CONFIG` |
 | Runtime provider inventory and explicit replay fixtures | [`providers.v1.json`](../../crates/lfg-runtime/config/providers.v1.json) | `LFG_PROVIDER_CONFIG` |
 | Semantic evaluation rubric | [`evaluation-rubric.v1.json`](../../crates/lfg-core/config/evaluation-rubric.v1.json) | `LFG_EVALUATION_RUBRIC` |
 | Runtime promotion thresholds | [`promotion-policy.v1.json`](../../crates/lfg-core/config/promotion-policy.v1.json) | `LFG_PROMOTION_POLICY` |
 | Request and signal limits, server defaults, event streaming, benchmark limits, and UI polling | [`operations.v1.json`](../../crates/lfg-runtime/config/operations.v1.json) | `LFG_OPERATIONS_CONFIG` |
+| [Trained level score](TRAINED-LEVEL-SCORE.md): model directory, limits and threads, when the assessment binds a model | [`model-score-runtime.example.json`](../../crates/lfg-server/config/model-score-runtime.example.json) | `LFG_MODEL_SCORE_CONFIG` |
 
 Copy a file to a project-controlled location, modify it, and set the relevant
 environment variable to its path before starting the server. The benchmark uses
@@ -24,7 +26,9 @@ Version 1 classifier configuration files do not satisfy the v2 contract; update
 them explicitly. Preflight responses now use `lfg.preflight.v2`: uncalibrated
 confidence is `null`, and the encoder abstains from a confidence claim.
 
-The default model catalog is empty. For each project, populate the configured
+The one assessment learns models from local provider files and needs no catalog.
+The rest of this section applies to the older category classifier. Its default
+model catalog is empty. For each project, populate the configured
 catalog with the provider and model IDs actually available, subscription ID,
 applicable effort levels, stated strengths, configured scores and cost tier,
 and evidence source, basis and observation date. These entries are declarations,
@@ -78,6 +82,27 @@ for the recorded fields, overhead, and limits.
 
 An experiment cannot mix semantic grades produced by different rubric hashes;
 changing the rubric requires a new experiment (or restoring the original
-rubric to inspect the prior experiment's statistics). The separate offline
+rubric to inspect the prior experiment's statistics). The runtime also rejects
+an outcome assigned to different variants in the same experiment, including in
+older stored grades. A baseline and candidate must be distinct.
+
+Each outcome has equal weight in `meanScore` and `passRate`: grades are averaged
+within an outcome, then those outcome averages are averaged across the variant.
+For a disputed outcome, the pass contribution is the fraction of its grades
+that passed; it is not a majority verdict. `samples` counts distinct
+caller-supplied outcome IDs, not verified independent tasks or a paired test
+set shared by the variants. `graderRuns` counts distinct
+caller-supplied run IDs, which are not verified identities and do not establish
+independence. `independentGraders` is the number with verified independence;
+the current grade protocol supplies no evidence for that, so it is zero.
+Consequently the positive `minIndependentGraders` policy gate cannot currently
+recommend or authorize promotion; after the sample threshold is met it reports
+`insufficient-independent-evidence`. Authentic, independent grader attribution
+and its evaluation are still required. Existing recorded promotion decisions
+are historical records and may contain statistics produced under older rules;
+they are not retroactively validated by this change.
+
+The separate offline
 encoder training policy in `ml/lfg-encoder/promotion-policy.json` is not this
-runtime promotion policy and remains a distinct experimental gate.
+runtime semantic-grade policy and remains a distinct experimental gate; this
+change does not qualify or promote an encoder.

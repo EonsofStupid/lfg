@@ -92,7 +92,7 @@ impl Template {
         lfg_core::digest_value(&serde_json::to_value(self).expect("intake template serializes"))
     }
 
-    fn safe(&self, value: &Value) -> bool {
+    pub(crate) fn safe(&self, value: &Value) -> bool {
         match value {
             Value::Object(object) => object.iter().all(|(key, nested)| {
                 !self
@@ -166,7 +166,7 @@ impl Template {
     }
 }
 
-fn valid_pointer(path: &str) -> bool {
+pub(crate) fn valid_pointer(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;
     }
@@ -222,5 +222,28 @@ mod tests {
         let mut invalid = config;
         invalid["questions"][0]["sourcePath"] = json!("/broken~2pointer");
         assert!(Template::parse(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn app_supplied_analysis_facts_fill_only_their_configured_questions() {
+        let snapshot: AppSnapshot = serde_json::from_value(json!({
+            "schemaVersion": "lfg.app-snapshot.v1", "sourceApp": "host",
+            "facts": {
+                "analysis": {
+                    "input": {"modalities": ["text"], "maxBytes": 1024},
+                    "output": {"observations": ["category"], "unknown": "explicit"}
+                },
+                "observability": "wrong type"
+            }
+        }))
+        .unwrap();
+        let result = serde_json::to_value(Template::bundled().preview(snapshot).unwrap()).unwrap();
+        let rows = result["answers"].as_array().unwrap();
+        let answer = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(answer("analysis_input")["value"]["maxBytes"], 1024);
+        assert_eq!(answer("analysis_output")["value"]["unknown"], "explicit");
+        assert_eq!(answer("observability")["status"], "invalid");
+        assert_eq!(answer("deployment")["status"], "missing");
+        assert!(answer("updates")["value"].is_null());
     }
 }

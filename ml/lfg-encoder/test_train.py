@@ -2,9 +2,13 @@ import argparse
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import train
 
@@ -16,6 +20,53 @@ def record(index, verified):
 
 
 class DatasetGateTests(unittest.TestCase):
+    def test_token_coverage_counts_special_tokens_and_rejects_overflow_without_text(self):
+        class Tokenizer:
+            def __call__(self, text, **options):
+                self.options = options
+                def encode(value):
+                    return [101] + list(range(len(value.split()))) + [102]
+                return {"input_ids": [encode(value) for value in text] if isinstance(text, list) else encode(text)}
+        tokenizer = Tokenizer()
+        rows = [{"text": "private one"}, {"text": "private one two"}]
+        self.assertEqual(train.token_coverage(rows, tokenizer, 5, "train"),
+                         {"examples": 2, "maximum_tokens": 5, "over_limit": 0, "effective_limit": 5})
+        self.assertEqual(tokenizer.options, {"add_special_tokens": True, "truncation": False, "padding": False})
+        with self.assertRaisesRegex(ValueError, "train token coverage gate blocked: 1 of 2") as error:
+            train.token_coverage(rows, tokenizer, 4, "train")
+        self.assertNotIn("private", str(error.exception))
+        self.assertEqual(len(train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 5)["input_ids"]), 2)
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 4)
+        tokenizer.model_max_length = 4
+        with self.assertRaisesRegex(ValueError, "effective maximum 4"):
+            train.token_coverage(rows, tokenizer, 100, "train")
+        with self.assertRaisesRegex(ValueError, "effective maximum"):
+            train.tokenize_complete_batch({"text": [row["text"] for row in rows]}, tokenizer, 100)
+        tokenizer.model_max_length = 0
+        with self.assertRaisesRegex(ValueError, "invalid tokenizer"):
+            train.token_coverage(rows, tokenizer, 100, "train")
+
+    def test_token_coverage_rejects_invalid_tokenizer_output(self):
+        for ids in ([], None, [True], [[1]]):
+            with self.subTest(ids=ids), self.assertRaisesRegex(ValueError, "invalid tokenizer"):
+                train.token_coverage([{"text": "x"}], lambda *args, **kwargs: {"input_ids": ids}, 8, "validation")
+
+    def test_cli_validates_dataset_and_rejects_unintegrated_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "examples.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            script = Path(train.__file__)
+            result = subprocess.run([sys.executable, str(script), "validate", "--dataset", str(dataset)],
+                                    capture_output=True, text=True, check=True)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["verified"], 0)
+            self.assertFalse(report["sample_gate_passed"])
+            for command in ("plan", "export", "benchmark"):
+                result = subprocess.run([sys.executable, str(script), command], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("not yet integrated", result.stderr)
+
     def test_unverified_records_do_not_satisfy_sample_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "examples.jsonl"
@@ -61,6 +112,43 @@ class DatasetGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least two distinct families"):
             train.grouped_split([record(1, True), record(2, True)], 731)
 
+    def test_authorized_training_does_not_require_a_validation_family(self):
+        rows = [record(1, False), record(2, False)]
+        training, validation, source = train.development_partitions(rows, 731)
+        self.assertEqual(training, rows)
+        self.assertEqual(validation, [])
+        self.assertEqual(source, "not_performed")
+
+    def test_authorized_training_keeps_unseen_validation_labels_for_training(self):
+        rows = [dict(record(1, False), family="one"),
+                dict(record(2, False), family="two", risks=["sensitive-data"])]
+        training, validation, source = train.development_partitions(rows, 731)
+        self.assertEqual(training, rows)
+        self.assertEqual(validation, [])
+        self.assertEqual(source, "not_performed")
+
+    def test_cli_defaults_to_authorized_and_reviewed_is_opt_in(self):
+        parser = train.build_parser()
+        self.assertTrue(parser.parse_args(["train"]).allow_below_gate)
+        self.assertTrue(parser.parse_args(["train", "--allow-below-gate"]).allow_below_gate)
+        self.assertFalse(parser.parse_args(["train", "--require-reviewed"]).allow_below_gate)
+
+    def test_cli_requires_an_explicit_training_dataset(self):
+        result = subprocess.run([sys.executable, str(Path(train.__file__)), "train"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicitly selected --dataset", result.stderr)
+
+    def test_authorized_training_does_not_read_promotion_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "train.jsonl"
+            dataset.write_text(json.dumps(record(1, False)), encoding="utf-8")
+            args = argparse.Namespace(dataset=dataset, allow_below_gate=True, promotion_policy=root / "missing.json",
+                                      seed=731, model_revision=None)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(SystemExit, "model-revision"):
+                train.train(args)
+
     def test_validation_cannot_silently_drop_a_label_absent_from_training(self):
         training = [record(1, True)]
         validation = [dict(record(2, True), risks=["sensitive-data"])]
@@ -68,6 +156,38 @@ class DatasetGateTests(unittest.TestCase):
             train.validate_validation_labels(training, validation)
         training[0]["risks"] = ["sensitive-data"]
         train.validate_validation_labels(training, validation)
+
+    def test_reviewed_support_checks_positive_and_negative_per_label_and_split(self):
+        taxonomy = {"intents": {"respond.general"}, "capabilities": {"text.generate"}, "risks": {"sensitive-data"}}
+        policy = train.SUPPORT_POLICY.read_bytes()
+        positive = dict(record(1, True), risks=["sensitive-data"])
+        negative = record(2, True)
+        negative["intents"] = []
+        negative["capabilities"] = []
+        rows = [positive, negative]
+        result = train.training_support(rows, rows, taxonomy, policy)
+        self.assertEqual(result["counts"]["train"]["sensitive-data"]["positive"], 1)
+        with self.assertRaisesRegex(ValueError, "train:sensitive-data has 0 positive/2 negative"):
+            train.training_support([negative, negative], rows, taxonomy, policy)
+        with self.assertRaisesRegex(ValueError, "validation:sensitive-data has 2 positive/0 negative"):
+            train.training_support(rows, [positive, positive], taxonomy, policy)
+
+    def test_support_policy_is_configurable_and_rejects_unknown_or_invalid_rules(self):
+        taxonomy = {"intents": {"respond.general"}, "capabilities": {"text.generate"}, "risks": {"sensitive-data"}}
+        policy = json.loads(train.SUPPORT_POLICY.read_bytes())
+        policy["overrides"] = {"sensitive-data": {"train": {"minimum_positive": 2}}}
+        positive = dict(record(1, True), risks=["sensitive-data"])
+        negative = dict(record(2, True), intents=[], capabilities=[])
+        result = train.training_support([positive, positive, negative], [positive, negative], taxonomy, json.dumps(policy).encode())
+        self.assertEqual(result["counts"]["train"]["sensitive-data"]["minimum_positive"], 2)
+        for overrides in ({"missing": {"train": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"test": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"train": {"minimum_positive": True}}},
+                          {"sensitive-data": {"train": {"minimum_positive": 0}}},
+                          {"sensitive-data": {"train": {"minimum_negative": -1}}}):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                train.training_support([positive, negative], [positive, negative], taxonomy,
+                                       json.dumps({**policy, "overrides": overrides}).encode())
 
     def test_run_manifest_prevents_overwrite_and_mismatched_resume(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -98,22 +218,169 @@ class DatasetGateTests(unittest.TestCase):
     def test_run_lock_rejects_concurrent_writers_and_releases(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run"
-            with train.run_lock(output):
+            with train.training_run_lock(output):
                 with self.assertRaisesRegex(ValueError, "run lock exists"):
-                    with train.run_lock(output):
+                    with train.training_run_lock(output):
                         self.fail("second writer acquired the lock")
-            with train.run_lock(output):
+            with train.training_run_lock(output):
                 pass
+            self.assertEqual(output.with_name(output.name + ".lock").read_bytes(), train.RUN_LOCK_MAGIC)
+
+    def test_run_lock_recovers_after_process_is_killed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            ready = Path(directory) / "ready"
+            code = ("import sys,time; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
+                    "import train; lock=train.training_run_lock(Path(sys.argv[2])); lock.__enter__(); "
+                    "Path(sys.argv[3]).write_text('ready'); time.sleep(60)")
+            child = subprocess.Popen([sys.executable, "-c", code, str(Path(train.__file__).parent),
+                                      str(output), str(ready)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(ready.exists(), "child did not acquire the training lock")
+                with self.assertRaisesRegex(ValueError, "held by another trainer"):
+                    with train.training_run_lock(output):
+                        self.fail("acquired another process's lock")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=10)
+            with train.training_run_lock(output):
+                pass
+
+    def test_legacy_lock_is_not_assumed_stale_or_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            lock = output.with_name(output.name + ".lock")
+            lock.write_bytes(b"pid=123\n")
+            with self.assertRaisesRegex(ValueError, "unrecognized or legacy"):
+                with train.training_run_lock(output):
+                    self.fail("accepted a legacy lock")
+            self.assertEqual(lock.read_bytes(), b"pid=123\n")
+
+    def test_legacy_and_new_trainers_cannot_hold_same_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_output = Path(directory) / "legacy"
+            new_output = Path(directory) / "current"
+            with train.run_lock(old_output):
+                with self.assertRaisesRegex(ValueError, "unrecognized or legacy"):
+                    with train.training_run_lock(old_output):
+                        self.fail("new trainer accepted a legacy lock")
+            with train.training_run_lock(new_output):
+                with self.assertRaisesRegex(ValueError, "run lock exists"):
+                    with train.run_lock(new_output):
+                        self.fail("legacy trainer accepted a current lock")
 
     def test_training_settings_and_overrides_are_validated(self):
         config = train.load_training_config(train.TRAINING_CONFIG)
         train.validate_training_config(config)
         for field, invalid in (("batch_size", 0), ("checkpoint_steps", -1),
                                ("epochs", float("nan")), ("base_model", ""),
-                               ("allow_mismatched_sizes", "true")):
+                               ("allow_mismatched_sizes", "true"), ("device", "gpu"), ("device", "cpu")):
             with self.subTest(field=field):
                 with self.assertRaises(ValueError):
                     train.validate_training_config({**config, field: invalid})
+
+    def test_explicit_compute_target_rejects_fallback(self):
+        train.verify_training_device("cuda", "cuda", True)
+        train.verify_training_device("auto", "cuda", True)
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.verify_training_device("cuda", "cpu", False)
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.verify_training_device("auto", "cpu", False)
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.verify_training_device("cuda", "cpu", True)
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.verify_training_device("auto", "cpu", True)
+        with self.assertRaisesRegex(ValueError, "invalid requested"):
+            train.verify_training_device("cpu", "cpu", True)
+
+    def test_legacy_config_defaults_to_auto_device(self):
+        config = train.load_training_config(train.TRAINING_CONFIG)
+        del config["device"]
+        self.assertEqual(train.parse_training_config(json.dumps(config).encode())["device"], "auto")
+
+    def test_training_arguments_require_cuda_and_never_select_cpu(self):
+        args = argparse.Namespace(device="cuda", output=Path("unused"), seed=1, epochs=1,
+                                  batch_size=1, checkpoint_steps=1)
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
+        captured = {}
+        def arguments(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(device=SimpleNamespace(type="cuda"))
+        train.make_training_arguments(args, torch, arguments)
+        self.assertIs(captured["use_cpu"], False)
+        train.make_training_arguments(args, torch, arguments, has_validation=False)
+        self.assertEqual(captured["eval_strategy"], "no")
+        self.assertFalse(captured["load_best_model_at_end"])
+        torch.cuda.is_available = lambda: False
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.make_training_arguments(args, torch, arguments)
+        args.device = "auto"
+        with self.assertRaisesRegex(ValueError, "CUDA is unavailable"):
+            train.make_training_arguments(args, torch, arguments)
+        args.device = "cpu"
+        with self.assertRaisesRegex(ValueError, "invalid requested"):
+            train.make_training_arguments(args, torch, arguments)
+        torch.cuda.is_available = lambda: True
+        args.device = "auto"
+        with self.assertRaisesRegex(ValueError, "device mismatch"):
+            train.make_training_arguments(
+                args, torch, lambda **kwargs: SimpleNamespace(device=SimpleNamespace(type="cpu")))
+
+    def test_trainer_receives_tokenizer_padding_for_both_datasets(self):
+        tokenizer = object()
+        train_data, validation_data = object(), object()
+        collator = object()
+        def make_collator(*, tokenizer):
+            self.assertIs(tokenizer, expected_tokenizer)
+            return collator
+        def make_trainer(**kwargs):
+            return kwargs
+        expected_tokenizer = tokenizer
+        trainer = train.make_trainer(object(), object(), train_data, validation_data,
+                                     tokenizer, make_trainer, make_collator, object)
+        self.assertIs(trainer["data_collator"], collator)
+        self.assertIs(trainer["train_dataset"], train_data)
+        self.assertIs(trainer["eval_dataset"], validation_data)
+
+    def test_final_step_requests_evaluation_and_checkpoint(self):
+        callback = train.make_final_evaluation_callback(object)
+        control = SimpleNamespace(should_evaluate=False, should_save=False)
+        state = SimpleNamespace(global_step=2, max_steps=3)
+        callback.on_step_end(None, state, control)
+        self.assertFalse(control.should_evaluate)
+        self.assertFalse(control.should_save)
+        state.global_step = 3
+        callback.on_step_end(None, state, control)
+        self.assertTrue(control.should_evaluate)
+        self.assertTrue(control.should_save)
+        callback = train.make_final_evaluation_callback(object, has_validation=False)
+        control = SimpleNamespace(should_evaluate=False, should_save=False)
+        callback.on_step_end(None, state, control)
+        self.assertFalse(control.should_evaluate)
+        self.assertTrue(control.should_save)
+
+    def test_training_result_requires_finite_selected_validation_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = SimpleNamespace(best_model_checkpoint=directory, best_metric=0.5)
+            train.validate_selected_checkpoint(state)
+            for checkpoint, metric in ((None, 0.5), (str(Path(directory) / "missing"), 0.5),
+                                       (directory, None), (directory, float("nan")), (directory, float("inf"))):
+                with self.subTest(checkpoint=checkpoint, metric=metric), self.assertRaisesRegex(ValueError, "validation loss"):
+                    train.validate_selected_checkpoint(SimpleNamespace(best_model_checkpoint=checkpoint, best_metric=metric))
+
+    def test_reviewed_training_requires_both_environment_and_model_inputs(self):
+        train.validate_input_options(True, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'reviewed training requires'):
+            train.validate_input_options(False, None, None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, Path('lock'), None, None, [])
+        with self.assertRaisesRegex(ValueError, 'supplied together'):
+            train.validate_input_options(True, None, None, None, ['pip'])
+        train.validate_input_options(False, Path('lock'), Path('wheels'), Path('manifest'), ['pip'])
 
     def test_promotion_policy_rejects_invalid_sample_threshold(self):
         with tempfile.TemporaryDirectory() as directory:

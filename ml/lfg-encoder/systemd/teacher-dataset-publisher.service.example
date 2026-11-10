@@ -1,0 +1,12 @@
+[Unit]
+Description=LFG private teacher dataset publisher
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/PATH/TO/PYTHON /PATH/TO/publish_teacher_datasets.py --config /PATH/TO/PRIVATE_PUBLISHER_CONFIG.json
+CPUQuota=100%
+MemoryMax=1G
+TasksMax=64
+NoNewPrivileges=true
+UMask=0077

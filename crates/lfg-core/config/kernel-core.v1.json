@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "lfg.kernel-snapshot.v1",
+  "revision": "r1",
+  "namespace": "rr1:core",
+  "keySeed": 0,
+  "maxInputBytes": 12000,
+  "maxRegexBytes": 1048576,
+  "root": "operation",
+  "nodes": {
+    "operation": {
+      "kind": "choice",
+      "options": {"chat": "work-kind", "tool_call": "done"},
+      "rules": [
+        {"id": "operation-chat-auth", "field": "prompt", "pattern": "(?i)\\b(logout|login|session)\\b", "option": "chat", "weightPpm": 900000},
+        {"id": "operation-tool-call", "field": "prompt", "pattern": "(?i)\\b(run|execute|call)\\b", "option": "tool_call", "weightPpm": 700000}
+      ],
+      "thresholdPpm": 800000,
+      "ambiguityPpm": 50000
+    },
+    "work-kind": {
+      "kind": "choice",
+      "options": {"code.fix": "domain", "explain": "done"},
+      "rules": [
+        {"id": "work-fix-session", "field": "prompt", "pattern": "(?i)\\b(logout|session|auth)\\b", "option": "code.fix", "weightPpm": 850000},
+        {"id": "work-explain", "field": "prompt", "pattern": "(?i)\\b(explain|describe)\\b", "option": "explain", "weightPpm": 700000}
+      ],
+      "thresholdPpm": 800000,
+      "ambiguityPpm": 50000
+    },
+    "domain": {
+      "kind": "choice",
+      "options": {"auth": "done", "ui": "done"},
+      "rules": [
+        {"id": "domain-auth", "field": "prompt", "pattern": "(?i)\\b(login|logout|session|cookie|jwt)\\b", "option": "auth", "weightPpm": 900000},
+        {"id": "domain-ui", "field": "prompt", "pattern": "(?i)\\b(ui|layout|button)\\b", "option": "ui", "weightPpm": 700000}
+      ],
+      "thresholdPpm": 800000,
+      "ambiguityPpm": 50000
+    },
+    "done": {"kind": "compose"}
+  }
+}

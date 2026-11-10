@@ -46,3 +46,9 @@ python ml/lfg-encoder/benchmark_process.py --binary PATH_TO_LFG_BINARY --dataset
 
 The report contains text-derived hashes and model/configuration identities;
 keep it with the other private evaluation metadata.
+
+To benchmark another compatible LFG prediction command, supply each argument
+with a separate `--binary-arg=VALUE`. The argument list is hashed in the report
+rather than printed. Use only trusted commands and avoid putting secrets in
+arguments. The [native CPU shadow evidence](ONNX-CPU-SHADOW.md#local-compatibility-evidence)
+shows an exploratory comparison; it is not a quality or promotion result.

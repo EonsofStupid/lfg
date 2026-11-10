@@ -2,6 +2,7 @@
   "name": "@shippin/master-clyffy-web",
   "version": "0.1.0",
   "private": true,
+  "license": "BUSL-1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +10,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
     "@xyflow/react": "^12.9.2",
     "motion": "^12.23.24",
     "react": "^19.2.0",

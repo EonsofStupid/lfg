@@ -7,6 +7,12 @@ rust-version.workspace = true
 
 [features]
 embedded-ui = []
+onnx-shadow = ["dep:tract", "dep:tokenizers", "dep:tract-linalg"]
+embedded-onnx = ["onnx-shadow"]
+embedded-node = ["onnx-shadow"]
+owned-byte-onnx = ["dep:tract", "dep:tract-onnx", "dep:prost"]
+embedded-owned-byte = ["owned-byte-onnx"]
+embedded-owned-cached-byte = ["owned-byte-onnx"]
 
 [[bin]]
 name = "lfg-server"
@@ -22,13 +28,35 @@ clap.workspace = true
 lfg-core = { path = "../lfg-core" }
 lfg-codex = { path = "../lfg-codex" }
 lfg-runtime = { path = "../lfg-runtime" }
+bytes = "1"
+http-body-util = "0.1"
+memchr = "2"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 tokio-stream.workspace = true
 tower-http.workspace = true
+tract = { version = "=0.23.9", default-features = false, features = ["onnx"], optional = true }
+tract-onnx = { version = "=0.23.9", optional = true }
+# Threaded matrix kernels; used only inside an explicit thread-pool scope.
+tract-linalg = { version = "=0.23.9", features = ["multithread-mm"], optional = true }
+prost = { version = "=0.14.1", optional = true }
+tokenizers = { version = "=0.22.2", default-features = false, features = ["fancy-regex"], optional = true }
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting"] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tower.workspace = true
 tempfile = "3"
+
+[build-dependencies]
+sha2.workspace = true
+serde_json.workspace = true

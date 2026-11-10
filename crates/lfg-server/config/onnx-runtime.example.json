@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "lfg.onnx-runtime.v1",
+  "revision": "local-example-1",
+  "cpuThreads": 1,
+  "overflowPolicy": "report",
+  "maxManifestBytes": 131072,
+  "maxMetadataBytes": 8388608,
+  "maxModelBytes": 1500000000,
+  "maxSequenceTokens": 2048,
+  "maxLabels": 4096,
+  "maxExamples": 100000,
+  "maxPromptBytes": 65536
+}

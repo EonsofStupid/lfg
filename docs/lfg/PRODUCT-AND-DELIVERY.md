@@ -1,16 +1,39 @@
 # LFG product and delivery target
 
-LFG should be a self-contained, CPU-oriented binary that users can run on their
-own machine or host as a service. The binary should provide local analysis and
-an optional developer UI, connect to supported AI tools, and integrate with
-cloud services when the user configures them. Running locally must not require
-an account, cloud connectivity, RRFlow, SWAG, a GPU, or a model download.
+LFG is our own distilled model, about 650 MB, shipped in a self-contained,
+CPU-oriented binary that users can run on their own machine or host as a
+network service that clients ping. See [model and distillation](MODEL-AND-DISTILLATION.md).
+For each prompt it
+reports intent, complexity, suggested models and total agents. The binary
+should provide local analysis and a UI, connect to supported AI tools, and
+integrate with cloud services, SWAG and RRFlow when the user configures them.
+Running locally must not require an account, cloud connectivity, RRFlow, SWAG,
+a GPU, or a model download.
 
 This is the target, not a statement that a fully qualified self-contained
 distribution, hosted authentication, cloud integration, or model editor exists
 today. An optional build feature embeds the separately built UI into the server;
-see [bundled UI builds](BUNDLED-UI.md) for evidence and limits. The classifier
-is rule-based. Training is experimental.
+see [bundled UI builds](BUNDLED-UI.md) for evidence and limits. The runtime is
+rule-based today; a tuned model is promoted only through evaluation gates.
+
+## Layman view
+
+The default UI is for someone who is not an LFG specialist. For each prompt it
+shows, in order:
+
+1. **Prompt received:** the text LFG assessed.
+2. **Formula:** the rules or model, and the arithmetic, that produced the
+   result, in plain words with the values that mattered.
+3. **Brackets:** the complexity and intent brackets the prompt fell into.
+4. **Agents and models suggested:** the total agents and the models suggested
+   for them.
+5. **Subscriptions recognized:** which subscriptions LFG recognized, whether
+   each is verified, and which suggestions they unlock.
+
+Configuring these must be equally easy: a person should be able to change a
+bracket, a model or a subscription from the UI, see what the change would do,
+and apply or undo it. AI agents that manage LFG need the same operations as
+clear, ordered steps.
 
 ## Developer UI
 
@@ -46,9 +69,10 @@ configuration, store credentials, manage connections, or measure CPU cycles.
 ## Integration and release boundaries
 
 The standalone binary should expose the same versioned analysis through its
-local UI and a typed MCP adapter. RRFlow/SWAG integration is optional: LFG
-contributes observations; RRFlow controls authorization and budgets; SWAG
-proposes model and effort. Cloud transport, identity, sharing and synchronization
+local UI and a typed MCP adapter. RRFlow/SWAG integration is optional: SWAG
+accepts LFG's assessment as a data-point suggestion and weights it more heavily
+after a configurable confirmation, once LFG's suggestions are proven reliable; RRFlow
+controls authorization and budgets. Cloud transport, identity, sharing and synchronization
 must be explicit, configurable and independently authorized. Local operation
 must remain useful when those integrations are unavailable.
 
@@ -60,11 +84,15 @@ rollback. Measure binary size, startup, memory, elapsed latency, CPU time, and
 where available CPU cycles on declared hardware and a representative corpus.
 Publish quality and resource limits alongside benchmark methodology.
 
-The first implementation milestones are: (1) reproducible, reviewed data and a
-CPU baseline; (2) reproducible checkpointed training and independent evaluation;
-(3) qualified artifact export and CPU integration; (4) embedded UI and clean
-machine release tests; (5) validated project configuration APIs and developer
-editor with secure credential references; and (6) MCP, RRFlow/SWAG and cloud
-adapters tested through their own access and failure boundaries. These tracks
-can advance independently where their contracts are stable; none is complete
-merely because a local smoke test or GPU run succeeds.
+The first implementation milestones are: (1) the owner's projects and chats
+prepared as distillation data labeled for all four results, plus a CPU
+baseline; (2) LFG's own model distilled within the 650 MB budget, measured on
+the target hardware and independently evaluated; (3) qualified artifact export
+and CPU integration in the binary; (4) embedded layman and developer UI and
+clean machine release tests; (5) validated project configuration APIs and
+developer editor with secure credential references; (6) MCP, RRFlow/SWAG,
+network-service and cloud adapters tested through their own access and failure
+boundaries; and (7) user-side training of custom weights on the chats and
+projects each user marks successful. These tracks can advance independently
+where their contracts are stable; none is complete merely because a local
+smoke test or GPU run succeeds.

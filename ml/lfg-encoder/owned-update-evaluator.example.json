@@ -1,0 +1,16 @@
+{
+  "schema_version": "lfg.owned-update-evaluator.v1",
+  "python": "/PATH/TO/PYTHON",
+  "evaluator": "/PATH/TO/evaluate_owned_torch_format.py",
+  "jobs_root": "/PATH/TO/PRIVATE_QUEUE_JOBS",
+  "dataset": "/PATH/TO/PRIVATE_DEVELOPMENT_DATASET",
+  "policy": "/PATH/TO/PRIVATE_SCREEN_POLICY.json",
+  "evaluation_config": "/PATH/TO/PRIVATE_EVALUATION_CONFIG.json",
+  "report_root": "/PATH/TO/PRIVATE_UPDATE_REPORTS",
+  "state_root": "/PATH/TO/NEW_PRIVATE_EVALUATOR_STATE",
+  "threads": 2,
+  "poll_seconds": 30,
+  "max_checkpoint_bytes": 268435456,
+  "max_jobs": 1000,
+  "device": "cuda"
+}

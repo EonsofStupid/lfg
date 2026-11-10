@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "lfg.dev-model-service.v1",
+  "enabled": false,
+  "endpoint": "127.0.0.1:18092",
+  "servedModel": "set-to-the-name-the-model-server-uses",
+  "modelLabel": "Set a name that says this is an open model",
+  "weightsSha256": "set-from-the-downloaded-weights",
+  "apiKeyEnv": "LFG_DEV_MODEL_KEY",
+  "instructionFile": "C:/path/to/private/dev-model-instruction.txt",
+  "expectedInstructionSha256": "set-from-the-instruction-file",
+  "maxInstructionBytes": 16384,
+  "requestExtensions": { "chat_template_kwargs": { "enable_thinking": false } },
+  "requiredOutputFields": [
+    { "name": "intent", "valueType": "string", "nonEmpty": true },
+    { "name": "complexity", "valueType": "string", "nonEmpty": true },
+    { "name": "suggested_models", "valueType": "array" },
+    { "name": "agent_count", "valueType": "integer", "minInteger": 0 },
+    { "name": "reasons", "valueType": "array", "nonEmpty": true }
+  ],
+  "maxHttpBodyBytes": 65536,
+  "maxRequestBytes": 8192,
+  "maxContextBytes": 24576,
+  "maxGeneratedTokens": 512,
+  "temperature": 0.0,
+  "maxResponseBytes": 65536,
+  "timeoutMs": 60000,
+  "maxConcurrent": 1
+}

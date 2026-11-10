@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "lfg.model-score-runtime.v1",
+  "revision": "example-1",
+  "directory": "PRIVATE_MODEL_DIRECTORY",
+  "maxManifestBytes": 65536,
+  "maxInputSpecBytes": 65536,
+  "maxTokenizerBytes": 67108864,
+  "maxModelBytes": 1073741824,
+  "maxPromptBytes": 65536,
+  "maxConcurrent": 1,
+  "cpuThreads": 8
+}

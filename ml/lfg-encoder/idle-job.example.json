@@ -1,0 +1,13 @@
+{
+  "schema_version": "lfg.idle-job.v1",
+  "job_unit": "REPLACE_WITH_JOB.service",
+  "complete_marker": "/PATH/TO/PRIVATE_OUTPUT/complete.json",
+  "status_file": "/PATH/TO/PRIVATE_STATE/idle-job-status.json",
+  "poll_seconds": 30,
+  "idle_samples_to_start": 10,
+  "busy_samples_to_stop": 2,
+  "max_idle_gpu_percent": 5,
+  "max_foreign_cpu_percent": 40,
+  "min_available_memory_bytes": 38654705664,
+  "stop_below_available_memory_bytes": 4294967296
+}

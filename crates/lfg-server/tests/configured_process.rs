@@ -72,6 +72,25 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         serde_json::from_str(include_str!("../../lfg-runtime/config/operations.v1.json")).unwrap();
     let mut intake: Value =
         serde_json::from_str(include_str!("../config/intake-template.v1.json")).unwrap();
+    let boundary = json!({"schemaVersion":"lfg.boundary-question-banks.v1", "revision":"custom-proof",
+        "sourceNotice":"test catalog", "artifactPaths":{"custom evidence":"/project/inventory"},
+        "banks":[{"id":"custom", "title":"Custom", "status":"draft",
+        "questions":[{"id":"custom.one", "section":"custom", "number":1,
+        "question":"Custom question?", "sourceTerm":"test", "binding":"custom evidence"}]}]});
+    let seam_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let seam_address = seam_listener.local_addr().unwrap();
+    let seam = thread::spawn(move || {
+        let (mut stream, _) = seam_listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let received = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..received]).starts_with("GET /state "));
+        let body = json!({"registry":{"providers":[{"id":"host-provider","activated":true,
+            "capabilities":["read-sessions"],"note":"history only"}]}})
+        .to_string();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let context = json!({"schemaVersion":"lfg.devpulse-context.v1","revision":"host-proof",
+        "endpoint":seam_address.to_string(),"timeoutMs":1000,"pollIntervalMs":100,"maxResponseBytes":2048});
     intake["revision"] = json!("intake-proof");
     intake["questions"] = json!([{"id":"custom", "question":"What is requested?", "sourcePath":"/request/text", "kind":"string", "required":true}]);
     operations["revision"] = json!("operations-proof");
@@ -97,6 +116,8 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         ("policy.json", &policy),
         ("operations.json", &operations),
         ("intake.json", &intake),
+        ("boundary.json", &boundary),
+        ("context.json", &context),
     ] {
         write_json(&root.join(name), value);
     }
@@ -111,6 +132,8 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         .env("LFG_PROMOTION_POLICY", root.join("policy.json"))
         .env("LFG_OPERATIONS_CONFIG", root.join("operations.json"))
         .env("LFG_INTAKE_TEMPLATE", root.join("intake.json"))
+        .env("LFG_BOUNDARY_QUESTION_BANK", root.join("boundary.json"))
+        .env("LFG_DEVPULSE_CONTEXT_CONFIG", root.join("context.json"))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut server = RunningServer(command.spawn().unwrap());
@@ -141,6 +164,43 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
     );
     assert_eq!(preview["templateRevision"], "intake-proof");
     assert_eq!(preview["answers"][0]["value"], "actual request");
+    let catalog = http_json(port, "GET", "/api/lfg/boundaries/questions", None);
+    assert_eq!(catalog["catalog"]["revision"], "custom-proof");
+    let attuned = http_json(
+        port,
+        "POST",
+        "/api/lfg/boundaries/attune",
+        Some(json!({
+            "schemaVersion":"lfg.boundary-attunement.v1", "sourceApp":"host",
+            "selections":[{"bankId":"custom"}], "facts":{"project":{"inventory":"from host"}}
+        })),
+    );
+    assert_eq!(
+        attuned["questions"][0]["question"]["question"],
+        "Custom question?"
+    );
+    assert_eq!(attuned["questions"][0]["artifact"], "from host");
+    assert_eq!(attuned["questions"][0]["artifactSource"], "app_fact");
+    assert_eq!(
+        attuned["questions"][0]["artifactPath"],
+        "/project/inventory"
+    );
+    let explicit_empty = http_json(
+        port,
+        "POST",
+        "/api/lfg/boundaries/attune",
+        Some(json!({
+            "schemaVersion":"lfg.boundary-attunement.v1", "sourceApp":"host",
+            "selections":[{"bankId":"custom"}], "facts":{"project":{"inventory":"from host"}},
+            "artifacts":{"custom evidence":null}
+        })),
+    );
+    assert_eq!(explicit_empty["questions"][0]["bindingStatus"], "missing");
+    let context = http_json(port, "GET", "/api/lfg/intake/app-context", None);
+    assert_eq!(context["status"], "ready");
+    assert_eq!(context["providers"][0]["id"], "host-provider");
+    assert_eq!(context["providers"][0]["capabilities"][0], "read-sessions");
+    seam.join().unwrap();
     assert_eq!(classified["project"], "project-proof");
     assert_eq!(classified["configRevision"], "profile-proof");
     assert_eq!(
@@ -178,6 +238,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
         .0,
         400
     );
+    // Codex runs are off without LFG_CODEX_RUNS_TOKEN, before any input is read.
     assert_eq!(
         http_response(
             port,
@@ -186,7 +247,7 @@ fn server_uses_external_configuration_and_rejects_invalid_files() {
             oversized
         )
         .0,
-        400
+        503
     );
     assert_eq!(
         http_response(

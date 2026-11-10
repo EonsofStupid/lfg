@@ -1,0 +1,12 @@
+{
+  "schema_version": "lfg.owned-training-service.v1",
+  "trainer_kind": "assessment_sft",
+  "python": "/PATH/TO/PYTHON",
+  "trainer": "/PATH/TO/train_owned_assessment_sft.py",
+  "state_dir": "/PATH/TO/NEW_PRIVATE_STATE_DIRECTORY",
+  "dataset": "/PATH/TO/PRIVATE_ASSESSMENT_DATASET",
+  "checkpoint": "/PATH/TO/PRIVATE_OWNED_STARTING_MODEL",
+  "sft_config": "/PATH/TO/PRIVATE_SFT_CONFIG.json",
+  "segment_steps": 200,
+  "status_poll_seconds": 30
+}

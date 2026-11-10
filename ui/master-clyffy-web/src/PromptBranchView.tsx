@@ -44,6 +44,7 @@ export function PromptBranchView({
 
   return (
     <div className="branch-view">
+      <p className="classification-explainer">These branches show relative scores from configured rules, not model confidence. Select a category to see which words matched.</p>
       <div className="cpu-burst" title="Elapsed wall time per classification pass, most recent on the right">
         <span className="eyebrow">Elapsed · live poll</span>
         <div className="cpu-burst-bars">

@@ -1,0 +1,19 @@
+[Unit]
+Description=LFG reviewed training run %i
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+EnvironmentFile=%h/.config/lfg-training/%i.env
+ExecStart=/usr/bin/python3 ${LFG_TRAIN_SUPERVISOR} --config ${LFG_TRAIN_CONFIG}
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=2
+TimeoutStopSec=60s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
