@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import evaluate
@@ -52,6 +53,7 @@ def main() -> None:
             raise ValueError('output must be a new directory outside the model snapshot')
         import numpy as np
         import onnx
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer

@@ -11,6 +11,7 @@ import { OwnedAssessmentPanel } from './OwnedAssessmentPanel'
 import type { OwnedResult, OwnedStatus } from './ownedAssessmentApi'
 import { PromptBranchView } from './PromptBranchView'
 import { DevPanel } from './DevPanel'
+import { DevtoolsView } from './DevtoolsView'
 import { IntakePanel } from './IntakePanel'
 import { BoundaryPanel } from './BoundaryPanel'
 import { SupervisionPanel } from './SupervisionPanel'
@@ -19,7 +20,9 @@ import type { Assessment, ClassificationSnapshot, EscalationTarget, GraphNode, G
 const SESSION_ID = `browser-${crypto.randomUUID()}`
 const GraphCanvas = lazy(() => import('./GraphCanvas'))
 
-type Mode = 'guided' | 'inspector'
+type Mode = 'guided' | 'inspector' | 'devtools'
+
+const opensDevtools = () => window.location.hash.startsWith('#devtools=') || new URLSearchParams(window.location.search).get('view') === 'devtools'
 
 export default function App() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
@@ -37,7 +40,7 @@ export default function App() {
   const [graph, setGraph] = useState<GraphSnapshot | null>(null)
   const [flow, setFlow] = useState<Awaited<ReturnType<typeof layoutGraph>>>({ nodes: [], edges: [] })
   const [selected, setSelected] = useState<GraphNode | null>(null)
-  const [mode, setMode] = useState<Mode>('guided')
+  const [mode, setMode] = useState<Mode>(() => opensDevtools() ? 'devtools' : 'guided')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cursor, setCursor] = useState(0)
@@ -124,11 +127,12 @@ export default function App() {
         {!publicEmbed && <div className="mode-switch" role="group" aria-label="View mode">
           <button className={mode === 'guided' ? 'is-active' : ''} onClick={() => setMode('guided')}>Guided</button>
           <button className={mode === 'inspector' ? 'is-active' : ''} onClick={() => setMode('inspector')}>Inspector</button>
+          <button className={mode === 'devtools' ? 'is-active' : ''} onClick={() => setMode('devtools')}>Devtools</button>
         </div>}
         <span className="runtime-state"><i />{status?.phase ?? 'connecting'}</span>
       </header>
 
-      <main>
+      {!publicEmbed && mode === 'devtools' ? <main><DevtoolsView status={status} /></main> : <main>
         <section className="composer" aria-labelledby="prompt-label">
           <motion.div className="type-callout" animate={{ x: [0, 8, 0] }} transition={{ duration: 2.4, repeat: Infinity }}>
             <span>TYPE HERE</span><b>↘</b>
@@ -199,7 +203,7 @@ export default function App() {
         </section>}
 
         {!publicEmbed && <AnimatePresence>{selected && <Inspector node={selected} onClose={() => setSelected(null)} />}</AnimatePresence>}
-      </main>
+      </main>}
     </div>
   )
 }

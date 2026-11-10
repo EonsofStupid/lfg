@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import platform
 import sys
 from pathlib import Path
@@ -87,6 +88,7 @@ def export(args: argparse.Namespace) -> dict[str, Any]:
 
     import numpy as np
     import onnx
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
     import onnxruntime as ort
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer

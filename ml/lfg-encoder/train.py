@@ -770,6 +770,7 @@ def export_onnx(args: argparse.Namespace) -> None:
     try:
         import numpy as np
         import onnx
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import torch
         from onnxruntime.quantization import QuantType, quantize_dynamic
@@ -932,6 +933,7 @@ def benchmark_onnx(args: argparse.Namespace) -> None:
 
     try:
         import numpy as np
+        os.environ['ORT_DISABLE_TELEMETRY'] = '1'  # Set before import, or model names and hashes go to Microsoft.
         import onnxruntime as ort
         import psutil
         from transformers import AutoTokenizer
