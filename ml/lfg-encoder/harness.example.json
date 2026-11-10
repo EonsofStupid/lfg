@@ -1,0 +1,13 @@
+{
+  "truth": "PRIVATE_DIR/harness/truth.jsonl",
+  "outDir": "PRIVATE_DIR/harness/answers",
+  "sample": "all",
+  "contestants": [
+    {"name": "lfg-rules", "kind": "lfg", "baseUrl": "http://127.0.0.1:4317", "useModel": false, "size": "none (rules)", "workers": 4},
+    {"name": "lfg-dev-folds", "kind": "precomputed", "path": "PRIVATE_DIR/scores/devtext.jsonl", "size": "644 MB"},
+    {"name": "claude", "kind": "claude", "size": "frontier", "workers": 4, "timeoutSeconds": 300},
+    {"name": "codex", "kind": "codex", "size": "frontier", "workers": 4, "timeoutSeconds": 300},
+    {"name": "openrouter-small", "kind": "openrouter", "model": "OPENROUTER_MODEL_ID", "apiKeyEnv": "OPENROUTER_API_KEY", "size": "MODEL_SIZE", "workers": 4},
+    {"name": "spark-local", "kind": "openai-compatible", "baseUrl": "http://127.0.0.1:8080/v1", "model": "LOCAL_MODEL", "apiKeyEnv": "", "size": "MODEL_SIZE", "workers": 2}
+  ]
+}
