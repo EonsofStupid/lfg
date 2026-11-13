@@ -9,12 +9,36 @@ new work should build on this one.
 The separately versioned [integration observation](OBSERVATION-CONTRACT.md)
 projects this analysis without consulting local subscription history and
 accepts opaque extra request fields. It is an advisory interface. RRFlow's
-draft engine integration calls it; SWAG and MCP don't yet.
+draft engine integration calls it. SWAG's MCP bridge calls it through
+`lfg_assess` and its decision brief; as of 2026-11-12 the brief reads
+complexity, role and effort, and not intent or agents.
 
 These are rule outputs, not calibrated probabilities. `confidence` stays `null`
 until measured evidence can support a number. An operator can bind a
 [trained model](TRAINED-LEVEL-SCORE.md) whose work level chooses the bracket;
 the response then carries a `modelScore` block beside the rule score.
+
+## Where the code is
+
+Each job has its own module under
+[`crates/lfg-core/src/assessment/`](../../crates/lfg-core/src/assessment/), and
+`assess_with_model` in `mod.rs` runs them in this order:
+
+| Step | Module | What it decides |
+| --- | --- | --- |
+| 1 | `intent.rs` | Intents and sensitive content matched, the primary intent or the fallback |
+| 2 | `complexity.rs` | The points formula, the rule bracket, and the trained model's bracket when one is bound |
+| 3 | `agents.rs` | Total agents: tasks found, kept within the chosen bracket's range |
+| 4 | `models.rs`, `subscriptions.rs` | Which subscriptions are usable and which known model suits the bracket's role |
+| 5 | `reasons.rs` | The reason identifiers SWAG and RRFlow read, in a fixed order |
+
+Shared pieces are `config.rs` (every word, weight and bracket), `text.rs`
+(whole-word matching and task clauses), `knowledge.rs` (what was learned about
+models) and `trained_level.rs` (the trained model's binding and output).
+[`tests/assessment_golden.rs`](../../crates/lfg-core/tests/assessment_golden.rs)
+pins every field of the assessment for a set of prompts, run with no knowledge,
+with learned knowledge, and through the trained-model path, so a change to the
+layout cannot silently change what LFG reports.
 
 ## The formula
 
