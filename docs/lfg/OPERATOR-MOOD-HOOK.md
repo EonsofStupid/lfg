@@ -57,7 +57,25 @@ On the 1,270 prompts in the private scorecard (10 November 2026):
 - **Persistence:** after a frustrated prompt, the next prompt in the same
   session is also frustrated 56% of the time; after a calm one, 18%.
 
-Lowering that 56% is the measure of whether the guidance works. Use the journal
+**Revision `baseline-2` (13 November 2026).** In use, the all-caps rule fired on
+the instruction blocks that apps insert into a prompt, such as the browser
+extension's text with words like `IMPORTANT` and `ALWAYS`. Every such prompt of
+about 4,200 characters in four sessions read as frustrated, while the
+operator's own words read as calm. Two changes:
+
+- **Inserted blocks:** the contents of tags listed in `insertedBlocks`, such as
+  `browser_instruction` and `system-reminder`, are removed before reading. A
+  block cut off by the length limit runs to the end of the text.
+- **Share of words:** all-caps words count as shouting only when they are also
+  at least `minShare` (20%) of the prompt's words, so a few project names in a
+  long message do not count.
+
+On the same 1,270 prompts, 273 read as frustrated instead of 325, and 52
+readings changed: 51 to calm and 1 to positive. After a frustrated reading the
+next prompt is frustrated 59% of the time, against 55% for `baseline-1`, and
+18% after a calm one.
+
+Lowering that persistence rate is the measure of whether the guidance works. Use the journal
 and the transcripts to compare sessions before and after the hook is installed.
 
 ## Install

@@ -1,7 +1,8 @@
 {
   "schemaVersion": "lfg.operator-mood.v1",
-  "revision": "baseline-1",
+  "revision": "baseline-2",
   "maxTextBytes": 65536,
+  "insertedBlocks": ["browser_instruction", "system-reminder", "system_reminder", "ide_selection", "ide_opened_file", "pasted_content", "command-message", "command-name", "command-args", "local-command-stdout", "task-notification"],
   "frustration": [
     {"id": "profanity", "pattern": "\\bf+u+c+k|\\bwtf\\b|\\bshit|\\bdamn"},
     {"id": "why-you", "pattern": "\\bwhy (are|aren'?t|did|didn'?t|is|isn'?t|do|don'?t|would|the hell) you\\b"},
@@ -17,6 +18,7 @@
   ],
   "capsBurst": {
     "minWords": 2,
+    "minShare": 0.2,
     "minLength": 3,
     "ignore": ["AGENTS", "AI", "API", "CI", "CLI", "CPU", "CSS", "GPU", "HTML", "HTTP", "JSON", "LFG", "LLM", "MCP", "ONNX", "PR", "RAM", "README", "SDK", "SQL", "SSH", "SWAG", "TODO", "TOML", "UI", "URL", "USB", "WSL", "YAML"]
   },

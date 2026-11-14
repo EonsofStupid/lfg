@@ -25,6 +25,10 @@ pub struct MoodPattern {
 pub struct CapsBurst {
     /// How many all-caps words, outside `ignore`, count as shouting.
     pub min_words: usize,
+    /// The share of the prompt's words that must be all-caps as well, so a few
+    /// project names or headings in a long message are not shouting.
+    #[serde(default)]
+    pub min_share: f64,
     pub min_length: usize,
     pub ignore: Vec<String>,
 }
@@ -42,6 +46,11 @@ pub struct OperatorMoodFile {
     pub schema_version: String,
     pub revision: String,
     pub max_text_bytes: usize,
+    /// Tags of blocks that apps insert into a prompt, such as browser or IDE
+    /// instructions. Their contents are not the operator's words, so they are
+    /// removed before reading.
+    #[serde(default)]
+    pub inserted_blocks: Vec<String>,
     pub frustration: Vec<MoodPattern>,
     pub positive: Vec<MoodPattern>,
     pub caps_burst: CapsBurst,
@@ -55,6 +64,7 @@ pub struct OperatorMood {
     positive: Vec<(String, Regex)>,
     caps: Regex,
     ignore: BTreeSet<String>,
+    inserted: Option<Regex>,
 }
 
 /// One reading of a prompt: `frustrated`, `positive` or `neutral`, with the
@@ -106,6 +116,14 @@ impl OperatorMood {
             || file.caps_burst.min_words == 0
             || file.caps_burst.min_length < 2
             || file.caps_burst.min_length > 32
+            || !(0.0..=1.0).contains(&file.caps_burst.min_share)
+            || file.inserted_blocks.iter().any(|tag| {
+                tag.is_empty()
+                    || tag.len() > 64
+                    || !tag
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
             || file.guidance.frustrated.trim().is_empty()
             || file.guidance.frustrated.chars().count() > MAX_GUIDANCE_CHARS
         {
@@ -117,12 +135,31 @@ impl OperatorMood {
         let caps = Regex::new(&format!(r"\b[A-Z]{{{},}}\b", file.caps_burst.min_length))
             .map_err(|e| e.to_string())?;
         let ignore = file.caps_burst.ignore.iter().cloned().collect();
+        // A block runs from its opening tag to its closing tag, or to the end of
+        // the text when the closing tag was cut off.
+        let inserted = (!file.inserted_blocks.is_empty())
+            .then(|| {
+                let blocks: Vec<String> = file
+                    .inserted_blocks
+                    .iter()
+                    .map(|tag| {
+                        let tag = regex::escape(tag);
+                        format!(r"<{tag}(?:\s[^>]*)?>.*?(?:</{tag}>|\z)")
+                    })
+                    .collect();
+                RegexBuilder::new(&format!("(?s){}", blocks.join("|")))
+                    .size_limit(1 << 20)
+                    .build()
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
         Ok(Self {
             file,
             frustration,
             positive,
             caps,
             ignore,
+            inserted,
         })
     }
 
@@ -144,7 +181,11 @@ impl OperatorMood {
         while !text.is_char_boundary(end) {
             end -= 1;
         }
-        let text = &text[..end];
+        let text = match &self.inserted {
+            Some(inserted) => inserted.replace_all(&text[..end], " "),
+            None => std::borrow::Cow::Borrowed(&text[..end]),
+        };
+        let text = text.as_ref();
         let mut signals: Vec<String> = self
             .frustration
             .iter()
@@ -156,7 +197,10 @@ impl OperatorMood {
             .find_iter(text)
             .filter(|word| !self.ignore.contains(word.as_str()))
             .count();
-        if shouted >= self.file.caps_burst.min_words {
+        let words = text.split_whitespace().count();
+        if shouted >= self.file.caps_burst.min_words
+            && shouted as f64 >= self.file.caps_burst.min_share * words as f64
+        {
             signals.push("caps-burst".into());
         }
         if !signals.is_empty() {
@@ -246,6 +290,35 @@ mod tests {
         value["guidance"]["frustrated"] = serde_json::json!("ok");
         value["extra"] = serde_json::json!(true);
         assert!(OperatorMood::from_json_str(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn inserted_blocks_and_scattered_capitals_are_not_shouting() {
+        let mood = OperatorMood::bundled();
+        let block = "<browser_instruction># Browser
+IMPORTANT: ALWAYS capture extra frames.                      IMPORTANT: Do NOT trigger alerts.</browser_instruction>";
+        assert_eq!(mood.read(&format!("{block}resume")).state, "neutral");
+        assert_eq!(
+            mood.read(&format!("<system-reminder>STOP NOW</system-reminder>yes"))
+                .state,
+            "neutral"
+        );
+        // A block cut off by the length limit is still removed.
+        assert_eq!(
+            mood.read("ok <browser_instruction>NEVER EVER DO THIS")
+                .state,
+            "neutral"
+        );
+        // Project names in a long, calm message are not shouting.
+        let calm = format!(
+            "We want COSTAR suggestions to work with RRFLOW. {}",
+            "The burst reads the draft and offers the missing slot. ".repeat(4)
+        );
+        assert_eq!(mood.read(&calm).state, "neutral");
+        // The operator's own shouting outside a block still counts.
+        let angry = mood.read(&format!("{block}WHY IS THIS STILL BROKEN"));
+        assert_eq!(angry.state, "frustrated");
+        assert!(angry.signals.contains(&"caps-burst".to_string()));
     }
 
     #[test]
