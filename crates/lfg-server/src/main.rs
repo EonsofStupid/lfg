@@ -11,6 +11,7 @@ mod kernel_journal;
 mod kernel_predict;
 #[cfg(feature = "owned-byte-onnx")]
 mod owned_byte;
+mod prompt_hook;
 use kernel_journal::Journal;
 #[cfg(feature = "onnx-shadow")]
 use lfg_server::{exemplar_suggest, onnx_embedding};
@@ -29,6 +30,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Answer a prompt-submit hook (Claude Code, Codex, Gemini CLI, Kimi Code): when the prompt reads as
+    /// frustrated, add grounding context for the agent. Never blocks a prompt.
+    PromptHook {
+        /// The hook's client: `claude`, `codex` or `gemini` (JSON context) or `kimi` (plain text).
+        #[arg(long)]
+        client: String,
+        /// Append a prompt-free reading to this local JSONL journal (or set LFG_MOOD_JOURNAL).
+        #[arg(long)]
+        journal: Option<PathBuf>,
+    },
     /// Collect configured local project evidence and prepare authored boundary questions.
     BoundaryProject {
         #[arg(long)]
@@ -677,6 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             prompt_file,
         } => lfg_bench(iterations, prompt_file)?,
         Command::Serve { bind } => serve(bind).await?,
+        Command::PromptHook { client, journal } => prompt_hook::run(&client, journal),
         Command::DevLog {
             server,
             output,
